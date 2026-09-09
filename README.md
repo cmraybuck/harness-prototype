@@ -177,7 +177,9 @@ update relevant model instructions, and add tests for meaningful success and fai
 paths. Agents must obtain test authorization before running them.
 Update this README when the interface or limits change. Before adding writes or
 commands, define allowed targets, validation, timeouts, output limits, and recovery
-for uncertain effects. See `AGENTS.md` for contributor guidance.
+for uncertain effects. See `AGENTS.md` for contributor guidance and
+[`docs/ISSUE_WORKFLOW.md`](docs/ISSUE_WORKFLOW.md) for issue structure,
+dependencies, and roadmap maintenance.
 
 ## Disclaimer
 This codebase was created with the assistance of AI-powered coding agents, including OpenAI Codex and Google Gemini.
