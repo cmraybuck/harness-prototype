@@ -21,6 +21,11 @@ window, or tool-round limit. Environment variables override `.env`, then built-i
 defaults apply. Restart after changes. Settings are validated at startup; keep
 personal settings in the Git-ignored `.env`.
 
+For team access to an Ollama host over Tailscale, follow
+[`docs/LOCAL_LLM_CONNECTION.md`](docs/LOCAL_LLM_CONNECTION.md). It covers host
+forwarding, least-privilege access, teammate setup, the local-file data boundary,
+troubleshooting, and offboarding.
+
 Defaults: local server `http://127.0.0.1:11434`, model `devstral-small-2:latest`,
 temperature `0.15`, context window `4096`, and eight model/tool rounds per turn.
 
