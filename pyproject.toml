@@ -1,0 +1,17 @@
+[project]
+name = "harness-prototype"
+version = "0.1.0"
+readme = "README.md"
+
+requires-python = ">=3.12"
+dependencies = [
+    "ollama>=0.6.2",
+    "python-dotenv>=1.2.3",
+]
+
+[project.scripts]
+harness-prototype = "harness_prototype.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

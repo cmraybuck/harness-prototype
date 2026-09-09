@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Developer-local settings
+.env
+.env.*
+!.env.example
+
+# Local evaluation transcripts
+work/
