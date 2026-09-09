@@ -27,12 +27,12 @@ forwarding, least-privilege access, teammate setup, the local-file data boundary
 troubleshooting, and offboarding.
 
 After a teammate has installed Git and cloned this repository, copy the example
-configuration, set the team-shared remote host and the teammate's own optional
-Tailscale account, and run the Windows setup:
+configuration, set the team-shared remote host IPv4 address and the optional
+Tailscale profile that can reach it, and run the Windows setup:
 
 ```powershell
 Copy-Item .env.example .env
-# Set HARNESS_OLLAMA_HOST and, when needed, HARNESS_TAILSCALE_ACCOUNT in .env.
+# Set HARNESS_OLLAMA_HOST and, when needed, HARNESS_TAILSCALE_PROFILE in .env.
 .\setup.ps1
 uv run harness-prototype
 ```
@@ -43,13 +43,15 @@ dependencies. Command-line parameters can override and update its connection
 values; for example:
 
 ```powershell
-.\setup.ps1 -OllamaHost http://HOST_DEVICE_NAME:11434 -Launch
+.\setup.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
 ```
 
 The host can be prepared with
-`.\setup-host.ps1` after its `.env` is configured. The host script starts Ollama
-when its local API is offline. Tailscale may require approval through Windows and
-browser authentication. The scripts do not change tailnet policy.
+`.\setup-host.ps1` after its `.env` is configured. The host script installs Ollama
+and Tailscale through Winget when needed, starts Ollama when its local API is
+offline, downloads the configured model, and creates the private forwarding rule.
+Tailscale may require approval through Windows and browser authentication. The
+scripts do not change tailnet policy.
 
 If Windows policy blocks a script, inspect it with `Get-ExecutionPolicy -List`
 and follow the organization's approved PowerShell policy. For an unmanaged
@@ -134,7 +136,7 @@ The current read-only tools are not a sandbox for future write or execution tool
 | `src/harness_prototype/files.py` | Directory listing, bounded recursive search, and text reading |
 | `src/harness_prototype/config.py` | Validated configuration |
 | `setup.ps1` | Windows teammate prerequisite checks, remote Ollama validation, and local setup |
-| `setup-host.ps1` | Windows Ollama host validation, model installation, and Tailscale Serve setup |
+| `setup-host.ps1` | Windows Ollama and Tailscale installation, model installation, and Tailscale Serve setup |
 | `stop-host.ps1` | Stops Ollama and disconnects the Windows host from Tailscale |
 | `evaluate.py`, `tests/` | Live-model scenarios and deterministic checks |
 

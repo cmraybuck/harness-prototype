@@ -2,7 +2,7 @@
 param(
     [string]$OllamaHost,
     [string]$Model,
-    [string]$TailscaleAccount,
+    [string]$TailscaleProfile,
     [switch]$Launch
 )
 
@@ -46,10 +46,15 @@ function Get-OllamaBaseUrl {
 }
 
 function Update-ProcessPath {
-    <# Refresh PATH so commands installed during this run are immediately visible. #>
+    <# Add persisted PATH entries without discarding this session's entries. #>
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path = "$machinePath;$userPath"
+    $pathEntries = @($env:Path, $machinePath, $userPath) |
+        Where-Object { $_ } |
+        ForEach-Object { $_ -split ";" } |
+        Where-Object { $_ } |
+        Select-Object -Unique
+    $env:Path = $pathEntries -join ";"
 }
 
 function Install-RequiredCommand {
@@ -61,24 +66,26 @@ function Install-RequiredCommand {
     )
 
     if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
+    Update-ProcessPath
+    if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         throw "$DisplayName is missing and Windows Package Manager (winget) is unavailable. Install $DisplayName manually and rerun this script."
     }
 
     Write-Host "Installing $DisplayName..."
     & winget install --id $PackageId -e --source winget --accept-package-agreements --accept-source-agreements | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "winget could not install $DisplayName." }
+    $installExitCode = $LASTEXITCODE
     Update-ProcessPath
-    if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
-        throw "$DisplayName was installed, but '$Command' is not available yet. Open a new PowerShell window and rerun this script."
-    }
+    if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
+    if ($installExitCode -ne 0) { throw "winget could not install $DisplayName, and '$Command' is not available." }
+    throw "$DisplayName was installed, but '$Command' is not available yet. Open a new PowerShell window and rerun this script."
 }
 
-function Select-TailscaleAccount {
-    <# Switch to an optional previously authenticated Tailscale account. #>
+function Select-TailscaleProfile {
+    <# Switch this computer to an optional previously authenticated Tailscale account. #>
     param([string]$Account)
     if (-not $Account) { return }
-    Write-Host "Selecting Tailscale account $Account..."
+    Write-Host "Selecting this computer's Tailscale account $Account..."
     & tailscale switch $Account | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Tailscale could not switch to '$Account'. Sign in to that account, then rerun this script."
@@ -118,14 +125,14 @@ $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExa
 $dotEnv = Import-DotEnv $settingsPath
 $baseUrl = Get-OllamaBaseUrl (Get-SetupValue $OllamaHost "HARNESS_OLLAMA_HOST" $dotEnv "http://127.0.0.1:11434")
 $selectedModel = Get-SetupValue $Model "HARNESS_MODEL" $dotEnv "devstral-small-2:latest"
-$selectedAccount = Get-SetupValue $TailscaleAccount "HARNESS_TAILSCALE_ACCOUNT" $dotEnv ""
+$selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
 $hostName = ([System.Uri]$baseUrl).Host
 
 Install-RequiredCommand "tailscale" "Tailscale.Tailscale" "Tailscale"
 Install-RequiredCommand "uv" "astral-sh.uv" "uv"
 Write-Host "Checking Tailscale connection..."
 Connect-Tailscale
-Select-TailscaleAccount $selectedAccount
+Select-TailscaleProfile $selectedProfile
 Connect-Tailscale
 
 if ($hostName -notin @("127.0.0.1", "localhost", "::1")) {
@@ -151,7 +158,7 @@ if (Test-Path -LiteralPath $envPath) {
 }
 $envContent = Set-DotEnvValue $envContent "HARNESS_OLLAMA_HOST" $baseUrl
 $envContent = Set-DotEnvValue $envContent "HARNESS_MODEL" $selectedModel
-if ($selectedAccount) { $envContent = Set-DotEnvValue $envContent "HARNESS_TAILSCALE_ACCOUNT" $selectedAccount }
+if ($selectedProfile) { $envContent = Set-DotEnvValue $envContent "HARNESS_TAILSCALE_PROFILE" $selectedProfile }
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 [System.IO.File]::WriteAllText($envPath, $envContent, $utf8WithoutBom)
 

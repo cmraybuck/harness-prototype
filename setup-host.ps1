@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$TailscaleAccount,
+    [string]$TailscaleProfile,
     [string]$Model,
     [string]$LocalOllamaHost,
     [Nullable[int]]$ServePort
@@ -33,19 +33,47 @@ function Get-SetupValue {
     return $Default
 }
 
-function Assert-CommandAvailable {
-    <# Stop with an actionable message when a required command is unavailable. #>
-    param([string]$Name, [string]$InstallUrl)
-    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
-        throw "'$Name' is required. Install it from $InstallUrl, open a new PowerShell window, and rerun this script."
-    }
+function Update-ProcessPath {
+    <# Add persisted PATH entries without discarding this session's entries. #>
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $pathEntries = @($env:Path, $machinePath, $userPath) |
+        Where-Object { $_ } |
+        ForEach-Object { $_ -split ";" } |
+        Where-Object { $_ } |
+        Select-Object -Unique
+    $env:Path = $pathEntries -join ";"
 }
 
-function Select-TailscaleAccount {
-    <# Switch to an optional previously authenticated Tailscale account. #>
+function Install-RequiredCommand {
+    <# Install a missing Windows command from the public winget repository. #>
+    param(
+        [string]$Command,
+        [string]$PackageId,
+        [string]$DisplayName
+    )
+
+    if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
+    Update-ProcessPath
+    if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "$DisplayName is missing and Windows Package Manager (winget) is unavailable. Install $DisplayName manually and rerun this script."
+    }
+
+    Write-Host "Installing $DisplayName..."
+    & winget install --id $PackageId -e --source winget --accept-package-agreements --accept-source-agreements | Out-Host
+    $installExitCode = $LASTEXITCODE
+    Update-ProcessPath
+    if (Get-Command $Command -ErrorAction SilentlyContinue) { return }
+    if ($installExitCode -ne 0) { throw "winget could not install $DisplayName, and '$Command' is not available." }
+    throw "$DisplayName was installed, but '$Command' is not available yet. Open a new PowerShell window and rerun this script."
+}
+
+function Select-TailscaleProfile {
+    <# Switch this computer to an optional previously authenticated Tailscale account. #>
     param([string]$Account)
     if (-not $Account) { return }
-    Write-Host "Selecting Tailscale account $Account..."
+    Write-Host "Selecting this computer's Tailscale account $Account..."
     & tailscale switch $Account | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Tailscale could not switch to '$Account'. Sign in to that account, then rerun this script."
@@ -116,7 +144,7 @@ $envPath = Join-Path $projectRoot ".env"
 $envExamplePath = Join-Path $projectRoot ".env.example"
 $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExamplePath }
 $dotEnv = Import-DotEnv $settingsPath
-$selectedAccount = Get-SetupValue $TailscaleAccount "HARNESS_TAILSCALE_ACCOUNT" $dotEnv ""
+$selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
 $selectedModel = Get-SetupValue $Model "HARNESS_MODEL" $dotEnv "devstral-small-2:latest"
 $localBaseUrl = Assert-BaseUrl (Get-SetupValue $LocalOllamaHost "HARNESS_OLLAMA_LOCAL_HOST" $dotEnv "http://127.0.0.1:11434")
 $portValue = if ($null -ne $ServePort) { [string]$ServePort } else { Get-SetupValue "" "HARNESS_TAILSCALE_SERVE_PORT" $dotEnv "11434" }
@@ -124,9 +152,9 @@ try { $configuredPort = [int]$portValue }
 catch { throw "HARNESS_TAILSCALE_SERVE_PORT must be a whole number between 1 and 65535." }
 if ($configuredPort -lt 1 -or $configuredPort -gt 65535) { throw "HARNESS_TAILSCALE_SERVE_PORT must be between 1 and 65535." }
 
-Assert-CommandAvailable "ollama" "https://ollama.com/download"
-Assert-CommandAvailable "tailscale" "https://tailscale.com/download/windows"
-Select-TailscaleAccount $selectedAccount
+Install-RequiredCommand "ollama" "Ollama.Ollama" "Ollama"
+Install-RequiredCommand "tailscale" "Tailscale.Tailscale" "Tailscale"
+Select-TailscaleProfile $selectedProfile
 Write-Host "Checking Tailscale connection..."
 Connect-Tailscale
 
@@ -145,9 +173,8 @@ if ($LASTEXITCODE -ne 0) { throw "Tailscale could not create the Serve rule." }
 if ($LASTEXITCODE -ne 0) { throw "Tailscale could not confirm the Serve rule." }
 
 $status = & tailscale status --json | ConvertFrom-Json
-$dnsName = $status.Self.DNSName.TrimEnd(".")
 $tailscaleIp = @($status.TailscaleIPs | Where-Object { $_ -match "\." }) | Select-Object -First 1
-Write-Host "Host setup complete. Configure teammates with one of:"
-if ($dnsName) { Write-Host "  HARNESS_OLLAMA_HOST=http://${dnsName}:$configuredPort" }
-if ($tailscaleIp) { Write-Host "  HARNESS_OLLAMA_HOST=http://${tailscaleIp}:$configuredPort" }
+if (-not $tailscaleIp) { throw "Tailscale did not report an IPv4 address for this host." }
+Write-Host "Host setup complete. Configure teammates with:"
+Write-Host "  HARNESS_OLLAMA_HOST=http://${tailscaleIp}:$configuredPort"
 Write-Host "Review the tailnet Grant separately so only approved users can reach TCP port $configuredPort."

@@ -30,13 +30,13 @@ Copy-Item .env.example .env
 .\setup-host.ps1
 ```
 
-The script checks Ollama and Tailscale, optionally switches to the configured
-previously authenticated account, and runs `tailscale up` when disconnected. It
-then starts the loopback Ollama API when needed, pulls the configured model,
-creates the private TCP Serve rule, and prints the URL teammates should use. It
-intentionally does not install desktop applications, perform a new Tailscale
-sign-in, or edit the centralized tailnet Grant. The manual steps below explain
-those prerequisites and security decisions.
+The script installs missing copies of Ollama and Tailscale through Windows Package
+Manager, optionally switches to the configured previously authenticated profile,
+and runs `tailscale up` when disconnected. It then starts the loopback Ollama API
+when needed, pulls the configured model, creates the private TCP Serve rule, and
+prints the URL teammates should use. It does not edit the centralized tailnet
+Grant. Tailscale may still require browser authentication after installation. The
+manual steps below explain the same setup and the required security decisions.
 
 The provisioning values are kept in the Git-ignored `.env`. Some are shared by
 the team, while the account selection belongs to the individual computer:
@@ -45,19 +45,21 @@ the team, while the account selection belongs to the individual computer:
 | --- | --- | --- | --- |
 | `HARNESS_OLLAMA_HOST` | Same for all teammates | Teammate script and harness | Reachable base URL printed by the host script |
 | `HARNESS_MODEL` | Same for host and teammates | Both scripts and harness | Exact model to pull on the host and request from teammates |
-| `HARNESS_TAILSCALE_ACCOUNT` | Per computer/person | Both scripts | Optional remembered Tailscale login to select; each teammate normally uses their own email, while an empty value keeps the active account |
+| `HARNESS_TAILSCALE_PROFILE` | Per computer | Both scripts | Optional entry from `tailscale switch --list` that can reach the Ollama host. An empty value keeps the active profile. |
 | `HARNESS_OLLAMA_LOCAL_HOST` | Host only | Host script | Loopback-only Ollama API forwarded by Tailscale |
 | `HARNESS_TAILSCALE_SERVE_PORT` | Host only; reflected in the shared host URL | Host script | Private tailnet TCP port exposed by Tailscale Serve |
 
 Command-line parameters override these values for one run; for example,
-`.\setup-host.ps1 -TailscaleAccount user@example.com -ServePort 11435`.
+`.\setup-host.ps1 -TailscaleProfile user@example.com -ServePort 11435`.
 Account names are identifiers only—the scripts never collect passwords or
 authentication keys.
 
-### 1. Install Ollama and the model
+### 1. Install Ollama and the model manually
 
-Install Ollama for Windows from <https://ollama.com/download>, open a new
-PowerShell window, and confirm the service is running:
+`setup-host.ps1` installs Ollama through Winget when it is missing. If Winget is
+unavailable or blocked by organizational policy, install Ollama for Windows from
+<https://ollama.com/download>, open a new PowerShell window, and confirm the
+service is running:
 
 ```powershell
 ollama --version
@@ -81,19 +83,21 @@ curl.exe --max-time 15 http://127.0.0.1:11434/api/tags
 Keep Ollama on its default loopback address. Do not set `OLLAMA_HOST` to
 `0.0.0.0`, create a router port-forwarding rule, or expose port `11434` publicly.
 
-### 2. Install and connect Tailscale
+### 2. Install and connect Tailscale manually
 
-Install Tailscale from <https://tailscale.com/download/windows>, sign in, and
-confirm the host is connected:
+`setup-host.ps1` also installs Tailscale through Winget when it is missing. If a
+manual installation is required, install Tailscale from
+<https://tailscale.com/download/windows>, sign in, and confirm the host is
+connected:
 
 ```powershell
 tailscale status
 tailscale ip -4
 ```
 
-The second command prints the host's private `100.x.x.x` address. If MagicDNS is
-enabled, teammates can instead use the stable device name shown by
-`tailscale status`.
+The second command prints the host's private `100.x.x.x` address. Use this IPv4
+address for `HARNESS_OLLAMA_HOST`; Ollama may reject a MagicDNS name in the HTTP
+`Host` header even when that name resolves and Tailscale connectivity works.
 
 Invite only the teammates who need access. Depending on how the team manages its
 tailnet, either invite them as tailnet users or share only this host with them.
@@ -171,18 +175,17 @@ Copy-Item .env.example .env
 ### 2. Configure and run the teammate setup
 
 Open `.env` and set the team-shared Ollama address and model. Set
-`HARNESS_TAILSCALE_ACCOUNT` to this teammate's previously authenticated login
-when the computer has multiple remembered accounts; otherwise leave it empty:
+`HARNESS_TAILSCALE_PROFILE` to the entry from `tailscale switch --list` whose
+tailnet contains or has access to the Ollama host; otherwise leave it empty:
 
 ```dotenv
-HARNESS_OLLAMA_HOST=http://HOST_DEVICE_NAME:11434
+HARNESS_OLLAMA_HOST=http://HOST_TAILSCALE_IP:11434
 HARNESS_MODEL=devstral-small-2:latest
-HARNESS_TAILSCALE_ACCOUNT=teammate@example.com
+HARNESS_TAILSCALE_PROFILE=profile@example.com
 ```
 
-If MagicDNS is unavailable, replace `HOST_DEVICE_NAME` with the host's private
-`100.x.x.x` address. The host value must be only the HTTP base address; do not
-append `/api/tags`, `/api/chat`, or another API path.
+Use the host's private `100.x.x.x` Tailscale address. The host value must be only
+the HTTP base address; do not append `/api/tags`, `/api/chat`, or another API path.
 
 Run the setup:
 
@@ -199,11 +202,11 @@ sign in with the identity the host owner authorized if Tailscale opens a browser
 If prompted to select a tailnet, choose the team's tailnet.
 
 Add `-Launch` to start the harness immediately. The `-OllamaHost`, `-Model`, and
-`-TailscaleAccount` parameters override `.env` for that run and save the selected
+`-TailscaleProfile` parameters override `.env` for that run and save the selected
 values back to it. For example:
 
 ```powershell
-.\setup.ps1 -OllamaHost http://HOST_DEVICE_NAME:11434 -Launch
+.\setup.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
 ```
 
 If Windows blocks the script because of its execution policy, inspect the active
@@ -221,21 +224,19 @@ configured model. Equivalent manual checks are:
 
 ```powershell
 tailscale status
-tailscale ping HOST_DEVICE_NAME
+tailscale ping HOST_TAILSCALE_IP
 ```
 
 For installations connected to multiple accounts, use `tailscale switch --list`
-and `tailscale switch user@example.com` to select the correct one.
+and `tailscale switch user@example.com` to select the teammate's own account.
+Do not sign a teammate's computer into the host owner's account. Instead, invite
+the teammate to the host's tailnet or share the Ollama host with their Tailscale
+identity, wait for them to accept, and grant that identity access to TCP port
+`11434`.
 
 ### 3. Verify the Ollama connection manually when needed
 
-Use the host's MagicDNS device name when available:
-
-```powershell
-curl.exe --max-time 15 http://HOST_DEVICE_NAME:11434/api/tags
-```
-
-If the name does not resolve, use the host's private Tailscale IPv4 address:
+Use the host's private Tailscale IPv4 address:
 
 ```powershell
 curl.exe --max-time 15 http://HOST_TAILSCALE_IP:11434/api/tags
@@ -260,8 +261,8 @@ file is ignored by Git and should not be committed.
 
 ### The host does not appear
 
-- Confirm the teammate signed in with the authorized identity and selected the
-  correct tailnet.
+- Confirm the teammate is using their own identity, has accepted the tailnet or
+  machine-share invitation, and selected the tailnet/profile containing the host.
 - Check `tailscale switch --list` on the teammate's computer.
 - Confirm in the Tailscale admin console that the invitation was accepted and the
   correct device is connected.
@@ -279,7 +280,7 @@ tailscale serve status
 On the teammate's computer, run:
 
 ```powershell
-curl.exe --verbose --max-time 15 http://HOST_DEVICE_NAME:11434/api/tags
+curl.exe --verbose --max-time 15 http://HOST_TAILSCALE_IP:11434/api/tags
 ```
 
 If the local Ollama request works but the remote request fails, review both the
