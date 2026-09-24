@@ -10,7 +10,7 @@ from ollama import Client
 from harness_prototype.agent_loop import new_conversation, run_turn
 from harness_prototype.config import load_settings
 
-
+# small change here
 def main() -> None:
     """Evaluate isolated prompts against a disposable, known sample project."""
     parser = argparse.ArgumentParser(description=__doc__)
