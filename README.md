@@ -1,6 +1,6 @@
 # Harness
 
-A terminal assistant powered by Ollama with read-only tools to list, find, and read
+A terminal assistant powered by Ollama with read-only tools to list, find, search, and read
 local files. It cannot edit files or run commands.
 
 ## Run
@@ -91,6 +91,7 @@ are no folder aliases: `desktop` means a relative folder named `desktop`, and
 | `get_location(location)` | Resolves one supported location (`working_directory`, `home`, `desktop`, `documents`, `downloads`, `pictures`, `music`, or `videos`) to an existing absolute directory. Location values are trimmed and case-folded; failures concern only that location. |
 | `list_files(path=".", offset=0, max_entries=100)` | Lists sorted immediate names, including hidden entries; folders end in `/`. Continue with `next_offset` when `truncated=true`. |
 | `find_files(pattern, root=".", max_results=100)` | Matches filenames case-insensitively, including wildcards such as `*.py`. A plain extensionless name prefers exact matches and otherwise matches that name with any extension. Returns absolute `matches`, resolved `root`, `extension_inferred`, `complete`, `stop_reason`, `skipped_links`, and `errors`. |
+| `search_project(text, path=".", file_pattern="*", max_results=100)` | Searches nested UTF-8 files for case-sensitive literal text. `path` must be relative to the working directory and may name a file or directory; `file_pattern` is a case-insensitive filename wildcard. Returns workspace-relative paths, one-based line numbers, excerpts, counts, skipped-file categories, errors, and explicit `complete`/`stop_reason` status. |
 | `read_file(path, start_line=1, max_lines=100)` | Returns numbered UTF-8 text, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`. |
 
 Standard user-folder discovery uses Windows settings, including OneDrive redirection. Linux and other Unix-like systems consult XDG user-directory configuration and then existing conventional home folders; macOS uses existing conventional home folders. Missing or unavailable folders return errors, never guessed paths.
@@ -99,6 +100,7 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 
 - **Listing:** 1–100 entries and 4,000 characters of JSON-encoded entry text per page. Directories over 20,000 entries return an error before sorting. Offsets assume the directory has not changed.
 - **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 errors are returned. Narrow the root when limits are reached.
+- **Content search:** searches a workspace-relative file or directory, stopping at 1–100 matching lines (default 100), 20,000 entries, 8,000 JSON-encoded result characters, or a best-effort 10-second deadline. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem errors are returned; an error or runtime/output/traversal/result limit makes `complete=false`.
 - **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
 
 Individual filesystem operations may still block on a slow or unavailable drive.

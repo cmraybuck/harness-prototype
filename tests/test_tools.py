@@ -12,7 +12,7 @@ class ToolDispatchTests(unittest.TestCase):
         """Expose exactly the supported read-only tool set."""
         self.assertEqual(
             set(AVAILABLE_TOOLS),
-            {"get_location", "list_files", "find_files", "read_file"},
+            {"get_location", "list_files", "find_files", "search_project", "read_file"},
         )
 
     def test_rejects_unknown_tool_and_invalid_argument_shape(self) -> None:

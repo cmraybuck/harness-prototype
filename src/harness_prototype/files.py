@@ -12,6 +12,12 @@ MAX_FILE_BYTES = 1_048_576
 MAX_OUTPUT_CHARS = 8_000
 MAX_ENTRIES = 20_000
 SEARCH_SECONDS = 10
+SEARCH_OUTPUT_CHARS = 8_000
+EXCLUDED_SEARCH_DIRECTORIES = {
+    ".git", ".hg", ".mypy_cache", ".next", ".pytest_cache", ".ruff_cache",
+    ".svn", ".tox", ".venv", "__pycache__", "build", "coverage", "dist",
+    "node_modules", "target", "venv",
+}
 
 
 def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict:
@@ -126,6 +132,143 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
             if len(result["errors"]) < 20:
                 result["errors"].append(str(error))
     apply_inferred_matches()
+    return result
+
+
+def search_project(
+    text: str,
+    path: str = ".",
+    file_pattern: str = "*",
+    max_results: int = 100,
+) -> dict:
+    """Search nested UTF-8 project files for literal text.
+
+    Args:
+        text: Nonempty, case-sensitive literal text to find within a source line.
+        path: Workspace-relative file or directory to search. Absolute paths and
+            paths outside the process working directory are rejected.
+        file_pattern: Optional case-insensitive filename wildcard, such as
+            ``*.py``. It must be a filename pattern rather than a path.
+        max_results: Maximum matching lines to return, between 1 and 100.
+
+    Results include workspace-relative paths, one-based line numbers, and line
+    excerpts. Git metadata, common dependency/generated directories, links,
+    binary or non-UTF-8 files, and files over 1 MiB are skipped. Traversal,
+    runtime, result count, and JSON-encoded result text are bounded; ``complete``
+    and ``stop_reason`` distinguish exhaustive searches from partial results.
+    """
+    if not isinstance(text, str) or not text:
+        return {"ok": False, "error": "text must be a nonempty string."}
+    if "\n" in text or "\r" in text:
+        return {"ok": False, "error": "text must not contain a newline."}
+    if not isinstance(path, str) or not path.strip():
+        return {"ok": False, "error": "path must be a nonempty workspace-relative path."}
+    if Path(path).is_absolute():
+        return {"ok": False, "error": "path must be relative to the working directory."}
+    if (not isinstance(file_pattern, str) or not file_pattern
+            or any(character in file_pattern for character in "/\\")):
+        return {"ok": False, "error": "file_pattern must be a nonempty filename wildcard, not a path."}
+    if type(max_results) is not int or not 1 <= max_results <= 100:
+        return {"ok": False, "error": "max_results must be an integer between 1 and 100."}
+
+    try:
+        workspace = Path.cwd().resolve()
+        search_path = (workspace / path).resolve()
+        search_path.relative_to(workspace)
+        if not search_path.exists():
+            return {"ok": False, "error": f"Path does not exist: {search_path}"}
+        if not search_path.is_file() and not search_path.is_dir():
+            return {"ok": False, "error": f"Not a regular file or directory: {search_path}"}
+    except (OSError, ValueError) as error:
+        return {"ok": False, "error": str(error)}
+
+    result = {
+        "ok": True,
+        "workspace": str(workspace),
+        "path": search_path.relative_to(workspace).as_posix() or ".",
+        "matches": [],
+        "complete": True,
+        "stop_reason": None,
+        "files_searched": 0,
+        "skipped_files": {"excluded": 0, "binary_or_non_utf8": 0, "too_large": 0, "links": 0},
+        "errors": [],
+    }
+    deadline = time.monotonic() + SEARCH_SECONDS
+    visited = 0
+    output_size = 0
+    folded_pattern = file_pattern.casefold()
+    pending = deque([search_path])
+
+    def stop(reason: str) -> dict:
+        """Mark the search partial and return its accumulated evidence."""
+        result.update(complete=False, stop_reason=reason)
+        return result
+
+    while pending:
+        if time.monotonic() >= deadline:
+            return stop("time_limit")
+        current = pending.popleft()
+        try:
+            if current.is_symlink() or current.is_junction():
+                result["skipped_files"]["links"] += 1
+                continue
+            relative_parts = current.relative_to(workspace).parts
+            directory_parts = relative_parts if current.is_dir() else relative_parts[:-1]
+            if any(part.casefold() in EXCLUDED_SEARCH_DIRECTORIES for part in directory_parts):
+                result["skipped_files"]["excluded"] += 1
+                continue
+            if current.is_dir():
+                with os.scandir(current) as entries:
+                    children = sorted(entries, key=lambda entry: (entry.name.casefold(), entry.name))
+                for entry in children:
+                    visited += 1
+                    if visited > MAX_ENTRIES:
+                        return stop("entry_limit")
+                    pending.append(Path(entry.path))
+                continue
+            if not fnmatch.fnmatchcase(current.name.casefold(), folded_pattern):
+                continue
+            if current.stat().st_size > MAX_FILE_BYTES:
+                result["skipped_files"]["too_large"] += 1
+                continue
+            data = current.read_bytes()
+            if b"\x00" in data:
+                result["skipped_files"]["binary_or_non_utf8"] += 1
+                continue
+            try:
+                content = data.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                result["skipped_files"]["binary_or_non_utf8"] += 1
+                continue
+            result["files_searched"] += 1
+            lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            for line_number, line in enumerate(lines, 1):
+                if text not in line:
+                    continue
+                match_index = line.index(text)
+                excerpt_start = max(0, match_index - 200)
+                excerpt_end = min(len(line), match_index + len(text) + 200)
+                excerpt = line[excerpt_start:excerpt_end]
+                if excerpt_start:
+                    excerpt = "…" + excerpt
+                if excerpt_end < len(line):
+                    excerpt += "…"
+                match = {
+                    "path": current.relative_to(workspace).as_posix(),
+                    "line_number": line_number,
+                    "excerpt": excerpt,
+                }
+                encoded_size = len(json.dumps(match, ensure_ascii=False))
+                if output_size + encoded_size > SEARCH_OUTPUT_CHARS:
+                    return stop("output_limit")
+                result["matches"].append(match)
+                output_size += encoded_size
+                if len(result["matches"]) >= max_results:
+                    return stop("result_limit")
+        except OSError as error:
+            result["complete"] = False
+            if len(result["errors"]) < 20:
+                result["errors"].append(f"{current}: {error}")
     return result
 
 

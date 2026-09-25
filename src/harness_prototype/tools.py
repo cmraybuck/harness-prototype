@@ -2,7 +2,7 @@
 
 from inspect import signature
 
-from .files import find_files, list_files, read_file
+from .files import find_files, list_files, read_file, search_project
 from .locations import get_location
 
 
@@ -11,6 +11,7 @@ AVAILABLE_TOOLS = {
     "get_location": get_location,
     "list_files": list_files,
     "find_files": find_files,
+    "search_project": search_project,
     "read_file": read_file,
 }
 
