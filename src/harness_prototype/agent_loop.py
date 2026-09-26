@@ -4,11 +4,13 @@ from collections.abc import Callable
 from inspect import signature
 import json
 from pathlib import Path
+from time import monotonic
 
 from ollama import Client
 
 from .access import AccessChoice, PermissionPrompt, WorkspaceAccess
 from .config import CONTEXT_LENGTH, MAX_TOOL_ROUNDS, TEMPERATURE
+from .interaction_log import TurnLog
 from .tools import AVAILABLE_TOOLS, execute_tool
 
 SYSTEM_PROMPT = (
@@ -101,14 +103,34 @@ def run_turn(
     on_tool: Callable[[str], None],
     access: WorkspaceAccess | None = None,
     on_permission: PermissionPrompt | None = None,
-) -> None:
-    """Stream a reply, execute requested tools, and return results to the model."""
+    turn_log: TurnLog | None = None,
+) -> str:
+    """Stream a reply, execute requested tools, and return the turn outcome."""
     active_access = access or WorkspaceAccess(Path.cwd())
     permission_prompt = on_permission or deny_permission_by_default
     empty_response_retried = False
     rounds_remaining = MAX_TOOL_ROUNDS
     while rounds_remaining:
         check_context_budget(messages)
+        round_number = MAX_TOOL_ROUNDS - rounds_remaining + 1
+        if turn_log:
+            turn_log.add_event(
+                "model_request",
+                round=round_number,
+                model=model,
+                settings={
+                    "temperature": TEMPERATURE,
+                    "context_length": CONTEXT_LENGTH,
+                    "max_tool_rounds": MAX_TOOL_ROUNDS,
+                },
+                prompts=messages,
+                tool_schemas=[{
+                    "name": name,
+                    "signature": str(signature(tool)),
+                    "description": tool.__doc__ or "",
+                } for name, tool in AVAILABLE_TOOLS.items()],
+            )
+        request_started = monotonic()
         # Accumulate tool calls as well as text from the streamed response.
         content = ""
         tool_calls = []
@@ -124,6 +146,15 @@ def run_turn(
             on_text(text)
             tool_calls.extend(chunk.message.tool_calls or [])
 
+        if turn_log:
+            turn_log.add_event(
+                "model_response",
+                round=round_number,
+                duration_ms=round((monotonic() - request_started) * 1000, 3),
+                content=content,
+                tool_calls=[call.model_dump() for call in tool_calls],
+            )
+
         if not tool_calls and not content.strip():
             if not empty_response_retried:
                 empty_response_retried = True
@@ -138,7 +169,7 @@ def run_turn(
 
         if not tool_calls:
             messages.append({"role": "assistant", "content": content})
-            return
+            return "success"
 
         # Ollama needs the request and its results before generating a follow-up.
         messages.append({
@@ -148,6 +179,9 @@ def run_turn(
         })
         for index, call in enumerate(tool_calls):
             name = call.function.name
+            tool_started = monotonic()
+            if turn_log:
+                turn_log.add_event("tool_call", name=name, arguments=call.function.arguments)
             try:
                 on_tool(name)
                 result = None
@@ -162,24 +196,46 @@ def run_turn(
             except (Exception, KeyboardInterrupt):
                 # Pair every request with a result without claiming to undo effects.
                 for pending_index, pending in enumerate(tool_calls[index:]):
+                    pending_result = {
+                        "ok": False,
+                        "complete": False,
+                        "truncated": False,
+                        "status": "outcome_unknown" if pending_index == 0 else "not_executed",
+                        "error": "Tool exchange interrupted. Inspect state before retrying."
+                        if pending_index == 0 else "Skipped after an earlier tool interruption.",
+                    }
                     messages.append({
                         "role": "tool",
                         "tool_name": pending.function.name,
-                        "content": json.dumps({
-                            "ok": False,
-                            "complete": False,
-                            "truncated": False,
-                            "status": "outcome_unknown" if pending_index == 0 else "not_executed",
-                            "error": "Tool exchange interrupted. Inspect state before retrying."
-                            if pending_index == 0 else "Skipped after an earlier tool interruption.",
-                        }),
+                        "content": json.dumps(pending_result),
                     })
+                    if turn_log:
+                        if pending_index:
+                            turn_log.add_event(
+                                "tool_call",
+                                name=pending.function.name,
+                                arguments=pending.function.arguments,
+                            )
+                        turn_log.add_event(
+                            "tool_result",
+                            name=pending.function.name,
+                            duration_ms=round((monotonic() - tool_started) * 1000, 3)
+                            if pending_index == 0 else 0,
+                            result=pending_result,
+                        )
                 raise
             messages.append({
                 "role": "tool",
                 "tool_name": name,
                 "content": serialized,
             })
+            if turn_log:
+                turn_log.add_event(
+                    "tool_result",
+                    name=name,
+                    duration_ms=round((monotonic() - tool_started) * 1000, 3),
+                    result=result,
+                )
 
     # Preserve completed exchanges so the user can continue in a later turn.
     notice = (
@@ -188,3 +244,4 @@ def run_turn(
     )
     messages.append({"role": "assistant", "content": notice})
     on_text(notice)
+    return "tool_round_limit"

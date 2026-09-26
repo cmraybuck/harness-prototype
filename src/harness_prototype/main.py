@@ -14,7 +14,8 @@ from .agent_loop import (
     new_conversation,
     run_turn,
 )
-from .config import HOST, MODEL, MODELS
+from .config import HOST, LOG_DIRECTORY, LOG_REDACT_VALUES, MODEL, MODELS
+from .interaction_log import InteractionLogger
 
 
 MODEL_DESCRIPTIONS = {
@@ -198,6 +199,7 @@ def main() -> None:
     client = Client(host=HOST)
     access = WorkspaceAccess(Path.cwd())
     messages = new_conversation()
+    interaction_logger = InteractionLogger(LOG_DIRECTORY, LOG_REDACT_VALUES)
     ui.show_header(selected_model, HOST, Path.cwd())
 
     while True:
@@ -219,8 +221,11 @@ def main() -> None:
 
         turn_start = len(messages)
         messages.append({"role": "user", "content": user_input})
+        turn_log = interaction_logger.start_turn(user_input)
+        outcome = "failed"
+        error_detail = None
         try:
-            run_turn(
+            outcome = run_turn(
                 client=client,
                 model=selected_model,
                 messages=messages,
@@ -228,19 +233,31 @@ def main() -> None:
                 on_tool=ui.show_tool_call,
                 access=access,
                 on_permission=request_directory_access,
-            )
+                turn_log=turn_log,
+            ) or "success"
             ui.finish_response()
         except ContextBudgetError as error:
+            outcome = "context_limit"
+            error_detail = str(error)
             ui.show_notice("Context", str(error))
         except EmptyModelResponseError as error:
+            outcome = "model_error"
+            error_detail = str(error)
             recover_turn(messages, turn_start)
             ui.show_notice("Model error", f"Model response failed: {error}", "31")
         except ResponseError as error:
+            outcome = "model_error"
+            error_detail = f"{error.status_code} - {error.error}"
             recover_turn(messages, turn_start)
             ui.show_notice("Ollama", f"{error.status_code} - {error.error}", "31")
         except KeyboardInterrupt:
+            outcome = "cancelled"
+            error_detail = "Request cancelled."
             recover_turn(messages, turn_start)
             ui.show_notice("Cancelled", "Request cancelled.")
         except Exception as error:
+            error_detail = str(error)
             recover_turn(messages, turn_start)
             ui.show_notice("Error", f"Request failed: {error}", "31")
+        finally:
+            interaction_logger.finish_turn(turn_log, outcome, error_detail)

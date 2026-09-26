@@ -176,6 +176,33 @@ The estimate is not an exact tokenizer and cannot guarantee a request fits.
 There is no automatic compaction, disk-backed conversation recovery, or rollback.
 The current read-only tools are not a sandbox for future write or execution tools.
 
+## Interaction logs
+
+Each submitted prompt produces one append-only JSONL record in `work/logs` by
+default. `HARNESS_LOG_DIRECTORY` changes that location; relative paths start at
+the project root. A new, exclusively created file is used for every application
+session, so existing logs are never replaced. A logging setup or write failure
+does not interrupt the conversation or alter its retained history.
+
+Every line is a complete schema-version-1 JSON object with stable UUID
+`session_id` and `turn_id` values, UTC `started_at`/`finished_at` timestamps,
+`duration_ms`, `outcome`, an optional `error`, the user prompt, and an ordered
+`events` array. Events have a one-based `sequence`, timestamp, and type.
+`model_request` events contain the model, generation settings, complete prompts,
+and registered tool signatures/descriptions; `model_response` events contain
+text, calls, and duration; paired `tool_call` and `tool_result` events contain
+arguments, results, and duration. Failed, cancelled, context-limited, and
+tool-round-limited turns are recorded. Interrupted tool calls use
+`outcome_unknown`, while later calls in that batch use `not_executed`.
+
+Logs may contain prompts, model output, filenames, file contents, and tool
+arguments/results. Treat the directory as sensitive. To redact secrets, set
+`HARNESS_LOG_REDACT_VARIABLES` to comma-separated environment-variable names;
+each named variable must have a nonempty value, and every occurrence of that
+value in keys or values is replaced with `[REDACTED]` before writing. Redaction
+is literal substring replacement and is not a substitute for reviewing logs
+before sharing them.
+
 ## Code map
 
 | File | Responsibility |
@@ -189,6 +216,7 @@ The current read-only tools are not a sandbox for future write or execution tool
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
 | `src/harness_prototype/files.py` | Directory listing, bounded recursive search, and text reading |
 | `src/harness_prototype/config.py` | Validated configuration |
+| `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
 | `setup.ps1` | Windows teammate prerequisite checks, remote Ollama validation, and local setup |
 | `setup-host.ps1` | Windows Ollama and Tailscale installation, model installation, and Tailscale Serve setup |
 | `stop-host.ps1` | Stops Ollama and disconnects the Windows host from Tailscale |
