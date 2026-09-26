@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_prototype.tools import AVAILABLE_TOOLS, execute_tool
+from harness_prototype.approval import ToolCategory
+from harness_prototype.tools import AVAILABLE_TOOLS, TOOL_CATEGORIES, execute_tool
 
 
 class ToolDispatchTests(unittest.TestCase):
@@ -17,6 +18,11 @@ class ToolDispatchTests(unittest.TestCase):
             set(AVAILABLE_TOOLS),
             {"get_location", "list_files", "find_files", "search_project", "read_file"},
         )
+
+    def test_all_current_tools_are_explicitly_read_only(self) -> None:
+        """Assign every existing capability to the separately configurable read-only policy."""
+        self.assertEqual(set(TOOL_CATEGORIES), set(AVAILABLE_TOOLS))
+        self.assertEqual(set(TOOL_CATEGORIES.values()), {ToolCategory.READ_ONLY})
 
     def test_rejects_unknown_tool_and_invalid_argument_shape(self) -> None:
         """Return structured errors for invalid dispatch requests."""

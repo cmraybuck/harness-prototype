@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from harness_prototype.approval import ApprovalPolicy, ToolCategory
 from harness_prototype.config import load_settings
 
 
@@ -21,6 +22,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((settings.temperature, settings.context_length, settings.max_tool_rounds), (0.15, 4096, 8))
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
         self.assertEqual(settings.log_redact_values, ())
+        self.assertEqual(settings.approval_policies[ToolCategory.READ_ONLY], ApprovalPolicy.ALWAYS_ALLOW)
+        for category in set(ToolCategory) - {ToolCategory.READ_ONLY}:
+            self.assertEqual(settings.approval_policies[category], ApprovalPolicy.ASK_FIRST)
 
     def test_dotenv_and_environment_precedence(self):
         """Load quoted dotenv values and let explicit environment variables win."""
@@ -85,6 +89,20 @@ class ConfigTests(unittest.TestCase):
         """Prevent a misspelled secret name from silently producing unsafe logs."""
         with self.assertRaisesRegex(ValueError, "MISSING_SECRET"):
             load_settings(None, {"HARNESS_LOG_REDACT_VARIABLES": "MISSING_SECRET"})
+
+    def test_approval_policies_are_configurable_by_category(self) -> None:
+        """Load independent policy overrides for read-only and future risk categories."""
+        settings = load_settings(None, {
+            "HARNESS_READ_ONLY_POLICY": "deny",
+            "HARNESS_WRITE_POLICY": "always_allow",
+        })
+        self.assertEqual(settings.approval_policies[ToolCategory.READ_ONLY], ApprovalPolicy.DENY)
+        self.assertEqual(settings.approval_policies[ToolCategory.WRITE], ApprovalPolicy.ALWAYS_ALLOW)
+
+    def test_invalid_approval_policy_is_rejected(self) -> None:
+        """Reject policy typos rather than silently selecting a permissive behavior."""
+        with self.assertRaisesRegex(ValueError, "HARNESS_NETWORK_POLICY"):
+            load_settings(None, {"HARNESS_NETWORK_POLICY": "sometimes"})
 
 
 if __name__ == "__main__":

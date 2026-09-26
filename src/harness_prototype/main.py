@@ -1,5 +1,6 @@
 """Interactive terminal entry point."""
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -8,6 +9,7 @@ import sys
 from ollama import Client, ResponseError
 
 from .access import AccessChoice, WorkspaceAccess
+from .approval import ApprovalRequest
 from .agent_loop import (
     ContextBudgetError,
     EmptyModelResponseError,
@@ -174,6 +176,26 @@ def request_directory_access(directory: Path) -> AccessChoice:
         print("Please enter 1, 2, or 3.")
 
 
+def request_tool_approval(request: ApprovalRequest) -> bool:
+    """Ask whether one exact ask-first tool operation may execute."""
+    print("\nApproval required")
+    print(f"Category: {request.category.value}")
+    print(f"Tool: {request.tool_name}")
+    print("Arguments:")
+    print(json.dumps(request.arguments, ensure_ascii=False, indent=2, sort_keys=True))
+    while True:
+        try:
+            choice = input("Approve this operation? [y/N]: ").strip().casefold()
+        except (KeyboardInterrupt, EOFError):
+            print("\nOperation denied.")
+            return False
+        if choice in {"y", "yes"}:
+            return True
+        if choice in {"", "n", "no"}:
+            return False
+        print("Please enter y or n.")
+
+
 def recover_turn(messages: list, turn_start: int) -> None:
     """Keep recorded tool outcomes; discard failed turns that performed no tools."""
     if any(message["role"] == "tool" for message in messages[turn_start:]):
@@ -234,6 +256,7 @@ def main() -> None:
                 access=access,
                 on_permission=request_directory_access,
                 turn_log=turn_log,
+                on_approval=request_tool_approval,
             ) or "success"
             ui.finish_response()
         except ContextBudgetError as error:
