@@ -31,8 +31,8 @@ class ProjectSearchTests(unittest.TestCase):
         self.assertEqual(
             result["matches"],
             [
-                {"path": "src/main.py", "line_number": 2, "excerpt": "needle here"},
-                {"path": "src/nested/other.py", "line_number": 1, "excerpt": "another needle"},
+                {"path": str(self.root / "src" / "main.py"), "line_number": 2, "excerpt": "needle here"},
+                {"path": str(self.root / "src" / "nested" / "other.py"), "line_number": 1, "excerpt": "another needle"},
             ],
         )
         self.assertTrue(result["complete"])
@@ -56,13 +56,20 @@ class ProjectSearchTests(unittest.TestCase):
         self.assertEqual(result["skipped_files"]["binary_or_non_utf8"], 1)
 
     def test_invalid_requests_return_errors(self) -> None:
-        """Reject malformed, absolute, escaping, and missing search inputs."""
+        """Reject malformed and missing search inputs."""
         for arguments in (
-            {}, {"text": ""}, {"text": "a\nb"}, {"text": "x", "path": str(self.root)},
-            {"text": "x", "path": "../outside"}, {"text": "x", "file_pattern": "src/*.py"},
+            {}, {"text": ""}, {"text": "a\nb"},
+            {"text": "x", "path": str(self.root / "missing")},
+            {"text": "x", "file_pattern": "src/*.py"},
             {"text": "x", "max_results": True}, {"text": "x", "extra": 1},
         ):
             self.assertFalse(execute_tool("search_project", arguments)["ok"])
+
+    def test_accepts_an_absolute_search_path(self) -> None:
+        """Search an authorized outside path supplied as an absolute path."""
+        result = search_project("needle", str(self.root / "src"), "*.py")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["path"], str(self.root / "src"))
 
     def test_result_and_entry_limits_are_explicit(self) -> None:
         """Mark results partial when a traversal or match budget stops work."""

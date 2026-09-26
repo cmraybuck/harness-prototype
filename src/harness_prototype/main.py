@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ollama import Client, ResponseError
 
+from .access import AccessChoice, WorkspaceAccess
 from .agent_loop import (
     ContextBudgetError,
     EmptyModelResponseError,
@@ -23,6 +24,24 @@ def print_tool_call(name: str) -> None:
     print(f"\n[Tool: {name}]", flush=True)
 
 
+def request_directory_access(directory: Path) -> AccessChoice:
+    """Ask for one session-scoped filesystem permission decision."""
+    print("\n[Permission required]")
+    print(f"The agent wants to access a directory outside the workspace:\n  {directory}")
+    print(f"  1 > Grant access to {directory} for this session")
+    print("  2 > Grant full machine access for this session")
+    print("  3 > Deny access and remember this decision")
+    while True:
+        try:
+            choice = input("Choose 1, 2, or 3: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAccess denied.")
+            return AccessChoice.DENY
+        if choice in {"1", "2", "3"}:
+            return AccessChoice(int(choice))
+        print("Please enter 1, 2, or 3.")
+
+
 def recover_turn(messages: list, turn_start: int) -> None:
     """Keep recorded tool outcomes; discard failed turns that performed no tools."""
     if any(message["role"] == "tool" for message in messages[turn_start:]):
@@ -38,6 +57,7 @@ def recover_turn(messages: list, turn_start: int) -> None:
 def main() -> None:
     """Read prompts and keep conversation history until the user exits."""
     client = Client(host=HOST)
+    access = WorkspaceAccess(Path.cwd())
     messages = new_conversation()
     print(f"Using {MODEL} at {HOST}")
     print(f"Working directory: {Path.cwd()}")
@@ -69,6 +89,8 @@ def main() -> None:
                 messages=messages,
                 on_text=print_response,
                 on_tool=print_tool_call,
+                access=access,
+                on_permission=request_directory_access,
             )
             print("\n")
         except ContextBudgetError as error:
