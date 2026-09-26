@@ -76,9 +76,15 @@ and read it.” In an interactive terminal, startup clears prior terminal output
 shows a temporary model-selection screen. After selection, that screen and the
 existing scrollback are cleared so the **Coding Agent** conversation starts at the
 top of its own view. The interface labels each side of the conversation and shows
-tool activity as a subdued `Working` status. Type `clear` to reset the conversation,
-`quit` to exit, or Ctrl+C during a response to cancel the turn. ANSI color is used
-only in an interactive terminal; set `NO_COLOR` to disable color styling.
+tool activity as a subdued `Working` status. Permission requests use the terminal's
+alternate screen as a temporary review view; after a decision, the conversation is
+restored with only a short, subdued permission receipt beside tool activity. All
+selection views use Up/Down to move and Space or Enter to confirm; typing a number
+or yes/no is not required. Menus use the conversation's cyan and green palette,
+and permission menus initially select the least-broad allow option. Type `clear`
+to reset the conversation, `quit` to exit, or Ctrl+C during a response to cancel
+the turn. ANSI color is used only in an interactive terminal; set `NO_COLOR` to
+disable color styling.
 
 The directory where the app starts is the default workspace. File operations
 inside it require no confirmation. Before a file tool accesses another directory,
@@ -91,9 +97,12 @@ Every registered tool declares one risk category: `read_only`, `write`,
 `execution`, `network`, or `deployment`. Each category has an independent policy:
 
 - `always_allow` dispatches the operation without a tool-approval prompt.
-- `ask_first` displays the category, tool name, and complete argument object, then
-  requires explicit approval for that exact operation. Empty input, Ctrl+C, EOF,
-  and a negative response deny it.
+- `ask_first` displays the category, tool name, and a concise description of the
+  operation, then requires explicit approval for that exact operation. Structured
+  file changes show their action and path but omit file contents and revision data.
+  Their review view also offers session-long edit access to the exact files in the
+  batch. Later changes are approved automatically only when every target has that
+  grant. Ctrl+C and EOF deny the request.
 - `deny` refuses the operation without prompting.
 
 Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
@@ -101,7 +110,7 @@ Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
 `HARNESS_DEPLOYMENT_POLICY`. The six inspection tools are explicitly categorized
 as read-only, whose default is `always_allow`; therefore they have no general
 tool-approval prompts in a default installation. `apply_file_changes` is
-categorized as write, whose default is `ask_first`, so its complete structured
+categorized as write, whose default is `ask_first`, so its summarized structured
 change batch must be approved before dispatch. The other categories also default
 to `ask_first`. Any
 category can instead be set to any of the three policies. Invalid values stop
@@ -113,6 +122,8 @@ occur. Every policy decision is recorded as a `tool_approval` interaction-log
 event with that same exact operation. This policy gate is distinct from the
 session workspace boundary below: a read-only tool that is generally allowed may
 still require directory access when it targets a path outside the workspace.
+Session file-edit grants affect only the write approval gate: they never bypass
+directory access checks, file revisions, validation, or application shutdown.
 
 ## File discovery and reading
 

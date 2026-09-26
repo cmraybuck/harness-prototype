@@ -83,6 +83,27 @@ an error or partial result as success.
 Write source and documentation as UTF-8 with explicit encoding when using scripts
 to edit files. Keep user-specific paths and credentials out of source defaults.
 
+## Permission UI standard
+
+Treat every interactive permission as a temporary decision view, not conversation
+content. In an interactive terminal, render it in the alternate screen buffer and
+restore the conversation after the answer. Every selection dialogue, including
+non-permission views, must use Up/Down navigation and Space or Enter confirmation
+through the shared `TerminalUI.choose_option` interface; do not ask users to type
+numbers or yes/no answers. Use the established cyan/green conversation palette.
+Permission menus initially select the least-broad allow option, while interruption
+and EOF still deny, and every choice must show the scope and lifetime of access.
+
+Summarize what will happen in human terms. Show operation names, risk categories,
+paths, counts, and file actions when relevant, but never dump raw argument objects,
+file contents, revisions, credentials, or other large or sensitive payloads. After
+the temporary view closes, leave one short `Permission` receipt recording whether
+access was allowed or denied and its scope. Style the receipt exactly like subdued,
+indented `Working` activity rather than agent/user dialogue. Future permission
+types must use the same `TerminalUI` seam and add navigation, denial/default,
+transient-screen restoration, payload-redaction, scoped-grant, and receipt coverage
+in `tests/test_main.py`.
+
 ## Tool and conversation contracts
 
 When adding or changing a tool:

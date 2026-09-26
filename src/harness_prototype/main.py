@@ -1,6 +1,5 @@
 """Interactive terminal entry point."""
 
-import json
 import os
 from pathlib import Path
 import shutil
@@ -9,7 +8,7 @@ import sys
 from ollama import Client, ResponseError
 
 from .access import AccessChoice, WorkspaceAccess
-from .approval import ApprovalRequest
+from .approval import ApprovalPromptResult, ApprovalRequest
 from .agent_loop import (
     ContextBudgetError,
     EmptyModelResponseError,
@@ -17,6 +16,7 @@ from .agent_loop import (
     run_turn,
 )
 from .config import HOST, LOG_DIRECTORY, LOG_REDACT_VALUES, MODEL, MODELS
+from .files import file_change_target_paths
 from .interaction_log import InteractionLogger
 
 
@@ -26,6 +26,15 @@ MODEL_DESCRIPTIONS = {
 }
 
 
+def _terminal_text(value: object, max_chars: int = 160) -> str:
+    """Return bounded single-line text that cannot control the terminal."""
+    safe = "".join(character if character.isprintable() else " " for character in str(value))
+    safe = " ".join(safe.split())
+    if len(safe) <= max_chars:
+        return safe
+    return safe[: max_chars - 3] + "..."
+
+
 class TerminalUI:
     """Render the conversation with a compact, consistent terminal layout."""
 
@@ -33,6 +42,7 @@ class TerminalUI:
         """Enable ANSI styling only for an interactive terminal that permits it."""
         self.use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
         self.response_open = False
+        self.approved_edit_files: set[Path] = set()
 
     def style(self, text: str, code: str) -> str:
         """Apply an ANSI style when terminal color support is available."""
@@ -63,30 +73,6 @@ class TerminalUI:
         print(self.style("  Commands   clear  reset conversation    quit  exit", "2"))
         print(self.style(self.rule(), "2"))
         print()
-
-    def show_model_selection(
-        self,
-        models: tuple[str, ...],
-        default: str,
-        descriptions: dict[str, str],
-    ) -> None:
-        """Display configured models as the temporary startup screen."""
-        print(self.style(self.rule(), "2"))
-        print(self.style("  CODING AGENT", "1;36"))
-        print(self.style("  Select a model for this session", "2"))
-        print(self.style(self.rule(), "2"))
-        for number, model in enumerate(models, start=1):
-            marker = "default" if model == default else ""
-            print(f"  {self.style(str(number), '1;36')}  {model:<30} {marker}")
-            description = descriptions.get(model)
-            if description:
-                print(self.style(f"     {description}", "2"))
-        print(self.style(self.rule(), "2"))
-
-    def model_prompt(self, model_count: int, default_number: int) -> str:
-        """Read a model number from the startup screen."""
-        prompt = f"Select [1-{model_count}]  (default {default_number}) > "
-        return input(self.style(prompt, "1;32")).strip()
 
     def prompt(self) -> str:
         """Read one user message with a distinct conversation label."""
@@ -120,12 +106,163 @@ class TerminalUI:
         print(self.style(f"  Working    {name}", "2;36"), flush=True)
         self.response_open = False
 
+    def show_permission_receipt(self, message: str) -> None:
+        """Show a quiet permission outcome alongside tool activity."""
+        if self.response_open:
+            print()
+        print(self.style(f"  Permission {message}", "2;36"), flush=True)
+        self.response_open = False
+
     def show_notice(self, label: str, message: str, style_code: str = "33") -> None:
         """Render a labeled status, error, or recovery notice."""
         if self.response_open:
             print()
         print(f"{self.style(f'{label:<11}', style_code)}{message}\n")
         self.response_open = False
+
+    def _read_key(self) -> str:
+        """Read one navigation key without requiring Enter."""
+        if os.name == "nt":
+            import msvcrt
+
+            key = msvcrt.getwch()
+            if key in {"\x00", "\xe0"}:
+                return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "other")
+        else:
+            import termios
+            import tty
+
+            if not sys.stdin.isatty():
+                key = sys.stdin.read(1)
+                if key == "\x1b":
+                    sequence = sys.stdin.read(2)
+                    return {"[A": "up", "[B": "down"}.get(sequence, "other")
+                if key == "\x03":
+                    raise KeyboardInterrupt
+                if key == "":
+                    raise EOFError
+                return "confirm" if key in {" ", "\r", "\n"} else "other"
+            descriptor = sys.stdin.fileno()
+            previous = termios.tcgetattr(descriptor)
+            try:
+                tty.setraw(descriptor)
+                key = sys.stdin.read(1)
+                if key == "\x1b":
+                    sequence = sys.stdin.read(2)
+                    return {"[A": "up", "[B": "down"}.get(sequence, "other")
+            finally:
+                termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+        if key == "\x03":
+            raise KeyboardInterrupt
+        if key == "":
+            raise EOFError
+        return "confirm" if key in {" ", "\r", "\n"} else "other"
+
+    def choose_option(
+        self,
+        title: str,
+        lines: list[str],
+        options: list[str],
+        *,
+        initial: int = 0,
+        transient: bool = True,
+    ) -> int:
+        """Select one dialogue option with arrow keys and confirm with Space or Enter."""
+        use_alternate_screen = transient and sys.stdin.isatty() and sys.stdout.isatty()
+        if use_alternate_screen:
+            print("\033[?1049h", end="", flush=True)
+        selected = initial
+        try:
+            while True:
+                if sys.stdout.isatty():
+                    print("\033[2J\033[H", end="", flush=True)
+                print(self.style(self.rule(), "2"))
+                print(self.style(f"  {title.upper()}", "1;36"))
+                print(self.style("  Use Up/Down to select, then Space or Enter to confirm", "2;36"))
+                print(self.style(self.rule(), "2"))
+                for line in lines:
+                    print(f"  {line}")
+                if lines:
+                    print()
+                for index, option in enumerate(options):
+                    marker = ">" if index == selected else " "
+                    style_code = "1;32" if index == selected else "2;36"
+                    print(self.style(f"  {marker} {option}", style_code))
+                print(self.style(self.rule(), "2"))
+                key = self._read_key()
+                if key == "up":
+                    selected = (selected - 1) % len(options)
+                elif key == "down":
+                    selected = (selected + 1) % len(options)
+                elif key == "confirm":
+                    return selected
+        finally:
+            if use_alternate_screen:
+                print("\033[?1049l", end="", flush=True)
+
+    def request_directory_access(self, directory: Path) -> AccessChoice:
+        """Ask for session-scoped directory access in a transient screen."""
+        options = [
+            "Allow this directory for this session",
+            "Allow all directories for this session",
+            "Deny this directory for this session",
+        ]
+        try:
+            selected = self.choose_option(
+                "Directory permission",
+                [
+                    "The agent needs access outside the workspace.",
+                    "",
+                    _terminal_text(directory),
+                ],
+                options,
+                initial=0,
+            )
+            decision = AccessChoice(selected + 1)
+        except (KeyboardInterrupt, EOFError):
+            decision = AccessChoice.DENY
+        if decision == AccessChoice.GRANT_DIRECTORY:
+            self.show_permission_receipt(
+                f"Allowed access to {_terminal_text(directory)} for this session."
+            )
+        elif decision == AccessChoice.GRANT_ALL:
+            self.show_permission_receipt("Allowed access to all directories for this session.")
+        else:
+            self.show_permission_receipt(
+                f"Denied access to {_terminal_text(directory)} for this session."
+            )
+        return decision
+
+    def request_tool_approval(self, request: ApprovalRequest) -> ApprovalPromptResult:
+        """Ask whether one summarized ask-first operation may execute."""
+        edit_targets = _file_edit_targets(request)
+        if edit_targets and set(edit_targets).issubset(self.approved_edit_files):
+            self.show_permission_receipt(_tool_approval_receipt(request, True, reused=True))
+            return ApprovalPromptResult(True, "session_file_grant")
+
+        options = ["Allow once"]
+        if edit_targets:
+            noun = "this file" if len(edit_targets) == 1 else "these files"
+            options.append(f"Allow all edits to {noun} for this session")
+        options.append("Deny")
+        try:
+            selected = self.choose_option(
+                "Tool permission",
+                _tool_approval_summary(request),
+                options,
+                initial=0,
+            )
+        except (KeyboardInterrupt, EOFError):
+            selected = len(options) - 1
+        allowed = selected < len(options) - 1
+        session_grant = bool(edit_targets) and selected == 1
+        if session_grant:
+            self.approved_edit_files.update(edit_targets)
+        self.show_permission_receipt(
+            _tool_approval_receipt(request, allowed, session_grant=session_grant)
+        )
+        source = "user_session_grant" if session_grant else "user"
+        return ApprovalPromptResult(allowed, source)
 
     def show_goodbye(self) -> None:
         """End the session with a quiet, consistent message."""
@@ -145,55 +282,88 @@ def select_model(
         return models[0]
 
     active_ui = ui or TerminalUI()
-    default_number = models.index(default) + 1
-    active_ui.show_model_selection(models, default, MODEL_DESCRIPTIONS)
+    options = []
+    for model in models:
+        description = MODEL_DESCRIPTIONS.get(model)
+        label = model if description is None else f"{model} - {description}"
+        if model == default:
+            label += " (default)"
+        options.append(label)
+    selected = active_ui.choose_option(
+        "Coding Agent - Select a model",
+        [],
+        options,
+        initial=models.index(default),
+        transient=False,
+    )
+    return models[selected]
 
-    while True:
-        choice = active_ui.model_prompt(len(models), default_number)
-        if not choice:
-            return default
-        if choice.isdigit() and 1 <= int(choice) <= len(models):
-            return models[int(choice) - 1]
-        print(f"Enter a number from 1 to {len(models)}.")
+
+def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
+    """Describe a tool operation without exposing large or sensitive payloads."""
+    lines = [
+        f"Risk       {_terminal_text(request.category.value)}",
+        f"Operation  {_terminal_text(request.tool_name)}",
+    ]
+    if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
+        return lines
+
+    changes = request.arguments.get("changes")
+    if not isinstance(changes, list):
+        return lines
+    lines.append(f"Files      {len(changes)}")
+    base_path = request.arguments.get("base_path")
+    if isinstance(base_path, str):
+        lines.append(f"Base path  {_terminal_text(base_path)}")
+    for change in changes[:10]:
+        if not isinstance(change, dict):
+            continue
+        action = change.get("action", "change")
+        path = change.get("path", "unknown path")
+        lines.append(f"- {_terminal_text(action, 24)}: {_terminal_text(path)}")
+    if len(changes) > 10:
+        lines.append(f"- and {len(changes) - 10} more files")
+    return lines
+
+
+def _file_edit_targets(request: ApprovalRequest) -> list[Path] | None:
+    """Return exact file targets eligible for a session edit grant."""
+    if request.tool_name != "apply_file_changes":
+        return None
+    targets = file_change_target_paths(request.arguments)
+    return targets if isinstance(targets, list) else None
+
+
+def _tool_approval_receipt(
+    request: ApprovalRequest,
+    allowed: bool,
+    *,
+    session_grant: bool = False,
+    reused: bool = False,
+) -> str:
+    """Return a compact conversation receipt for a tool permission decision."""
+    decision = "Allowed" if allowed else "Denied"
+    if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
+        changes = request.arguments.get("changes")
+        if isinstance(changes, list):
+            noun = "file change" if len(changes) == 1 else "file changes"
+            if reused:
+                return f"Used existing edit access for {len(changes)} {noun}."
+            if session_grant:
+                file_noun = "file" if len(changes) == 1 else "files"
+                return f"Allowed all edits to {len(changes)} {file_noun} for this session."
+            return f"{decision} {len(changes)} {noun}."
+    return f"{decision} {_terminal_text(request.tool_name)}."
 
 
 def request_directory_access(directory: Path) -> AccessChoice:
     """Ask for one session-scoped filesystem permission decision."""
-    print("\nPermission required")
-    print("The agent requested a directory outside the workspace:")
-    print(f"  {directory}\n")
-    print(f"  1  Grant access to {directory} for this session")
-    print("  2  Grant full machine access for this session")
-    print("  3  Deny access and remember this decision")
-    while True:
-        try:
-            choice = input("Choose 1, 2, or 3: ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nAccess denied.")
-            return AccessChoice.DENY
-        if choice in {"1", "2", "3"}:
-            return AccessChoice(int(choice))
-        print("Please enter 1, 2, or 3.")
+    return TerminalUI().request_directory_access(directory)
 
 
-def request_tool_approval(request: ApprovalRequest) -> bool:
+def request_tool_approval(request: ApprovalRequest) -> ApprovalPromptResult:
     """Ask whether one exact ask-first tool operation may execute."""
-    print("\nApproval required")
-    print(f"Category: {request.category.value}")
-    print(f"Tool: {request.tool_name}")
-    print("Arguments:")
-    print(json.dumps(request.arguments, ensure_ascii=False, indent=2, sort_keys=True))
-    while True:
-        try:
-            choice = input("Approve this operation? [y/N]: ").strip().casefold()
-        except (KeyboardInterrupt, EOFError):
-            print("\nOperation denied.")
-            return False
-        if choice in {"y", "yes"}:
-            return True
-        if choice in {"", "n", "no"}:
-            return False
-        print("Please enter y or n.")
+    return TerminalUI().request_tool_approval(request)
 
 
 def recover_turn(messages: list, turn_start: int) -> None:
@@ -254,9 +424,9 @@ def main() -> None:
                 on_text=ui.write_response,
                 on_tool=ui.show_tool_call,
                 access=access,
-                on_permission=request_directory_access,
+                on_permission=ui.request_directory_access,
                 turn_log=turn_log,
-                on_approval=request_tool_approval,
+                on_approval=ui.request_tool_approval,
             ) or "success"
             ui.finish_response()
         except ContextBudgetError as error:

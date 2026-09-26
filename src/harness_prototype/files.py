@@ -115,6 +115,14 @@ def _resolve_change_paths(
 
 def file_change_target_directories(arguments: object) -> list[Path] | dict | None:
     """Resolve directories that must be authorized for apply_file_changes."""
+    targets = file_change_target_paths(arguments)
+    if not isinstance(targets, list):
+        return targets
+    return list(dict.fromkeys(path.parent for path in targets))
+
+
+def file_change_target_paths(arguments: object) -> list[Path] | dict | None:
+    """Resolve exact file targets for approval and access decisions."""
     if not isinstance(arguments, dict):
         return None
     resolved, error = _resolve_change_paths(
@@ -126,7 +134,7 @@ def file_change_target_directories(arguments: object) -> list[Path] | dict | Non
             error or "Could not resolve file-change targets.",
             status="access_validation_failed",
         )
-    return list(dict.fromkeys(path.parent for _, path in resolved))
+    return [path for _, path in resolved]
 
 
 def _file_revision(data: bytes) -> str:

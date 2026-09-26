@@ -4,6 +4,7 @@ import unittest
 
 from harness_prototype.approval import (
     ApprovalPolicy,
+    ApprovalPromptResult,
     ApprovalRequest,
     ToolCategory,
     decide_tool_approval,
@@ -41,6 +42,17 @@ class ApprovalPolicyTests(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual(seen, [request])
         self.assertEqual(decision.log_fields()["operation"], request.operation())
+
+    def test_ask_first_records_a_session_grant_source(self) -> None:
+        """Preserve the audit source when an existing scoped grant approves a call."""
+        request = ApprovalRequest("write", {"path": "a.txt"}, ToolCategory.WRITE)
+        decision = decide_tool_approval(
+            request,
+            {ToolCategory.WRITE: ApprovalPolicy.ASK_FIRST},
+            lambda proposed: ApprovalPromptResult(True, "session_file_grant"),
+        )
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.source, "session_file_grant")
 
     def test_ask_first_denial_is_recoverable(self) -> None:
         """Return a structured refusal for a declined operation."""
