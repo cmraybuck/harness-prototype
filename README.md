@@ -86,6 +86,34 @@ controls. The tools accept ordinary paths anywhere the process can read. There
 are no folder aliases: `desktop` means a relative folder named `desktop`, and
 `@desktop` has no special meaning.
 
+Every tool result uses the same status fields:
+
+- `ok` says whether the requested operation succeeded. When it is `false`,
+  `error` contains an actionable diagnostic and `complete` and `truncated` are
+  both `false`.
+- `error` is `null` for a successful operation.
+- `complete` says whether the result is authoritative for the requested scope.
+  It is `false` for a page with more data, a search stopped by a limit, or a
+  search that skipped links or encountered filesystem errors.
+- `truncated` says whether a successful result stopped at a paging or resource
+  bound. It can be `false` while `complete` is `false`, such as when a search
+  finishes but skips a directory link or encounters an access error.
+
+Pageable tools retain their tool-specific continuation fields for compatibility:
+`list_files` returns `next_offset`, and `read_file` returns `next_line`. Each is
+an integer only when another page is available and otherwise is `null`. Recursive
+searches are bounded but not pageable; when truncated, narrow the root, path, or
+pattern and retry.
+
+Representative result shapes (payload fields are abbreviated) are:
+
+```json
+{"ok": true, "error": null, "complete": true, "truncated": false, "path": "C:\\work\\notes.txt"}
+{"ok": true, "error": null, "complete": false, "truncated": true, "entries": ["a.txt"], "next_offset": 1}
+{"ok": true, "error": null, "complete": false, "truncated": false, "matches": [], "skipped_links": 1, "errors": []}
+{"ok": false, "error": "Not a regular file: C:\\work\\missing.txt", "complete": false, "truncated": false}
+```
+
 | Tool | Interface and result |
 | --- | --- |
 | `get_location(location)` | Resolves one supported location (`working_directory`, `home`, `desktop`, `documents`, `downloads`, `pictures`, `music`, or `videos`) to an existing absolute directory. Location values are trimmed and case-folded; failures concern only that location. |
@@ -99,8 +127,8 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 ### Filesystem limits
 
 - **Listing:** 1–100 entries and 4,000 characters of JSON-encoded entry text per page. Directories over 20,000 entries return an error before sorting. Offsets assume the directory has not changed.
-- **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 errors are returned. Narrow the root when limits are reached.
-- **Content search:** searches a workspace-relative file or directory, stopping at 1–100 matching lines (default 100), 20,000 entries, 8,000 JSON-encoded result characters, or a best-effort 10-second deadline. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem errors are returned; an error or runtime/output/traversal/result limit makes `complete=false`.
+- **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 error messages are returned. `error_count` retains the total and `errors_truncated=true` reports omitted diagnostics. Narrow the root when limits are reached.
+- **Content search:** searches a workspace-relative file or directory, stopping at 1–100 matching lines (default 100), 20,000 entries, 8,000 JSON-encoded result characters, or a best-effort 10-second deadline. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
 - **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
 
 Individual filesystem operations may still block on a slow or unavailable drive.
@@ -134,6 +162,7 @@ The current read-only tools are not a sandbox for future write or execution tool
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
 | `src/harness_prototype/agent_loop.py` | Model instructions, streaming, context checks, and tool exchanges |
 | `src/harness_prototype/tools.py` | Shared tool registry and dispatch |
+| `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
 | `src/harness_prototype/files.py` | Directory listing, bounded recursive search, and text reading |
 | `src/harness_prototype/config.py` | Validated configuration |

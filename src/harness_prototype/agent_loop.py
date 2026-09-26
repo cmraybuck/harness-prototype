@@ -12,6 +12,9 @@ from .tools import AVAILABLE_TOOLS, execute_tool
 
 SYSTEM_PROMPT = (
     "You are a helpful software-engineering assistant. "
+    "Every tool result reports ok, error, complete, and truncated. Treat an "
+    "ok=false result as a failure and report its error. A successful result may "
+    "still be incomplete or truncated, so do not overstate its evidence. "
     "Use list_files when asked what files or folders are in the current working "
     "directory; pass path to list another directory and use next_offset for "
     "additional listing pages when truncated. "
@@ -144,6 +147,8 @@ def run_turn(
                         "tool_name": pending.function.name,
                         "content": json.dumps({
                             "ok": False,
+                            "complete": False,
+                            "truncated": False,
                             "status": "outcome_unknown" if pending_index == 0 else "not_executed",
                             "error": "Tool exchange interrupted. Inspect state before retrying."
                             if pending_index == 0 else "Skipped after an earlier tool interruption.",

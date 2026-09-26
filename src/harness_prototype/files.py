@@ -8,6 +8,8 @@ from collections import deque
 from itertools import islice
 from pathlib import Path
 
+from .tool_results import tool_error, tool_success
+
 MAX_FILE_BYTES = 1_048_576
 MAX_OUTPUT_CHARS = 8_000
 MAX_ENTRIES = 20_000
@@ -23,17 +25,19 @@ EXCLUDED_SEARCH_DIRECTORIES = {
 def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict:
     """List a bounded sorted page of immediate names in a directory."""
     if type(offset) is not int or offset < 0:
-        return {"ok": False, "error": "offset must be a nonnegative integer."}
+        return tool_error("offset must be a nonnegative integer.")
     if type(max_entries) is not int or not 1 <= max_entries <= 100:
-        return {"ok": False, "error": "max_entries must be between 1 and 100."}
+        return tool_error("max_entries must be between 1 and 100.")
     if not isinstance(path, str) or not path.strip():
-        return {"ok": False, "error": "path must be a nonempty directory path."}
+        return tool_error("path must be a nonempty directory path.")
     try:
         directory = Path(path).expanduser().resolve()
         with os.scandir(directory) as iterator:
             entries = list(islice(iterator, MAX_ENTRIES + 1))
         if len(entries) > MAX_ENTRIES:
-            return {"ok": False, "error": "Directory exceeds the 20000-entry listing limit; choose a narrower path."}
+            return tool_error(
+                "Directory exceeds the 20000-entry listing limit; choose a narrower path."
+            )
         entries.sort(key=lambda entry: (entry.name.casefold(), entry.name))
         page, size = [], 0
         for entry in entries[offset:offset + max_entries]:
@@ -45,10 +49,15 @@ def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict
             size += encoded_size
         next_offset = offset + len(page)
         truncated = next_offset < len(entries)
-        return {"ok": True, "directory": str(directory), "entries": page,
-                "truncated": truncated, "next_offset": next_offset if truncated else None}
+        return tool_success(
+            complete=not truncated,
+            truncated=truncated,
+            directory=str(directory),
+            entries=page,
+            next_offset=next_offset if truncated else None,
+        )
     except (OSError, ValueError) as error:
-        return {"ok": False, "error": str(error)}
+        return tool_error(str(error))
 
 
 def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
@@ -60,23 +69,39 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
     extension-bearing patterns retain ordinary filename matching semantics.
     """
     if not isinstance(pattern, str) or not pattern or any(c in pattern for c in "/\\"):
-        return {"ok": False, "error": "pattern must be a nonempty filename or wildcard, not a path."}
+        return tool_error("pattern must be a nonempty filename or wildcard, not a path.")
     if not isinstance(root, str) or not root.strip():
-        return {"ok": False, "error": "root must be a nonempty directory path."}
+        return tool_error("root must be a nonempty directory path.")
     if type(max_results) is not int or not 1 <= max_results <= 100:
-        return {"ok": False, "error": "max_results must be an integer between 1 and 100."}
+        return tool_error("max_results must be an integer between 1 and 100.")
     try:
         directory = Path(root).expanduser().resolve()
         if not directory.is_dir():
-            return {"ok": False, "error": f"Not a directory: {directory}"}
+            return tool_error(f"Not a directory: {directory}")
     except (OSError, ValueError) as error:
-        return {"ok": False, "error": str(error)}
+        return tool_error(str(error))
     infer_extension = "." not in pattern and not any(character in pattern for character in "*?[")
-    result = {"ok": True, "root": str(directory), "matches": [],
-              "extension_inferred": False, "complete": True,
-              "stop_reason": None, "skipped_links": 0, "errors": []}
+    result = tool_success(
+        root=str(directory),
+        matches=[],
+        extension_inferred=False,
+        stop_reason=None,
+        skipped_links=0,
+        errors=[],
+        error_count=0,
+        errors_truncated=False,
+    )
     inferred_matches = []
     inferred_limit_reached = False
+
+    def record_error(error: OSError) -> None:
+        """Record a bounded diagnostic while retaining the full error count."""
+        result["complete"] = False
+        result["error_count"] += 1
+        if len(result["errors"]) < 20:
+            result["errors"].append(str(error))
+        else:
+            result["errors_truncated"] = True
 
     def apply_inferred_matches() -> None:
         """Expose collected fallback matches when no exact name matched."""
@@ -84,14 +109,14 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
             result["matches"] = inferred_matches
             result["extension_inferred"] = True
             if inferred_limit_reached and result["stop_reason"] is None:
-                result.update(complete=False, stop_reason="result_limit")
+                result.update(complete=False, truncated=True, stop_reason="result_limit")
 
     pending = deque([directory])
     deadline = time.monotonic() + SEARCH_SECONDS
     visited = 0
     while pending:
         if time.monotonic() >= deadline:
-            result.update(complete=False, stop_reason="time_limit")
+            result.update(complete=False, truncated=True, stop_reason="time_limit")
             apply_inferred_matches()
             return result
         parent = pending.popleft()
@@ -100,7 +125,7 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
                 for entry in entries:
                     visited += 1
                     if visited > MAX_ENTRIES:
-                        result.update(complete=False, stop_reason="entry_limit")
+                        result.update(complete=False, truncated=True, stop_reason="entry_limit")
                         apply_inferred_matches()
                         return result
                     path = Path(entry.path)
@@ -116,7 +141,7 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
                             if fnmatch.fnmatchcase(folded_name, folded_pattern):
                                 result["matches"].append(str(path))
                                 if len(result["matches"]) >= max_results:
-                                    result.update(complete=False, stop_reason="result_limit")
+                                    result.update(complete=False, truncated=True, stop_reason="result_limit")
                                     return result
                             elif infer_extension and folded_name.startswith(folded_pattern + "."):
                                 if len(inferred_matches) < max_results:
@@ -124,13 +149,9 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
                                 else:
                                     inferred_limit_reached = True
                     except OSError as error:
-                        result["complete"] = False
-                        if len(result["errors"]) < 20:
-                            result["errors"].append(str(error))
+                        record_error(error)
         except OSError as error:
-            result["complete"] = False
-            if len(result["errors"]) < 20:
-                result["errors"].append(str(error))
+            record_error(error)
     apply_inferred_matches()
     return result
 
@@ -158,41 +179,41 @@ def search_project(
     and ``stop_reason`` distinguish exhaustive searches from partial results.
     """
     if not isinstance(text, str) or not text:
-        return {"ok": False, "error": "text must be a nonempty string."}
+        return tool_error("text must be a nonempty string.")
     if "\n" in text or "\r" in text:
-        return {"ok": False, "error": "text must not contain a newline."}
+        return tool_error("text must not contain a newline.")
     if not isinstance(path, str) or not path.strip():
-        return {"ok": False, "error": "path must be a nonempty workspace-relative path."}
+        return tool_error("path must be a nonempty workspace-relative path.")
     if Path(path).is_absolute():
-        return {"ok": False, "error": "path must be relative to the working directory."}
+        return tool_error("path must be relative to the working directory.")
     if (not isinstance(file_pattern, str) or not file_pattern
             or any(character in file_pattern for character in "/\\")):
-        return {"ok": False, "error": "file_pattern must be a nonempty filename wildcard, not a path."}
+        return tool_error("file_pattern must be a nonempty filename wildcard, not a path.")
     if type(max_results) is not int or not 1 <= max_results <= 100:
-        return {"ok": False, "error": "max_results must be an integer between 1 and 100."}
+        return tool_error("max_results must be an integer between 1 and 100.")
 
     try:
         workspace = Path.cwd().resolve()
         search_path = (workspace / path).resolve()
         search_path.relative_to(workspace)
         if not search_path.exists():
-            return {"ok": False, "error": f"Path does not exist: {search_path}"}
+            return tool_error(f"Path does not exist: {search_path}")
         if not search_path.is_file() and not search_path.is_dir():
-            return {"ok": False, "error": f"Not a regular file or directory: {search_path}"}
+            return tool_error(f"Not a regular file or directory: {search_path}")
     except (OSError, ValueError) as error:
-        return {"ok": False, "error": str(error)}
+        return tool_error(str(error))
 
-    result = {
-        "ok": True,
-        "workspace": str(workspace),
-        "path": search_path.relative_to(workspace).as_posix() or ".",
-        "matches": [],
-        "complete": True,
-        "stop_reason": None,
-        "files_searched": 0,
-        "skipped_files": {"excluded": 0, "binary_or_non_utf8": 0, "too_large": 0, "links": 0},
-        "errors": [],
-    }
+    result = tool_success(
+        workspace=str(workspace),
+        path=search_path.relative_to(workspace).as_posix() or ".",
+        matches=[],
+        stop_reason=None,
+        files_searched=0,
+        skipped_files={"excluded": 0, "binary_or_non_utf8": 0, "too_large": 0, "links": 0},
+        errors=[],
+        error_count=0,
+        errors_truncated=False,
+    )
     deadline = time.monotonic() + SEARCH_SECONDS
     visited = 0
     output_size = 0
@@ -201,8 +222,17 @@ def search_project(
 
     def stop(reason: str) -> dict:
         """Mark the search partial and return its accumulated evidence."""
-        result.update(complete=False, stop_reason=reason)
+        result.update(complete=False, truncated=True, stop_reason=reason)
         return result
+
+    def record_error(path_with_error: Path, error: OSError) -> None:
+        """Record a bounded diagnostic while retaining the full error count."""
+        result["complete"] = False
+        result["error_count"] += 1
+        if len(result["errors"]) < 20:
+            result["errors"].append(f"{path_with_error}: {error}")
+        else:
+            result["errors_truncated"] = True
 
     while pending:
         if time.monotonic() >= deadline:
@@ -211,6 +241,7 @@ def search_project(
         try:
             if current.is_symlink() or current.is_junction():
                 result["skipped_files"]["links"] += 1
+                result["complete"] = False
                 continue
             relative_parts = current.relative_to(workspace).parts
             directory_parts = relative_parts if current.is_dir() else relative_parts[:-1]
@@ -266,9 +297,7 @@ def search_project(
                 if len(result["matches"]) >= max_results:
                     return stop("result_limit")
         except OSError as error:
-            result["complete"] = False
-            if len(result["errors"]) < 20:
-                result["errors"].append(f"{current}: {error}")
+            record_error(current, error)
     return result
 
 
@@ -286,31 +315,31 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
     non-UTF-8 files return an error rather than guessed text.
     """
     if not isinstance(path, str) or not path.strip():
-        return {"ok": False, "error": "path must be a nonempty file path."}
+        return tool_error("path must be a nonempty file path.")
     if type(start_line) is not int or start_line < 1:
-        return {"ok": False, "error": "start_line must be a positive integer."}
+        return tool_error("start_line must be a positive integer.")
     if type(max_lines) is not int or not 1 <= max_lines <= 200:
-        return {"ok": False, "error": "max_lines must be an integer between 1 and 200."}
+        return tool_error("max_lines must be an integer between 1 and 200.")
 
     try:
         file_path = Path(path).expanduser().resolve()
         if not file_path.is_file():
-            return {"ok": False, "error": f"Not a regular file: {file_path}"}
+            return tool_error(f"Not a regular file: {file_path}")
         with file_path.open("rb") as source:
             data = source.read(MAX_FILE_BYTES + 1)
         if len(data) > MAX_FILE_BYTES:
-            return {"ok": False, "error": "File exceeds the 1 MiB read limit."}
+            return tool_error("File exceeds the 1 MiB read limit.")
         if b"\x00" in data:
-            return {"ok": False, "error": "Binary or non-UTF-8 file is not supported."}
+            return tool_error("Binary or non-UTF-8 file is not supported.")
         # Only CR, LF, and CRLF delimit source lines; preserve other characters.
         text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
         lines = text.split("\n") if text else []
         if text.endswith("\n"):
             lines.pop()
     except UnicodeDecodeError:
-        return {"ok": False, "error": "File is not valid UTF-8 text."}
+        return tool_error("File is not valid UTF-8 text.")
     except (OSError, ValueError) as error:
-        return {"ok": False, "error": str(error)}
+        return tool_error(str(error))
 
     content = []
     size = 0
@@ -318,20 +347,20 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
         numbered_line = f"{index + 1}: {lines[index]}\n"
         if size + len(numbered_line) > MAX_OUTPUT_CHARS:
             if not content:
-                return {"ok": False, "error": f"Line {index + 1} exceeds the output limit."}
+                return tool_error(f"Line {index + 1} exceeds the output limit.")
             break
         content.append(numbered_line)
         size += len(numbered_line)
 
     next_line = start_line + len(content)
     truncated = next_line <= len(lines)
-    return {
-        "ok": True,
-        "path": str(file_path),
-        "start_line": start_line,
-        "lines_read": len(content),
-        "total_lines": len(lines),
-        "content": "".join(content),
-        "truncated": truncated,
-        "next_line": next_line if truncated else None,
-    }
+    return tool_success(
+        complete=not truncated,
+        truncated=truncated,
+        path=str(file_path),
+        start_line=start_line,
+        lines_read=len(content),
+        total_lines=len(lines),
+        content="".join(content),
+        next_line=next_line if truncated else None,
+    )
