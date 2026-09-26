@@ -8,7 +8,13 @@ from ollama import ChatResponse
 
 from harness_prototype.agent_loop import ContextBudgetError, new_conversation
 from harness_prototype.access import AccessChoice
-from harness_prototype.main import main, recover_turn, request_directory_access, select_model
+from harness_prototype.main import (
+    TerminalUI,
+    main,
+    recover_turn,
+    request_directory_access,
+    select_model,
+)
 
 
 class MainTests(unittest.TestCase):
@@ -21,6 +27,32 @@ class MainTests(unittest.TestCase):
             self.assertEqual(select_model(models, "slow"), "fast")
         with patch("builtins.input", return_value=""), patch("builtins.print"):
             self.assertEqual(select_model(models, "fast"), "fast")
+
+    def test_streamed_response_cannot_overwrite_prior_output(self) -> None:
+        """Convert carriage returns from model output into ordinary newlines."""
+        ui = TerminalUI()
+        with patch("builtins.print") as output:
+            ui.write_response("first\rsecond")
+        rendered = "".join(
+            str(call.args[0]) for call in output.call_args_list if call.args
+        )
+        self.assertNotIn("\r", rendered)
+        self.assertIn("first\nsecond", rendered)
+
+    def test_clear_screen_erases_display_and_scrollback_for_a_terminal(self) -> None:
+        """Clear both prior output and scrollback only for interactive output."""
+        ui = TerminalUI()
+        with patch("harness_prototype.main.sys.stdout", isatty=Mock(return_value=True)), patch(
+            "builtins.print"
+        ) as output:
+            ui.clear_screen()
+        self.assertEqual(output.call_args.args[0], "\033[2J\033[3J\033[H")
+
+        with patch("harness_prototype.main.sys.stdout", isatty=Mock(return_value=False)), patch(
+            "builtins.print"
+        ) as output:
+            ui.clear_screen()
+        output.assert_not_called()
 
     def test_select_model_retries_invalid_number(self) -> None:
         """Keep prompting until the user selects a configured model number."""

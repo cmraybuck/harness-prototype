@@ -71,9 +71,13 @@ to a comma-separated list to change the choices and `HARNESS_MODEL` to set the
 default offered by the startup prompt.
 
 Try “What files are in the current directory?” or “Find hello.txt on my Desktop
-and read it.” Tool calls appear as `[Tool: name]` before the model's answer.
-Type `clear` to reset the conversation, `quit` to exit, or Ctrl+C during a response
-to cancel the turn.
+and read it.” In an interactive terminal, startup clears prior terminal output and
+shows a temporary model-selection screen. After selection, that screen and the
+existing scrollback are cleared so the **Coding Agent** conversation starts at the
+top of its own view. The interface labels each side of the conversation and shows
+tool activity as a subdued `Working` status. Type `clear` to reset the conversation,
+`quit` to exit, or Ctrl+C during a response to cancel the turn. ANSI color is used
+only in an interactive terminal; set `NO_COLOR` to disable color styling.
 
 The directory where the app starts is the default workspace. File operations
 inside it require no confirmation. Before a file tool accesses another directory,
