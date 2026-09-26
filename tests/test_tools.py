@@ -27,7 +27,7 @@ class ToolDispatchTests(unittest.TestCase):
             set(AVAILABLE_TOOLS),
             {
                 "get_location", "list_files", "find_files", "search_project",
-                "read_file", "git_status", "apply_file_changes",
+                "read_file", "git_status", "git_diff", "apply_file_changes",
                 "run_tests",
             },
         )
@@ -107,6 +107,7 @@ class ToolDispatchTests(unittest.TestCase):
                     "search_project": {"text": "needle"},
                     "read_file": {"path": str(sample)},
                     "git_status": {},
+                    "git_diff": {},
                     "apply_file_changes": {
                         "base_path": ".",
                         "changes": [

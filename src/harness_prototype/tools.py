@@ -16,7 +16,7 @@ from .files import (
     read_file,
     search_project,
 )
-from .git import git_status
+from .git import git_diff, git_status
 from .locations import get_location
 from .tool_results import tool_error
 
@@ -119,6 +119,7 @@ TOOL_SPECS = {
     "search_project": ToolSpec(search_project, ToolCategory.READ_ONLY),
     "read_file": ToolSpec(read_file, ToolCategory.READ_ONLY),
     "git_status": ToolSpec(git_status, ToolCategory.READ_ONLY),
+    "git_diff": ToolSpec(git_diff, ToolCategory.READ_ONLY),
     "run_tests": ToolSpec(
         run_tests,
         ToolCategory.EXECUTION,
