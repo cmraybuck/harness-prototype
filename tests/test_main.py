@@ -1,5 +1,6 @@
 """Terminal workflow and failed-turn recovery checks."""
 
+from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
@@ -7,11 +8,26 @@ from ollama import ChatResponse
 
 from harness_prototype.agent_loop import ContextBudgetError, new_conversation
 from harness_prototype.access import AccessChoice
-from harness_prototype.main import main, recover_turn, request_directory_access
+from harness_prototype.main import main, recover_turn, request_directory_access, select_model
 
 
 class MainTests(unittest.TestCase):
     """Cover terminal commands, failure reporting, and conversation recovery."""
+
+    def test_select_model_uses_number_or_default(self) -> None:
+        """Select a configured model by number and accept the configured default."""
+        models = ("slow", "fast")
+        with patch("builtins.input", return_value="2"), patch("builtins.print"):
+            self.assertEqual(select_model(models, "slow"), "fast")
+        with patch("builtins.input", return_value=""), patch("builtins.print"):
+            self.assertEqual(select_model(models, "fast"), "fast")
+
+    def test_select_model_retries_invalid_number(self) -> None:
+        """Keep prompting until the user selects a configured model number."""
+        with patch("builtins.input", side_effect=["no", "3", "1"]), patch("builtins.print") as output:
+            self.assertEqual(select_model(("first", "second"), "first"), "first")
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Enter a number from 1 to 2", rendered)
 
     def test_failure_without_tools_discards_only_new_turn(self) -> None:
         """Remove an uncompleted user turn while retaining earlier history."""
@@ -41,7 +57,9 @@ class MainTests(unittest.TestCase):
 
         with patch("builtins.input", side_effect=["large", "clear", "small", "quit"]), patch(
             "builtins.print"
-        ), patch("harness_prototype.main.Client"), patch(
+        ), patch("harness_prototype.main.select_model", return_value="test-model"), patch(
+            "harness_prototype.main.Client"
+        ), patch(
             "harness_prototype.main.run_turn", side_effect=turn
         ):
             main()
@@ -69,7 +87,9 @@ class MainTests(unittest.TestCase):
         client.chat.side_effect = request
         with patch("builtins.input", side_effect=["first", "second", "quit"]), patch(
             "builtins.print"
-        ), patch("harness_prototype.main.Client", return_value=client):
+        ), patch("harness_prototype.main.select_model", return_value="test-model"), patch(
+            "harness_prototype.main.Client", return_value=client
+        ):
             main()
         self.assertEqual(len(histories[1]), 2)
         self.assertEqual(histories[1][-1]["content"], "second")
@@ -84,7 +104,9 @@ class MainTests(unittest.TestCase):
         client.chat.side_effect = [[tool_request], [empty_response], [empty_response]]
         with patch("builtins.input", side_effect=["find a file", "quit"]), patch(
             "builtins.print"
-        ) as output, patch("harness_prototype.main.Client", return_value=client), patch(
+        ) as output, patch("harness_prototype.main.select_model", return_value="test-model"), patch(
+            "harness_prototype.main.Client", return_value=client
+        ), patch(
             "harness_prototype.agent_loop.execute_tool", return_value={"ok": True}
         ):
             main()

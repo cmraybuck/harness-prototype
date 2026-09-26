@@ -20,6 +20,7 @@ class Settings:
 
     host: str
     model: str
+    models: tuple[str, ...]
     temperature: float
     context_length: int
     max_tool_rounds: int
@@ -72,9 +73,23 @@ def load_settings(
     except ValueError:
         raise ValueError("HARNESS_TEMPERATURE must be a number between 0 and 2.") from None
 
+    model = value("HARNESS_MODEL", "devstral-small-2:latest")
+    configured_models = value(
+        "HARNESS_MODELS",
+        "devstral-small-2:latest,qwen3:8b",
+    )
+    models = tuple(dict.fromkeys(
+        candidate.strip() for candidate in configured_models.split(",") if candidate.strip()
+    ))
+    if not models:
+        raise ValueError("HARNESS_MODELS must contain at least one model identifier.")
+    if model not in models:
+        models = (model, *models)
+
     return Settings(
         host=host,
-        model=value("HARNESS_MODEL", "devstral-small-2:latest"),
+        model=model,
+        models=models,
         temperature=temperature,
         context_length=positive_integer("HARNESS_CONTEXT_LENGTH", "4096"),
         max_tool_rounds=positive_integer("HARNESS_MAX_TOOL_ROUNDS", "8"),
@@ -84,6 +99,7 @@ def load_settings(
 _settings = load_settings()
 HOST = _settings.host
 MODEL = _settings.model
+MODELS = _settings.models
 TEMPERATURE = _settings.temperature
 CONTEXT_LENGTH = _settings.context_length
 MAX_TOOL_ROUNDS = _settings.max_tool_rounds

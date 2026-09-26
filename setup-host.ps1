@@ -2,6 +2,7 @@
 param(
     [string]$TailscaleProfile,
     [string]$Model,
+    [string]$Models,
     [string]$LocalOllamaHost,
     [Nullable[int]]$ServePort
 )
@@ -31,6 +32,14 @@ function Get-SetupValue {
     if ($processValue) { return $processValue.Trim() }
     if ($DotEnv.ContainsKey($Name) -and $DotEnv[$Name]) { return $DotEnv[$Name].Trim() }
     return $Default
+}
+
+function ConvertTo-ModelList {
+    <# Parse a comma-separated model list, preserving order and removing duplicates. #>
+    param([string]$Value)
+    $result = @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($result.Count -eq 0) { throw "HARNESS_MODELS must contain at least one model identifier." }
+    return $result
 }
 
 function Update-ProcessPath {
@@ -146,6 +155,9 @@ $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExa
 $dotEnv = Import-DotEnv $settingsPath
 $selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
 $selectedModel = Get-SetupValue $Model "HARNESS_MODEL" $dotEnv "devstral-small-2:latest"
+$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b"
+$selectedModels = @(ConvertTo-ModelList $modelListValue)
+if ($selectedModel -notin $selectedModels) { $selectedModels = @($selectedModel) + $selectedModels }
 $localBaseUrl = Assert-BaseUrl (Get-SetupValue $LocalOllamaHost "HARNESS_OLLAMA_LOCAL_HOST" $dotEnv "http://127.0.0.1:11434")
 $portValue = if ($null -ne $ServePort) { [string]$ServePort } else { Get-SetupValue "" "HARNESS_TAILSCALE_SERVE_PORT" $dotEnv "11434" }
 try { $configuredPort = [int]$portValue }
@@ -162,9 +174,11 @@ Write-Host "Checking local Ollama API at $localBaseUrl..."
 $env:OLLAMA_HOST = ([System.Uri]$localBaseUrl).Authority
 Connect-Ollama $localBaseUrl
 
-Write-Host "Ensuring model '$selectedModel' is installed..."
-& ollama pull $selectedModel
-if ($LASTEXITCODE -ne 0) { throw "Ollama could not install model '$selectedModel'." }
+foreach ($requiredModel in $selectedModels) {
+    Write-Host "Ensuring model '$requiredModel' is installed..."
+    & ollama pull $requiredModel
+    if ($LASTEXITCODE -ne 0) { throw "Ollama could not install model '$requiredModel'." }
+}
 
 Write-Host "Forwarding private Tailscale port $configuredPort to $localBaseUrl..."
 & tailscale serve --bg "--tcp=$configuredPort" "tcp://$(([System.Uri]$localBaseUrl).Authority)" | Out-Host

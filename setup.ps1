@@ -2,6 +2,7 @@
 param(
     [string]$OllamaHost,
     [string]$Model,
+    [string]$Models,
     [string]$TailscaleProfile,
     [switch]$Launch
 )
@@ -31,6 +32,14 @@ function Get-SetupValue {
     if ($processValue) { return $processValue.Trim() }
     if ($DotEnv.ContainsKey($Name) -and $DotEnv[$Name]) { return $DotEnv[$Name].Trim() }
     return $Default
+}
+
+function ConvertTo-ModelList {
+    <# Parse a comma-separated model list, preserving order and removing duplicates. #>
+    param([string]$Value)
+    $result = @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
+    if ($result.Count -eq 0) { throw "HARNESS_MODELS must contain at least one model identifier." }
+    return $result
 }
 
 function Get-OllamaBaseUrl {
@@ -125,6 +134,9 @@ $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExa
 $dotEnv = Import-DotEnv $settingsPath
 $baseUrl = Get-OllamaBaseUrl (Get-SetupValue $OllamaHost "HARNESS_OLLAMA_HOST" $dotEnv "http://127.0.0.1:11434")
 $selectedModel = Get-SetupValue $Model "HARNESS_MODEL" $dotEnv "devstral-small-2:latest"
+$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b"
+$selectedModels = @(ConvertTo-ModelList $modelListValue)
+if ($selectedModel -notin $selectedModels) { $selectedModels = @($selectedModel) + $selectedModels }
 $selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
 $hostName = ([System.Uri]$baseUrl).Host
 
@@ -144,9 +156,11 @@ Write-Host "Checking Ollama API at $baseUrl..."
 try { $tags = Invoke-RestMethod -Uri "$baseUrl/api/tags" -Method Get -TimeoutSec 15 }
 catch { throw "The Ollama API is not reachable at $baseUrl. $($_.Exception.Message)" }
 $availableModels = @($tags.models | ForEach-Object { $_.name })
-if ($selectedModel -notin $availableModels) {
-    $displayModels = if ($availableModels.Count -gt 0) { $availableModels -join ", " } else { "none" }
-    throw "Model '$selectedModel' is not installed on the Ollama host. Available models: $displayModels"
+foreach ($requiredModel in $selectedModels) {
+    if ($requiredModel -notin $availableModels) {
+        $displayModels = if ($availableModels.Count -gt 0) { $availableModels -join ", " } else { "none" }
+        throw "Model '$requiredModel' is not installed on the Ollama host. Available models: $displayModels"
+    }
 }
 
 if (Test-Path -LiteralPath $envPath) {
@@ -158,6 +172,7 @@ if (Test-Path -LiteralPath $envPath) {
 }
 $envContent = Set-DotEnvValue $envContent "HARNESS_OLLAMA_HOST" $baseUrl
 $envContent = Set-DotEnvValue $envContent "HARNESS_MODEL" $selectedModel
+$envContent = Set-DotEnvValue $envContent "HARNESS_MODELS" ($selectedModels -join ",")
 if ($selectedProfile) { $envContent = Set-DotEnvValue $envContent "HARNESS_TAILSCALE_PROFILE" $selectedProfile }
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 [System.IO.File]::WriteAllText($envPath, $envContent, $utf8WithoutBom)
