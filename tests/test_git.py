@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from harness_prototype.git import MAX_STATUS_ENTRIES, git_status
+from harness_prototype.git import MAX_DIFF_CHARACTERS, MAX_STATUS_ENTRIES, git_diff, git_status
 
 
 class GitStatusTests(unittest.TestCase):
@@ -127,6 +127,107 @@ class GitStatusTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "git_error")
         self.assertIn("not installed", result["error"])
+
+    def test_diff_modes_report_distinct_patch_content(self) -> None:
+        """Keep staged, unstaged, and combined patches scoped to their meanings."""
+        self._commit_file("sample.txt", "base\n")
+        (self.workspace / "sample.txt").write_text("staged\n", encoding="utf-8")
+        self._git("add", "sample.txt")
+        (self.workspace / "sample.txt").write_text("unstaged\n", encoding="utf-8")
+
+        staged = git_diff("staged")
+        unstaged = git_diff("unstaged")
+        combined = git_diff("combined")
+
+        self.assertIn("+staged", staged["diff"])
+        self.assertNotIn("+unstaged", staged["diff"])
+        self.assertIn("+unstaged", unstaged["diff"])
+        self.assertIn("+unstaged", combined["diff"])
+        self.assertNotIn("+staged", combined["diff"])
+        self.assertTrue(combined["has_changes"])
+        self.assertEqual(combined["file_count"], 1)
+        self.assertEqual(combined["hunk_count"], 1)
+        self.assertEqual(combined["additions"], 1)
+        self.assertEqual(combined["deletions"], 1)
+        self.assertEqual(combined["diff_characters"], len(combined["diff"]))
+        self.assertEqual(combined["files"], [{
+            "path": "sample.txt", "additions": 1, "deletions": 1,
+            "hunk_count": 1,
+        }])
+
+    def test_diff_metadata_accounts_for_multiple_files_and_hunks(self) -> None:
+        """Give the model structured evidence of the complete patch scope."""
+        self._commit_file("first.txt", "one\ntwo\nthree\nfour\nfive\n")
+        self._commit_file("second.txt", "old\n")
+        (self.workspace / "first.txt").write_text(
+            "changed one\ntwo\nthree\nfour\nchanged five\n", encoding="utf-8",
+        )
+        (self.workspace / "second.txt").write_text("new\n", encoding="utf-8")
+
+        result = git_diff()
+
+        self.assertTrue(result["has_changes"])
+        self.assertEqual(result["file_count"], 2)
+        self.assertGreaterEqual(result["hunk_count"], 2)
+        self.assertEqual(result["additions"], 3)
+        self.assertEqual(result["deletions"], 3)
+        self.assertEqual(
+            {item["path"] for item in result["files"]},
+            {"first.txt", "second.txt"},
+        )
+        self.assertEqual(
+            sum(item["hunk_count"] for item in result["files"]),
+            result["hunk_count"],
+        )
+
+    def test_diff_filters_paths_and_reports_untracked_names(self) -> None:
+        """Apply one safe filter to patches and untracked paths without reading contents."""
+        self._commit_file("inside.txt", "old\n")
+        self._commit_file("outside.txt", "old\n")
+        (self.workspace / "inside.txt").write_text("inside change\n", encoding="utf-8")
+        (self.workspace / "outside.txt").write_text("outside change\n", encoding="utf-8")
+        (self.workspace / "untracked.txt").write_text("secret contents\n", encoding="utf-8")
+
+        filtered = git_diff(path="inside.txt")
+        all_changes = git_diff()
+
+        self.assertIn("inside change", filtered["diff"])
+        self.assertNotIn("outside change", filtered["diff"])
+        self.assertEqual(filtered["untracked"], [])
+        self.assertEqual(all_changes["untracked"], ["untracked.txt"])
+        self.assertNotIn("secret contents", all_changes["diff"])
+        self.assertFalse(all_changes["untracked_contents_included"])
+
+    def test_diff_rejects_paths_outside_workspace(self) -> None:
+        """Reject absolute and parent-relative path filters before diffing."""
+        self.assertFalse(git_diff(path=str(self.workspace / "file.txt"))["ok"])
+        self.assertFalse(git_diff(path="../file.txt")["ok"])
+
+    def test_diff_rejects_unknown_mode(self) -> None:
+        """Return a structured error for an unsupported diff scope."""
+        result = git_diff("everything")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "git_error")
+
+    def test_bounds_large_diff_output(self) -> None:
+        """Return an explicit partial result when patch text reaches its bound."""
+        self._commit_file("large.txt", "old\n")
+        (self.workspace / "large.txt").write_text(
+            "x" * (MAX_DIFF_CHARACTERS + 1) + "\n", encoding="utf-8",
+        )
+        result = git_diff("unstaged")
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["complete"])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["diff"]), MAX_DIFF_CHARACTERS)
+
+    def test_diff_non_git_workspace_returns_structured_error(self) -> None:
+        """Distinguish an invalid repository from a valid empty diff."""
+        with tempfile.TemporaryDirectory() as outside:
+            os.chdir(outside)
+            result = git_diff()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "git_error")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Harness
 
 A terminal assistant powered by Ollama with tools to list, find, search, read, and
-change UTF-8 files, inspect Git status, and run configured tests. It cannot run
+change UTF-8 files, inspect Git status and diffs, and run configured tests. It cannot run
 general commands.
 
 ## Run
@@ -123,7 +123,7 @@ Every registered tool declares one risk category: `read_only`, `write`,
 
 Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
 `HARNESS_EXECUTION_POLICY`, `HARNESS_NETWORK_POLICY`, and
-`HARNESS_DEPLOYMENT_POLICY`. The six inspection tools are explicitly categorized
+`HARNESS_DEPLOYMENT_POLICY`. The seven inspection tools are explicitly categorized
 as read-only, whose default is `always_allow`; therefore they have no general
 tool-approval prompts in a default installation. `apply_file_changes` is
 categorized as write, whose default is `ask_first`, so its summarized structured
@@ -204,6 +204,7 @@ Representative result shapes (payload fields are abbreviated) are:
 | `search_project(text, path=".", file_pattern="*", max_results=100)` | Searches nested UTF-8 files for case-sensitive literal text. `path` may be an absolute or working-directory-relative file or directory; `file_pattern` is a case-insensitive filename wildcard. Returns resolved paths, one-based line numbers, excerpts, counts, skipped-file categories, errors, and explicit `complete`/`stop_reason` status. |
 | `read_file(path, start_line=1, max_lines=100)` | Returns raw UTF-8 text, a SHA-256 `revision`, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`; the revision identifies the complete file and remains the same across pages. |
 | `git_status()` | Reports staged, unstaged, untracked, renamed, deleted, and conflicted workspace-relative paths. `clean=true` explicitly identifies a clean repository. Paths may appear in multiple categories; rename entries include old and new paths plus index/worktree status. Non-Git workspaces return a structured error. |
+| `git_diff(mode="combined", path=null)` | Returns patch content for `unstaged`, `staged`, or `combined` local changes, preceded by structured change presence, file/hunk counts, additions/deletions, full patch length, and per-file statistics. `path` is an optional workspace-relative file or directory and cannot escape the workspace. Untracked paths are listed separately because their contents are not part of a Git diff. Non-Git workspaces return a structured error. |
 | `run_tests(targets=null)` | Runs the configured full suite in the active workspace, or expands 1–50 selectors at the targeted command's `{targets}` argument. Targets are separate arguments, cannot be options, and path-like selectors cannot escape the workspace. Returns `status` (`passed`, `failed`, `timed_out`, `launch_error`, or `invalid_target`), stdout, stderr, exit code, duration, and per-stream truncation fields when execution starts. Test failures are completed tool operations with `ok=true` and `status=failed`; validation, launch, and timeout errors use `ok=false`. |
 | `apply_file_changes(base_path, changes)` | Applies one preflighted batch of 1–100 structured `create`, `overwrite`, `append`, or `replace` actions to UTF-8 files of any extension. Relative paths start at `base_path`; absolute paths are used directly. Existing-file actions require the current `revision` from `read_file`; `replace` also requires `old_text` that occurs exactly once. Returns absolute `affected_paths` and per-file actions and new revisions. |
 
@@ -216,6 +217,7 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 - **Content search:** searches an authorized file or directory, stopping at 1–100 matching lines (default 100), 20,000 entries, 8,000 JSON-encoded result characters, or a best-effort 10-second deadline. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
 - **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Content is returned raw with line endings normalized to LF; `revision` hashes the original complete bytes. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
 - **Git status:** inspects only the active workspace, returns at most 1,000 entries, and times out after 10 seconds. A limited result is marked incomplete and truncated. It uses Git's NUL-delimited porcelain format, does not contact remotes, and disables optional index locking and refresh. Ignored files are not reported.
+- **Git diff:** inspects only the active workspace, returns at most 20,000 patch characters and 200 per-file summaries, and times out after 10 seconds per Git operation. Limited patch or file-summary output is marked incomplete and truncated; `file_count` and `files_truncated` retain its scope. It does not contact remotes, invoke external diff drivers, include untracked contents, or modify the index or working tree. Use `git_status` for a compact categorized inventory and `git_diff` to inspect actual line changes.
 - **Test execution:** launches only a configured argument array, never a shell or model-provided executable, with the active workspace as its working directory and standard input disabled. A targeted run accepts at most 50 printable selectors of at most 500 characters. Selectors cannot begin with `-`; path-like selectors are resolved and rejected if they leave the workspace. Runtime and each captured output stream use the configured limits. A timeout terminates the launched process group. This is an application policy, not an OS sandbox: approved tests are project code and run with the harness process's operating-system permissions.
 - **Changing files:** accepts 1–100 distinct files and limits every existing and resulting file to 1 MiB. `create` fails if the target exists. `overwrite`, `append`, and `replace` fail with `revision_mismatch` unless their `expected_revision` matches the complete current bytes. `append` inserts one detected-style line separator when needed. `replace` changes one unique exact `old_text` occurrence. Any extension is accepted, but contents must be UTF-8 text; binary formats are unsupported. Existing UTF-8 BOM and newline style are preserved. Every resolved target directory is checked against session grants before dispatch, including paths reached through links. All changes are preflighted and staged before commit; failures trigger best-effort rollback and report `rolled_back` or `outcome_unknown`.
 
@@ -303,7 +305,7 @@ before sharing them.
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
 | `src/harness_prototype/files.py` | Directory listing, bounded search/read, revisions, and atomic UTF-8 changes |
-| `src/harness_prototype/git.py` | Bounded, read-only Git workspace status inspection |
+| `src/harness_prototype/git.py` | Bounded, read-only Git workspace status and diff inspection |
 | `src/harness_prototype/execution.py` | Shell-free configured test execution, process limits, and bounded output capture |
 | `src/harness_prototype/config.py` | Validated configuration |
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
