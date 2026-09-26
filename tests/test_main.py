@@ -126,6 +126,35 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("secret", rendered)
         self.assertIn("Allowed 1 file change", rendered)
 
+    def test_test_approval_shows_scope_without_configured_command(self) -> None:
+        """Show bounded test selectors and timeout while keeping command configuration hidden."""
+        request = ApprovalRequest(
+            "run_tests",
+            {"targets": ["tests.test_execution.TestExecutionTests.test_launch_error"]},
+            ToolCategory.EXECUTION,
+        )
+        with patch.object(
+            TerminalUI, "_read_key", return_value="confirm"
+        ), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(request))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("execution", rendered)
+        self.assertIn("1 targeted test selector", rendered)
+        self.assertIn("tests.test_execution", rendered)
+        self.assertIn("Timeout", rendered)
+        self.assertNotIn("uv run", rendered)
+        self.assertIn("Allowed 1 test target", rendered)
+
+    def test_test_approval_interrupt_denies_and_leaves_receipt(self) -> None:
+        """Fail closed when targeted test approval is interrupted."""
+        request = ApprovalRequest("run_tests", {}, ToolCategory.EXECUTION)
+        with patch.object(
+            TerminalUI, "_read_key", side_effect=KeyboardInterrupt
+        ), patch("builtins.print") as output:
+            self.assertFalse(request_tool_approval(request))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Denied the full test suite", rendered)
+
     def test_interactive_permission_uses_and_restores_alternate_screen(self) -> None:
         """Keep an interactive permission screen out of conversation scrollback."""
         ui = TerminalUI()

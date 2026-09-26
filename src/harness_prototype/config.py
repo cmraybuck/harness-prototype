@@ -1,5 +1,6 @@
 """Validated local settings: environment overrides project .env, then defaults."""
 
+import json
 import math
 import os
 from collections.abc import Mapping
@@ -28,6 +29,10 @@ class Settings:
     max_tool_rounds: int
     identical_tool_call_limit: int
     consecutive_tool_failure_limit: int
+    test_command: tuple[str, ...]
+    targeted_test_command: tuple[str, ...]
+    test_timeout_seconds: int
+    test_output_limit: int
     log_directory: Path
     log_redact_values: tuple[str, ...]
     approval_policies: dict[ToolCategory, ApprovalPolicy]
@@ -67,6 +72,30 @@ def load_settings(
         except ValueError:
             choices = ", ".join(policy.value for policy in ApprovalPolicy)
             raise ValueError(f"{name} must be one of: {choices}.") from None
+
+    def command(name: str, default: str, *, targets: bool) -> tuple[str, ...]:
+        """Parse a shell-free JSON argument array and validate its target placeholder."""
+        try:
+            arguments = json.loads(value(name, default))
+        except json.JSONDecodeError:
+            raise ValueError(f"{name} must be a JSON array of nonempty strings.") from None
+        if (
+            not isinstance(arguments, list)
+            or not arguments
+            or any(
+                not isinstance(argument, str)
+                or not argument.strip()
+                or any(not character.isprintable() for character in argument)
+                for argument in arguments
+            )
+        ):
+            raise ValueError(f"{name} must be a JSON array of nonempty strings.")
+        placeholder_count = arguments.count("{targets}")
+        expected_count = 1 if targets else 0
+        if placeholder_count != expected_count:
+            requirement = "exactly one" if targets else "no"
+            raise ValueError(f"{name} must contain {requirement} {{targets}} argument.")
+        return tuple(arguments)
 
     host = value("HARNESS_OLLAMA_HOST", "http://127.0.0.1:11434")
     try:
@@ -138,6 +167,17 @@ def load_settings(
         ),
     }
 
+    test_command = command(
+        "HARNESS_TEST_COMMAND",
+        '["uv","run","python","-m","unittest","discover","-s","tests","-v"]',
+        targets=False,
+    )
+    targeted_test_command = command(
+        "HARNESS_TARGETED_TEST_COMMAND",
+        '["uv","run","python","-m","unittest","-v","{targets}"]',
+        targets=True,
+    )
+
     return Settings(
         host=host,
         model=model,
@@ -153,6 +193,10 @@ def load_settings(
             "HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT",
             "3",
         ),
+        test_command=test_command,
+        targeted_test_command=targeted_test_command,
+        test_timeout_seconds=positive_integer("HARNESS_TEST_TIMEOUT_SECONDS", "120"),
+        test_output_limit=positive_integer("HARNESS_TEST_OUTPUT_LIMIT", "12000"),
         log_directory=log_directory.resolve(),
         log_redact_values=tuple(str(values[name]) for name in redact_names),
         approval_policies=approval_policies,
@@ -171,3 +215,7 @@ CONSECUTIVE_TOOL_FAILURE_LIMIT = _settings.consecutive_tool_failure_limit
 LOG_DIRECTORY = _settings.log_directory
 LOG_REDACT_VALUES = _settings.log_redact_values
 APPROVAL_POLICIES = _settings.approval_policies
+TEST_COMMAND = _settings.test_command
+TARGETED_TEST_COMMAND = _settings.targeted_test_command
+TEST_TIMEOUT_SECONDS = _settings.test_timeout_seconds
+TEST_OUTPUT_LIMIT = _settings.test_output_limit

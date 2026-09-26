@@ -29,6 +29,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("structured create, overwrite, append, and replace", system_prompt)
         self.assertIn("pass its revision as expected_revision", system_prompt)
         self.assertIn("Never repeat a failed write unchanged", system_prompt)
+        self.assertIn("pass only test selectors", system_prompt)
+        self.assertIn("status=failed", system_prompt)
 
     def test_four_tool_rounds_can_finish(self) -> None:
         """Allow pagination with changed arguments before the final answer."""

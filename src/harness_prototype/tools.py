@@ -6,6 +6,7 @@ from inspect import signature
 from pathlib import Path
 
 from .approval import ToolCategory
+from .execution import MAX_TEST_TARGETS, run_tests
 from .files import (
     MAX_FILE_CHANGES,
     apply_file_changes,
@@ -83,6 +84,33 @@ FILE_CHANGES_SCHEMA = {
     },
 }
 
+RUN_TESTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_tests",
+        "description": (
+            "Run the configured full test suite or selected test targets inside the "
+            "active workspace. This executes project code and requires execution approval."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "targets": {
+                    "type": ["array", "null"],
+                    "minItems": 1,
+                    "maxItems": MAX_TEST_TARGETS,
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional configured-runner selectors. Omit for the full suite; "
+                        "do not pass command-line options."
+                    ),
+                },
+            },
+        },
+    },
+}
+
 
 TOOL_SPECS = {
     "get_location": ToolSpec(get_location, ToolCategory.READ_ONLY),
@@ -91,6 +119,11 @@ TOOL_SPECS = {
     "search_project": ToolSpec(search_project, ToolCategory.READ_ONLY),
     "read_file": ToolSpec(read_file, ToolCategory.READ_ONLY),
     "git_status": ToolSpec(git_status, ToolCategory.READ_ONLY),
+    "run_tests": ToolSpec(
+        run_tests,
+        ToolCategory.EXECUTION,
+        model_schema=RUN_TESTS_SCHEMA,
+    ),
     "apply_file_changes": ToolSpec(
         apply_file_changes,
         ToolCategory.WRITE,
