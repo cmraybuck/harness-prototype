@@ -6,6 +6,8 @@ import shlex
 import sys
 from pathlib import Path
 
+from .tool_results import tool_error, tool_success
+
 USER_FOLDER_SETTINGS = {"desktop": "Desktop", "documents": "Personal", "downloads": "{374DE290-123F-4565-9164-39C4925E467B}", "pictures": "My Pictures", "music": "My Music", "videos": "My Video"}
 SUPPORTED_LOCATIONS = ("working_directory", "home", *USER_FOLDER_SETTINGS)
 XDG_FOLDER_NAMES = {"desktop": "DESKTOP", "documents": "DOCUMENTS", "downloads": "DOWNLOAD", "pictures": "PICTURES", "music": "MUSIC", "videos": "VIDEOS"}
@@ -79,15 +81,23 @@ def _standard_folder_path(name: str, home: Path) -> Path:
 def get_location(location: str) -> dict:
     """Resolve one named location to an existing ordinary directory path."""
     if not isinstance(location, str) or not location.strip():
-        return {"ok": False, "name": None, "error": "location must be a nonempty string.", "supported": list(SUPPORTED_LOCATIONS)}
+        return tool_error(
+            "location must be a nonempty string.",
+            name=None,
+            supported=list(SUPPORTED_LOCATIONS),
+        )
     normalized_name = location.strip().casefold()
     if normalized_name not in SUPPORTED_LOCATIONS:
-        return {"ok": False, "name": normalized_name, "error": f"Unsupported location: {normalized_name}", "supported": list(SUPPORTED_LOCATIONS)}
+        return tool_error(
+            f"Unsupported location: {normalized_name}",
+            name=normalized_name,
+            supported=list(SUPPORTED_LOCATIONS),
+        )
     try:
         home = Path.home().resolve()
         path = Path.cwd().resolve() if normalized_name == "working_directory" else home if normalized_name == "home" else _standard_folder_path(normalized_name, home)
         if not path.is_dir():
             raise OSError(f"Directory unavailable: {path}")
-        return {"ok": True, "name": normalized_name, "path": str(path)}
+        return tool_success(name=normalized_name, path=str(path))
     except (OSError, ValueError, RuntimeError) as error:
-        return {"ok": False, "name": normalized_name, "error": str(error)}
+        return tool_error(str(error), name=normalized_name)

@@ -4,6 +4,7 @@ from inspect import signature
 
 from .files import find_files, list_files, read_file, search_project
 from .locations import get_location
+from .tool_results import tool_error
 
 
 # The same registry supplies model schemas and dispatches executable functions.
@@ -20,11 +21,11 @@ def execute_tool(name: str, arguments: dict) -> dict:
     """Validate a request before calling a registered tool."""
     tool = AVAILABLE_TOOLS.get(name)
     if tool is None:
-        return {"ok": False, "error": f"Unknown tool: {name}"}
+        return tool_error(f"Unknown tool: {name}")
     if not isinstance(arguments, dict):
-        return {"ok": False, "error": "Tool arguments must be an object."}
+        return tool_error("Tool arguments must be an object.")
     try:
         signature(tool).bind(**arguments)
     except TypeError as error:
-        return {"ok": False, "error": str(error)}
+        return tool_error(str(error))
     return tool(**arguments)
