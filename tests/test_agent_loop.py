@@ -22,6 +22,14 @@ from harness_prototype.interaction_log import TurnLog
 class AgentLoopTests(unittest.TestCase):
     """Cover successful, exhausted, interrupted, and empty model turns."""
 
+    def test_system_prompt_explains_structured_file_changes(self) -> None:
+        """Tell the model how to select safe structured file actions."""
+        system_prompt = new_conversation()[0]["content"]
+        self.assertIn("never redirect an outside request", system_prompt)
+        self.assertIn("structured create, overwrite, append, and replace", system_prompt)
+        self.assertIn("pass its revision as expected_revision", system_prompt)
+        self.assertIn("Never repeat a failed write unchanged", system_prompt)
+
     def test_four_tool_rounds_can_finish(self) -> None:
         """Allow pagination with changed arguments before the final answer."""
         calls = [

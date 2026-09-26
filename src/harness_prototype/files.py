@@ -1,10 +1,14 @@
 """Bounded filesystem operations used by the agent tools."""
 
 import fnmatch
+import hashlib
 import json
 import os
+import shutil
+import tempfile
 import time
 from collections import deque
+from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 
@@ -13,6 +17,7 @@ from .tool_results import tool_error, tool_success
 MAX_FILE_BYTES = 1_048_576
 MAX_OUTPUT_CHARS = 8_000
 MAX_ENTRIES = 20_000
+MAX_FILE_CHANGES = 100
 SEARCH_SECONDS = 10
 SEARCH_OUTPUT_CHARS = 8_000
 EXCLUDED_SEARCH_DIRECTORIES = {
@@ -20,6 +25,301 @@ EXCLUDED_SEARCH_DIRECTORIES = {
     ".svn", ".tox", ".venv", "__pycache__", "build", "coverage", "dist",
     "node_modules", "target", "venv",
 }
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """Hold one validated structured file change."""
+
+    path: str
+    action: str
+    content: str
+    expected_revision: str | None
+    old_text: str | None
+
+
+def _parse_file_changes(changes: object) -> tuple[list[FileChange] | None, str | None]:
+    """Validate structured file changes without accessing the filesystem."""
+    if not isinstance(changes, list) or not changes:
+        return None, "changes must be a nonempty array."
+    if len(changes) > MAX_FILE_CHANGES:
+        return None, f"changes exceeds the {MAX_FILE_CHANGES}-file limit."
+    parsed = []
+    allowed_keys = {"path", "action", "content", "expected_revision", "old_text"}
+    for index, value in enumerate(changes):
+        if not isinstance(value, dict):
+            return None, f"changes[{index}] must be an object."
+        unexpected_keys = set(value) - allowed_keys
+        if unexpected_keys:
+            names = ", ".join(sorted(str(key) for key in unexpected_keys))
+            return None, f"changes[{index}] has unexpected fields: {names}."
+        path = value.get("path")
+        action = value.get("action")
+        content = value.get("content")
+        expected_revision = value.get("expected_revision")
+        old_text = value.get("old_text")
+        if not isinstance(path, str) or not path.strip():
+            return None, f"changes[{index}].path must be a nonempty string."
+        if action not in {"create", "overwrite", "append", "replace"}:
+            return None, (
+                f"changes[{index}].action must be create, overwrite, append, or replace."
+            )
+        if not isinstance(content, str):
+            return None, f"changes[{index}].content must be a string."
+        if expected_revision is not None and not isinstance(expected_revision, str):
+            return None, f"changes[{index}].expected_revision must be a string or null."
+        if old_text is not None and not isinstance(old_text, str):
+            return None, f"changes[{index}].old_text must be a string or null."
+        if action == "create":
+            if expected_revision is not None:
+                return None, f"changes[{index}].expected_revision must be null for create."
+            if old_text is not None:
+                return None, f"changes[{index}].old_text must be null for create."
+        else:
+            if not expected_revision:
+                return None, f"changes[{index}].expected_revision is required for {action}."
+            revision_value = expected_revision.removeprefix("sha256:")
+            if (
+                not expected_revision.startswith("sha256:")
+                or len(revision_value) != 64
+                or any(character not in "0123456789abcdef" for character in revision_value)
+            ):
+                return None, f"changes[{index}].expected_revision must be a read_file SHA-256 revision."
+            if action == "replace" and not old_text:
+                return None, f"changes[{index}].old_text is required for replace."
+            if action != "replace" and old_text is not None:
+                return None, f"changes[{index}].old_text is only valid for replace."
+        parsed.append(FileChange(path.strip(), action, content, expected_revision, old_text))
+    return parsed, None
+
+
+def _resolve_change_paths(
+    base_path: object,
+    changes: object,
+) -> tuple[list[tuple[FileChange, Path]] | None, str | None]:
+    """Validate changes and resolve their absolute target paths."""
+    parsed, error = _parse_file_changes(changes)
+    if parsed is None:
+        return None, error
+    if not isinstance(base_path, str) or not base_path.strip():
+        return None, "base_path must be a nonempty directory path."
+    try:
+        base = Path(base_path).expanduser().resolve()
+        resolved = [(change, (base / change.path).resolve()) for change in parsed]
+    except (OSError, RuntimeError, ValueError) as path_error:
+        return None, str(path_error)
+    if len({path for _, path in resolved}) != len(resolved):
+        return None, "changes must not target the same resolved file more than once."
+    return resolved, None
+
+
+def file_change_target_directories(arguments: object) -> list[Path] | dict | None:
+    """Resolve directories that must be authorized for apply_file_changes."""
+    if not isinstance(arguments, dict):
+        return None
+    resolved, error = _resolve_change_paths(
+        arguments.get("base_path"),
+        arguments.get("changes"),
+    )
+    if resolved is None:
+        return tool_error(
+            error or "Could not resolve file-change targets.",
+            status="access_validation_failed",
+        )
+    return list(dict.fromkeys(path.parent for _, path in resolved))
+
+
+def _file_revision(data: bytes) -> str:
+    """Return a stable revision token for exact optimistic concurrency checks."""
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _decode_text_target(data: bytes, path: Path) -> tuple[str, str, bool] | dict:
+    """Decode one bounded UTF-8 target and report its newline and BOM style."""
+    if len(data) > MAX_FILE_BYTES:
+        return tool_error(f"File exceeds the 1 MiB change limit: {path}")
+    if b"\x00" in data:
+        return tool_error(f"Binary file is not supported: {path}")
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return tool_error(f"File is not valid UTF-8 text: {path}")
+    first_lf = text.find("\n")
+    first_cr = text.find("\r")
+    if first_cr >= 0 and (first_lf < 0 or first_cr < first_lf):
+        newline = "\r\n" if first_cr + 1 < len(text) and text[first_cr + 1] == "\n" else "\r"
+    else:
+        newline = "\n"
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized, newline, data.startswith(b"\xef\xbb\xbf")
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize supported line endings for model-facing text operations."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _write_staged_file(path: Path, data: bytes) -> Path:
+    """Write and flush replacement bytes beside the destination for atomic replace."""
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".harness-change-", dir=path.parent)
+    staged = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(data)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except BaseException:
+        staged.unlink(missing_ok=True)
+        raise
+    return staged
+
+
+def apply_file_changes(base_path: str, changes: list[dict]) -> dict:
+    """Apply one preflighted batch of structured changes to authorized UTF-8 files.
+
+    Args:
+        base_path: Directory for relative change paths. Pass a get_location path
+            for a named location, or ``.`` for the process working directory.
+        changes: One to 100 objects with ``path``, ``action``, and ``content``.
+            Actions are ``create``, ``overwrite``, ``append``, or ``replace``.
+            Existing-file actions require ``expected_revision`` from read_file.
+            ``replace`` also requires a nonempty ``old_text`` that occurs exactly
+            once. Other actions must omit ``old_text``; create must omit
+            ``expected_revision``. Paths may be absolute or relative to base_path.
+            Example: ``[{"path": "app.py", "action": "append", "content":
+            "print('done')", "expected_revision": "sha256:..."}]``.
+
+    All changes are validated and staged before commit. Files must be UTF-8 text
+    no larger than 1 MiB before and after modification. Append inserts one line
+    separator when needed. Existing BOM and newline style are preserved.
+    """
+    resolved, resolve_error = _resolve_change_paths(base_path, changes)
+    if resolved is None:
+        return tool_error(resolve_error or "Could not resolve file changes.")
+    base = Path(base_path).expanduser().resolve()
+    if not base.is_dir():
+        return tool_error(f"Base path is not a directory: {base}")
+
+    prepared: list[tuple[FileChange, Path, bytes | None, bytes]] = []
+    for change, target in resolved:
+        if not target.parent.is_dir():
+            return tool_error(f"Parent directory does not exist: {target.parent}")
+        if target.exists() and not target.is_file():
+            return tool_error(f"Change target is not a regular file: {target}")
+        if change.action == "create":
+            if target.exists():
+                return tool_error(
+                    f"Create target already exists: {target}.",
+                    status="target_exists",
+                    path=str(target),
+                    required_action="read_then_choose_update_action",
+                )
+            updated_text = _normalize_text(change.content)
+            original = None
+            newline = "\n"
+            has_bom = False
+        else:
+            if not target.is_file():
+                return tool_error(f"Existing-file action target is not a regular file: {target}")
+            try:
+                original = target.read_bytes()
+            except OSError as error:
+                return tool_error(str(error))
+            decoded = _decode_text_target(original, target)
+            if isinstance(decoded, dict):
+                return decoded
+            current_revision = _file_revision(original)
+            if change.expected_revision != current_revision:
+                return tool_error(
+                    f"File revision changed or does not match: {target}",
+                    status="revision_mismatch",
+                    path=str(target),
+                    current_revision=current_revision,
+                    required_action="reread_then_retry",
+                )
+            original_text, newline, has_bom = decoded
+            content = _normalize_text(change.content)
+            if change.action == "overwrite":
+                updated_text = content
+            elif change.action == "append":
+                needs_separator = (
+                    original_text
+                    and content
+                    and not original_text.endswith("\n")
+                    and not content.startswith("\n")
+                )
+                separator = "\n" if needs_separator else ""
+                updated_text = original_text + separator + content
+            else:
+                old_text = _normalize_text(change.old_text or "")
+                occurrences = original_text.count(old_text)
+                if occurrences != 1:
+                    return tool_error(
+                        f"replace old_text must occur exactly once in {target}; found {occurrences}.",
+                        status="text_match_failed",
+                        path=str(target),
+                        occurrences=occurrences,
+                        required_action="reread_then_retry",
+                    )
+                updated_text = original_text.replace(old_text, content, 1)
+        encoded = updated_text.replace("\n", newline).encode("utf-8")
+        if has_bom:
+            encoded = b"\xef\xbb\xbf" + encoded
+        if len(encoded) > MAX_FILE_BYTES:
+            return tool_error(f"Result exceeds the 1 MiB change limit: {target}")
+        prepared.append((change, target, original, encoded))
+
+    staged_files: list[Path] = []
+    applied: list[tuple[Path, bytes | None]] = []
+    try:
+        for _, target, original, encoded in prepared:
+            staged = _write_staged_file(target, encoded)
+            if original is not None:
+                shutil.copymode(target, staged)
+            staged_files.append(staged)
+        for (change, target, original, _), staged in zip(prepared, staged_files, strict=True):
+            if change.action == "create":
+                if target.exists():
+                    raise OSError(f"Create target appeared before commit: {target}")
+                os.link(staged, target)
+            else:
+                if target.read_bytes() != original:
+                    raise OSError(f"Change target changed before commit: {target}")
+                os.replace(staged, target)
+            applied.append((target, original))
+    except OSError as error:
+        rollback_errors = []
+        for target, original in reversed(applied):
+            try:
+                if original is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    rollback_staged = _write_staged_file(target, original)
+                    try:
+                        shutil.copymode(target, rollback_staged)
+                        os.replace(rollback_staged, target)
+                    finally:
+                        rollback_staged.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                rollback_errors.append(f"{target}: {rollback_error}")
+        detail = f"File changes failed and applied changes were rolled back: {error}"
+        if rollback_errors:
+            detail = f"File-change outcome is uncertain after rollback failure: {'; '.join(rollback_errors)}"
+        return tool_error(detail, status="outcome_unknown" if rollback_errors else "rolled_back")
+    finally:
+        for staged in staged_files:
+            staged.unlink(missing_ok=True)
+
+    files = [
+        {"path": str(target), "action": change.action, "revision": _file_revision(encoded)}
+        for change, target, _, encoded in prepared
+    ]
+    return tool_success(
+        affected_paths=[entry["path"] for entry in files],
+        files=files,
+        summary=f"Applied {len(files)} structured file change(s).",
+        files_changed=len(prepared),
+    )
 
 
 def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict:
@@ -299,7 +599,7 @@ def search_project(
 
 
 def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
-    """Read a page of an authorized UTF-8 text file with one-based line numbers.
+    """Read a raw page of an authorized UTF-8 text file with a revision token.
 
     Args:
         path: Absolute file path, or a path relative to the working directory.
@@ -338,19 +638,23 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
     except (OSError, ValueError) as error:
         return tool_error(str(error))
 
-    content = []
+    content: list[str] = []
     size = 0
     for index in range(start_line - 1, min(len(lines), start_line - 1 + max_lines)):
-        numbered_line = f"{index + 1}: {lines[index]}\n"
-        if size + len(numbered_line) > MAX_OUTPUT_CHARS:
+        source_line = lines[index]
+        separator_size = 1 if content else 0
+        if size + separator_size + len(source_line) > MAX_OUTPUT_CHARS:
             if not content:
                 return tool_error(f"Line {index + 1} exceeds the output limit.")
             break
-        content.append(numbered_line)
-        size += len(numbered_line)
+        content.append(source_line)
+        size += separator_size + len(source_line)
 
     next_line = start_line + len(content)
     truncated = next_line <= len(lines)
+    raw_content = "\n".join(content)
+    if content and (truncated or text.endswith("\n")):
+        raw_content += "\n"
     return tool_success(
         complete=not truncated,
         truncated=truncated,
@@ -358,6 +662,7 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
         start_line=start_line,
         lines_read=len(content),
         total_lines=len(lines),
-        content="".join(content),
+        content=raw_content,
+        revision=_file_revision(data),
         next_line=next_line if truncated else None,
     )
