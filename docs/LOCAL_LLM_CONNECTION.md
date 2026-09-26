@@ -33,7 +33,7 @@ Copy-Item .env.example .env
 The script installs missing copies of Ollama and Tailscale through Windows Package
 Manager, optionally switches to the configured previously authenticated profile,
 and runs `tailscale up` when disconnected. It then starts the loopback Ollama API
-when needed, pulls the configured model, creates the private TCP Serve rule, and
+when needed, pulls the configured models, creates the private TCP Serve rule, and
 prints the URL teammates should use. It does not edit the centralized tailnet
 Grant. Tailscale may still require browser authentication after installation. The
 manual steps below explain the same setup and the required security decisions.
@@ -44,7 +44,8 @@ the team, while the account selection belongs to the individual computer:
 | Setting | Scope | Used by | Purpose |
 | --- | --- | --- | --- |
 | `HARNESS_OLLAMA_HOST` | Same for all teammates | Teammate script and harness | Reachable base URL printed by the host script |
-| `HARNESS_MODEL` | Same for host and teammates | Both scripts and harness | Exact model to pull on the host and request from teammates |
+| `HARNESS_MODEL` | Same for host and teammates | Both scripts and harness | Default used when the startup prompt is accepted without a number |
+| `HARNESS_MODELS` | Same for host and teammates | Both scripts and harness | Comma-separated models to install, verify, and offer at startup |
 | `HARNESS_TAILSCALE_PROFILE` | Per computer | Both scripts | Optional entry from `tailscale switch --list` that can reach the Ollama host. An empty value keeps the active profile. |
 | `HARNESS_OLLAMA_LOCAL_HOST` | Host only | Host script | Loopback-only Ollama API forwarded by Tailscale |
 | `HARNESS_TAILSCALE_SERVE_PORT` | Host only; reflected in the shared host URL | Host script | Private tailnet TCP port exposed by Tailscale Serve |
@@ -54,7 +55,7 @@ Command-line parameters override these values for one run; for example,
 Account names are identifiers only—the scripts never collect passwords or
 authentication keys.
 
-### 1. Install Ollama and the model manually
+### 1. Install Ollama and the models manually
 
 `setup-host.ps1` installs Ollama through Winget when it is missing. If Winget is
 unavailable or blocked by organizational policy, install Ollama for Windows from
@@ -66,15 +67,15 @@ ollama --version
 curl.exe http://127.0.0.1:11434
 ```
 
-Install the exact model used by the harness:
+Install the default models used by the harness:
 
 ```powershell
 ollama pull devstral-small-2:latest
+ollama pull qwen3:8b
 ollama list
 ```
 
-Test the local API. The JSON response should list
-`devstral-small-2:latest`:
+Test the local API. The JSON response should list both configured models:
 
 ```powershell
 curl.exe --max-time 15 http://127.0.0.1:11434/api/tags
@@ -181,6 +182,7 @@ tailnet contains or has access to the Ollama host; otherwise leave it empty:
 ```dotenv
 HARNESS_OLLAMA_HOST=http://HOST_TAILSCALE_IP:11434
 HARNESS_MODEL=devstral-small-2:latest
+HARNESS_MODELS=devstral-small-2:latest,qwen3:8b
 HARNESS_TAILSCALE_PROFILE=profile@example.com
 ```
 
@@ -195,15 +197,16 @@ Run the setup:
 
 The script uses Windows Package Manager to install missing copies of `uv` and
 Tailscale, uses `uv` to install Python 3.12, connects Tailscale, checks the remote
-model, preserves other `.env` values, and installs the locked dependencies. If
+models, preserves other `.env` values, and installs the locked dependencies. If
 `winget` is unavailable or blocked by organizational policy, install `uv` and
 Tailscale manually before running it. Approve any Windows installer prompt and
 sign in with the identity the host owner authorized if Tailscale opens a browser.
 If prompted to select a tailnet, choose the team's tailnet.
 
-Add `-Launch` to start the harness immediately. The `-OllamaHost`, `-Model`, and
-`-TailscaleProfile` parameters override `.env` for that run and save the selected
-values back to it. For example:
+Add `-Launch` to start the harness immediately. The `-OllamaHost`, `-Model`,
+`-Models`, and `-TailscaleProfile` parameters override `.env` for that run and
+save the selected values back to it. `-Models` accepts a comma-separated string.
+For example:
 
 ```powershell
 .\setup.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
@@ -219,8 +222,8 @@ Set-ExecutionPolicy -Scope Process RemoteSigned
 .\setup.ps1
 ```
 
-The script checks that the host is visible and that its Ollama API contains the
-configured model. Equivalent manual checks are:
+The script checks that the host is visible and that its Ollama API contains all
+configured models. Equivalent manual checks are:
 
 ```powershell
 tailscale status
@@ -242,8 +245,8 @@ Use the host's private Tailscale IPv4 address:
 curl.exe --max-time 15 http://HOST_TAILSCALE_IP:11434/api/tags
 ```
 
-The response should contain `devstral-small-2:latest`. Do not use `127.0.0.1`
-on a teammate's computer; that address refers to the teammate's computer.
+The response should contain every model listed in `HARNESS_MODELS`. Do not use
+`127.0.0.1` on a teammate's computer; that address refers to the teammate's computer.
 
 ### 4. Launch the harness
 
@@ -254,7 +257,7 @@ uv run python -m harness_prototype
 ```
 
 The setup script has already installed the locked Python dependencies. Teammates
-do not need to install Ollama or download the model locally. The project's `.env`
+do not need to install Ollama or download the models locally. The project's `.env`
 file is ignored by Git and should not be committed.
 
 ## Troubleshooting
@@ -290,8 +293,9 @@ port, and restart the harness after editing `.env`.
 
 ### The harness reports that the model is missing
 
-Run `ollama list` on the host and copy the model identifier exactly, including its
-tag, into the teammate's `HARNESS_MODEL` setting.
+Run `ollama list` on the host and copy each model identifier exactly, including its
+tag, into the teammate's `HARNESS_MODELS` setting. Keep `HARNESS_MODEL` set to one
+of those identifiers as the default startup choice.
 
 ## Restarting and stopping access
 

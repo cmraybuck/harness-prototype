@@ -11,7 +11,13 @@ from .agent_loop import (
     new_conversation,
     run_turn,
 )
-from .config import HOST, MODEL
+from .config import HOST, MODEL, MODELS
+
+
+MODEL_DESCRIPTIONS = {
+    "devstral-small-2:latest": "more capable; slower when it does not fit fully in GPU memory",
+    "qwen3:8b": "faster and lighter; may be less capable on complex tasks",
+}
 
 
 def print_response(text: str) -> None:
@@ -22,6 +28,27 @@ def print_response(text: str) -> None:
 def print_tool_call(name: str) -> None:
     """Make tool use visible in the terminal."""
     print(f"\n[Tool: {name}]", flush=True)
+
+
+def select_model(models: tuple[str, ...], default: str) -> str:
+    """Ask which configured model to use for this session."""
+    if len(models) == 1:
+        return models[0]
+
+    default_number = models.index(default) + 1
+    print("Available models:")
+    for number, model in enumerate(models, start=1):
+        description = MODEL_DESCRIPTIONS.get(model)
+        suffix = f" — {description}" if description else ""
+        print(f"  {number}. {model}{suffix}")
+
+    while True:
+        choice = input(f"Choose a model [1-{len(models)}] (default {default_number}): ").strip()
+        if not choice:
+            return default
+        if choice.isdigit() and 1 <= int(choice) <= len(models):
+            return models[int(choice) - 1]
+        print(f"Enter a number from 1 to {len(models)}.")
 
 
 def request_directory_access(directory: Path) -> AccessChoice:
@@ -56,10 +83,15 @@ def recover_turn(messages: list, turn_start: int) -> None:
 
 def main() -> None:
     """Read prompts and keep conversation history until the user exits."""
+    try:
+        selected_model = select_model(MODELS, MODEL)
+    except (KeyboardInterrupt, EOFError):
+        print("\nGoodbye.")
+        return
     client = Client(host=HOST)
     access = WorkspaceAccess(Path.cwd())
     messages = new_conversation()
-    print(f"Using {MODEL} at {HOST}")
+    print(f"Using {selected_model} at {HOST}")
     print(f"Working directory: {Path.cwd()}")
     print("Commands: 'clear' resets the conversation; 'quit' exits.\n")
 
@@ -85,7 +117,7 @@ def main() -> None:
         try:
             run_turn(
                 client=client,
-                model=MODEL,
+                model=selected_model,
                 messages=messages,
                 on_text=print_response,
                 on_tool=print_tool_call,

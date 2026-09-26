@@ -5,10 +5,11 @@ local files. It cannot edit files or run commands.
 
 ## Run
 
-Install uv and Ollama, start Ollama, and download the default model:
+Install uv and Ollama, start Ollama, and download the default model choices:
 
 ```powershell
 ollama pull devstral-small-2:latest
+ollama pull qwen3:8b
 uv run python -m harness_prototype
 ```
 
@@ -16,7 +17,7 @@ Run from this checkout. The installed command `uv run harness-prototype` and
 `uv run python -m harness_prototype` also work. The package and command retain the
 name `harness-prototype` even if your checkout is named `harness-og`.
 
-Copy `.env.example` to `.env` to configure the server, model, temperature, context
+Copy `.env.example` to `.env` to configure the server, model choices, temperature, context
 window, or tool-round limit. Environment variables override `.env`, then built-in
 defaults apply. Restart after changes. Settings are validated at startup; keep
 personal settings in the Git-ignored `.env`.
@@ -38,7 +39,7 @@ uv run harness-prototype
 ```
 
 The script installs `uv`, Python 3.12, and Tailscale when needed, connects
-Tailscale, verifies the private host and model, and installs the locked
+Tailscale, verifies the private host and models, and installs the locked
 dependencies. Command-line parameters can override and update its connection
 values; for example:
 
@@ -49,7 +50,7 @@ values; for example:
 The host can be prepared with
 `.\setup-host.ps1` after its `.env` is configured. The host script installs Ollama
 and Tailscale through Winget when needed, starts Ollama when its local API is
-offline, downloads the configured model, and creates the private forwarding rule.
+offline, downloads the configured models, and creates the private forwarding rule.
 Tailscale may require approval through Windows and browser authentication. The
 scripts do not change tailnet policy.
 
@@ -62,8 +63,12 @@ persistent machine or user policy:
 Set-ExecutionPolicy -Scope Process RemoteSigned
 ```
 
-Defaults: local server `http://127.0.0.1:11434`, model `devstral-small-2:latest`,
-temperature `0.15`, context window `4096`, and eight model/tool rounds per turn.
+Defaults: local server `http://127.0.0.1:11434`; startup choice between the more
+capable but heavier `devstral-small-2:latest` and the faster, lighter
+`qwen3:8b`; Devstral as the default selection; temperature `0.15`,
+context window `4096`; and eight model/tool rounds per turn. Set `HARNESS_MODELS`
+to a comma-separated list to change the choices and `HARNESS_MODEL` to set the
+default offered by the startup prompt.
 
 Try “What files are in the current directory?” or “Find hello.txt on my Desktop
 and read it.” Tool calls appear as `[Tool: name]` before the model's answer.
