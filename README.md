@@ -17,10 +17,10 @@ Run from this checkout. The installed command `uv run harness-prototype` and
 `uv run python -m harness_prototype` also work. The package and command retain the
 name `harness-prototype` even if your checkout is named `harness-og`.
 
-Copy `.env.example` to `.env` to configure the server, model choices, temperature, context
-window, or tool-round limit. Environment variables override `.env`, then built-in
-defaults apply. Restart after changes. Settings are validated at startup; keep
-personal settings in the Git-ignored `.env`.
+Copy `.env.example` to `.env` to configure the server, model choices, temperature,
+context window, tool-round limit, or tool approval policies. Environment variables
+override `.env`, then built-in defaults apply. Restart after changes. Settings are
+validated at startup; keep personal settings in the Git-ignored `.env`.
 
 For team access to an Ollama host over Tailscale, follow
 [`docs/LOCAL_LLM_CONNECTION.md`](docs/LOCAL_LLM_CONNECTION.md). It covers host
@@ -83,6 +83,33 @@ The directory where the app starts is the default workspace. File operations
 inside it require no confirmation. Before a file tool accesses another directory,
 the terminal asks whether to grant that directory, grant full machine access, or
 deny access. Grants and denials last until the app exits, including across `clear`.
+
+## Tool approval policies
+
+Every registered tool declares one risk category: `read_only`, `write`,
+`execution`, `network`, or `deployment`. Each category has an independent policy:
+
+- `always_allow` dispatches the operation without a tool-approval prompt.
+- `ask_first` displays the category, tool name, and complete argument object, then
+  requires explicit approval for that exact operation. Empty input, Ctrl+C, EOF,
+  and a negative response deny it.
+- `deny` refuses the operation without prompting.
+
+Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
+`HARNESS_EXECUTION_POLICY`, `HARNESS_NETWORK_POLICY`, and
+`HARNESS_DEPLOYMENT_POLICY`. The current five tools are all explicitly categorized
+as read-only, whose default is `always_allow`; therefore a default installation has
+no general tool-approval prompts. The other categories default to `ask_first` so
+future tools do not run silently when registered with those categories. Any
+category can instead be set to any of the three policies. Invalid values stop
+startup rather than falling back to a permissive policy.
+
+A denial is returned to the model as a recoverable `approval_denied` tool result,
+including the category, policy, tool name, and arguments, and dispatch does not
+occur. Every policy decision is recorded as a `tool_approval` interaction-log
+event with that same exact operation. This policy gate is distinct from the
+session workspace boundary below: a read-only tool that is generally allowed may
+still require directory access when it targets a path outside the workspace.
 
 ## File discovery and reading
 
@@ -190,9 +217,10 @@ Every line is a complete schema-version-1 JSON object with stable UUID
 `events` array. Events have a one-based `sequence`, timestamp, and type.
 `model_request` events contain the model, generation settings, complete prompts,
 and registered tool signatures/descriptions; `model_response` events contain
-text, calls, and duration; paired `tool_call` and `tool_result` events contain
-arguments, results, and duration. Failed, cancelled, context-limited, and
-tool-round-limited turns are recorded. Interrupted tool calls use
+text, calls, and duration; `tool_approval` events contain the configured policy,
+decision source, category, and exact requested operation; paired `tool_call` and
+`tool_result` events contain arguments, results, and duration. Failed, cancelled,
+context-limited, and tool-round-limited turns are recorded. Interrupted tool calls use
 `outcome_unknown`, while later calls in that batch use `not_executed`.
 
 Logs may contain prompts, model output, filenames, file contents, and tool
@@ -210,6 +238,7 @@ before sharing them.
 | `src/harness_prototype/main.py` | Terminal input/output, conversation recovery, and application entry point |
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
 | `src/harness_prototype/agent_loop.py` | Model instructions, streaming, context checks, and tool exchanges |
+| `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/access.py` | Session workspace grants, denials, and canonical path authorization |
 | `src/harness_prototype/tools.py` | Shared tool registry and dispatch |
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
@@ -255,8 +284,10 @@ Existing result files are never overwritten. Successful requests start as
 are recorded as failures. The temporary sample project is removed after the run.
 
 To add a tool, implement a reusable function, register it in `AVAILABLE_TOOLS`,
-update relevant model instructions, and add tests for meaningful success and failure
-paths. Agents must obtain test authorization before running them.
+assign its risk category in `TOOL_CATEGORIES`, update relevant model instructions,
+and add tests for meaningful success, denial, and failure paths. Registration
+fails at startup if the tool and category sets differ. Agents must obtain test
+authorization before running tests.
 Update this README when the interface or limits change. Before adding writes or
 commands, define allowed targets, validation, timeouts, output limits, and recovery
 for uncertain effects. See `AGENTS.md` for contributor guidance and

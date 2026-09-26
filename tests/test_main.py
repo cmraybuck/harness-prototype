@@ -8,11 +8,13 @@ from ollama import ChatResponse
 
 from harness_prototype.agent_loop import ContextBudgetError, new_conversation
 from harness_prototype.access import AccessChoice
+from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.main import (
     TerminalUI,
     main,
     recover_turn,
     request_directory_access,
+    request_tool_approval,
     select_model,
 )
 
@@ -76,6 +78,16 @@ class MainTests(unittest.TestCase):
         self.assertEqual(choice, AccessChoice.GRANT_ALL)
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertIn("Please enter 1, 2, or 3", rendered)
+
+    def test_tool_approval_prompt_displays_exact_operation(self) -> None:
+        """Show the category, tool, and arguments before accepting approval."""
+        request = ApprovalRequest("run_command", {"command": "build"}, ToolCategory.EXECUTION)
+        with patch("builtins.input", side_effect=["maybe", "yes"]), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(request))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("execution", rendered)
+        self.assertIn("run_command", rendered)
+        self.assertIn('"command": "build"', rendered)
 
     def test_context_stop_can_be_cleared(self) -> None:
         """Allow explicit reset after a budget stop and submit a fresh prompt."""

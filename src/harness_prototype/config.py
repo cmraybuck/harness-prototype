@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
+from .approval import ApprovalPolicy, ToolCategory
+
 # Anchor to this checkout, not the directory being searched by the harness.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
@@ -26,6 +28,7 @@ class Settings:
     max_tool_rounds: int
     log_directory: Path
     log_redact_values: tuple[str, ...]
+    approval_policies: dict[ToolCategory, ApprovalPolicy]
 
 
 def load_settings(
@@ -52,6 +55,16 @@ def load_settings(
         if number < 1:
             raise ValueError(f"{name} must be a positive integer.")
         return number
+
+    def approval_policy(category: ToolCategory, default: ApprovalPolicy) -> ApprovalPolicy:
+        """Parse one category policy without accepting an implicit fallback."""
+        name = f"HARNESS_{category.value.upper()}_POLICY"
+        raw_policy = value(name, default.value).casefold()
+        try:
+            return ApprovalPolicy(raw_policy)
+        except ValueError:
+            choices = ", ".join(policy.value for policy in ApprovalPolicy)
+            raise ValueError(f"{name} must be one of: {choices}.") from None
 
     host = value("HARNESS_OLLAMA_HOST", "http://127.0.0.1:11434")
     try:
@@ -106,6 +119,23 @@ def load_settings(
             + ", ".join(missing_redactions)
         )
 
+    approval_policies = {
+        ToolCategory.READ_ONLY: approval_policy(
+            ToolCategory.READ_ONLY,
+            ApprovalPolicy.ALWAYS_ALLOW,
+        ),
+        ToolCategory.WRITE: approval_policy(ToolCategory.WRITE, ApprovalPolicy.ASK_FIRST),
+        ToolCategory.EXECUTION: approval_policy(
+            ToolCategory.EXECUTION,
+            ApprovalPolicy.ASK_FIRST,
+        ),
+        ToolCategory.NETWORK: approval_policy(ToolCategory.NETWORK, ApprovalPolicy.ASK_FIRST),
+        ToolCategory.DEPLOYMENT: approval_policy(
+            ToolCategory.DEPLOYMENT,
+            ApprovalPolicy.ASK_FIRST,
+        ),
+    }
+
     return Settings(
         host=host,
         model=model,
@@ -115,6 +145,7 @@ def load_settings(
         max_tool_rounds=positive_integer("HARNESS_MAX_TOOL_ROUNDS", "8"),
         log_directory=log_directory.resolve(),
         log_redact_values=tuple(str(values[name]) for name in redact_names),
+        approval_policies=approval_policies,
     )
 
 
@@ -127,3 +158,4 @@ CONTEXT_LENGTH = _settings.context_length
 MAX_TOOL_ROUNDS = _settings.max_tool_rounds
 LOG_DIRECTORY = _settings.log_directory
 LOG_REDACT_VALUES = _settings.log_redact_values
+APPROVAL_POLICIES = _settings.approval_policies

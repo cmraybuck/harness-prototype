@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from ollama import ChatResponse
 
 from harness_prototype.access import AccessChoice, WorkspaceAccess
+from harness_prototype.approval import ApprovalPolicy, ToolCategory
 from harness_prototype.agent_loop import (
     ContextBudgetError,
     EmptyModelResponseError,
@@ -138,6 +139,38 @@ class AgentLoopTests(unittest.TestCase):
         outcome = json.loads(messages[-2]["content"])
         self.assertEqual(outcome["status"], "access_denied")
 
+    def test_policy_denial_is_logged_and_prevents_execution(self) -> None:
+        """Log the exact denied operation and return it without side effects."""
+        arguments = {"path": "."}
+        response = ChatResponse(message={"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_files", "arguments": arguments}}
+        ]})
+        client = Mock()
+        client.chat.side_effect = [
+            [response],
+            [ChatResponse(message={"role": "assistant", "content": "Operation denied."})],
+        ]
+        messages = new_conversation() + [{"role": "user", "content": "list files"}]
+        turn_log = TurnLog("session", "list files")
+        with patch.dict(
+            "harness_prototype.agent_loop.APPROVAL_POLICIES",
+            {ToolCategory.READ_ONLY: ApprovalPolicy.DENY},
+        ), patch("harness_prototype.agent_loop.execute_tool") as execute:
+            run_turn(
+                client,
+                "test",
+                messages,
+                lambda text: None,
+                lambda name: None,
+                turn_log=turn_log,
+            )
+        execute.assert_not_called()
+        result = json.loads(messages[-2]["content"])
+        self.assertEqual(result["status"], "approval_denied")
+        approval_event = next(event for event in turn_log.events if event["type"] == "tool_approval")
+        self.assertEqual(approval_event["decision"], "denied")
+        self.assertEqual(approval_event["operation"], {"tool_name": "list_files", "arguments": arguments})
+
     def test_transient_empty_response_is_retried(self) -> None:
         """Retry one empty completion and retain the eventual answer."""
         messages = new_conversation() + [{"role": "user", "content": "find a file"}]
@@ -181,7 +214,7 @@ class AgentLoopTests(unittest.TestCase):
                 )
         event_types = [event["type"] for event in turn_log.events]
         self.assertEqual(event_types, [
-            "model_request", "model_response", "tool_call", "tool_result",
+            "model_request", "model_response", "tool_call", "tool_approval", "tool_result",
             "tool_call", "tool_result",
         ])
         results = [event["result"] for event in turn_log.events if event["type"] == "tool_result"]

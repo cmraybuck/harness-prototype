@@ -1,7 +1,8 @@
-"""Read-only tools exposed to the model."""
+"""Registration, risk categorization, and dispatch for model-facing tools."""
 
 from inspect import signature
 
+from .approval import ToolCategory
 from .files import find_files, list_files, read_file, search_project
 from .locations import get_location
 from .tool_results import tool_error
@@ -15,6 +16,19 @@ AVAILABLE_TOOLS = {
     "search_project": search_project,
     "read_file": read_file,
 }
+
+# Every registered tool must have an explicit category so policy lookup cannot
+# silently fall back to a permissive default as new capabilities are added.
+TOOL_CATEGORIES = {
+    "get_location": ToolCategory.READ_ONLY,
+    "list_files": ToolCategory.READ_ONLY,
+    "find_files": ToolCategory.READ_ONLY,
+    "search_project": ToolCategory.READ_ONLY,
+    "read_file": ToolCategory.READ_ONLY,
+}
+
+if AVAILABLE_TOOLS.keys() != TOOL_CATEGORIES.keys():
+    raise RuntimeError("Every available tool must declare exactly one approval category.")
 
 
 def execute_tool(name: str, arguments: dict) -> dict:
