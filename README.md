@@ -102,6 +102,12 @@ to reset the conversation, `quit` to exit, or Ctrl+C during a response to cancel
 the turn. ANSI color is used only in an interactive terminal; set `NO_COLOR` to
 disable color styling.
 
+For diagnosis requests, the agent is instructed to trace the reported operation
+through its implementation, helpers or callers, focused tests, and relevant local
+diffs before naming a root cause. Its answer should identify the responsible code,
+explain the causal chain, and distinguish confirmed findings from unverified
+hypotheses. A diagnosis-only request does not authorize file changes.
+
 The directory where the app starts is the default workspace. File operations
 inside it require no confirmation. Before a file tool accesses another directory,
 the terminal asks whether to grant that directory, grant full machine access, or

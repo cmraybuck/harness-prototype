@@ -32,6 +32,18 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("pass only test selectors", system_prompt)
         self.assertIn("status=failed", system_prompt)
 
+    def test_system_prompt_requires_evidence_before_diagnosis(self) -> None:
+        """Require implementation evidence, causal tracing, and honest confidence."""
+        system_prompt = new_conversation()[0]["content"]
+        self.assertIn("Search excerpts are navigation aids", system_prompt)
+        self.assertIn("read its implementation", system_prompt)
+        self.assertIn("inspect focused tests", system_prompt)
+        self.assertIn("inspect the relevant git_diff", system_prompt)
+        self.assertIn("exact observed expression or branch", system_prompt)
+        self.assertIn("explain the causal chain", system_prompt)
+        self.assertIn("strongly supported but unverified", system_prompt)
+        self.assertIn("do not change files", system_prompt)
+
     def test_four_tool_rounds_can_finish(self) -> None:
         """Allow pagination with changed arguments before the final answer."""
         calls = [
