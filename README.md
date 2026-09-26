@@ -1,7 +1,7 @@
 # Harness
 
-A terminal assistant powered by Ollama with read-only tools to list, find, search, and read
-local files. It cannot edit files or run commands.
+A terminal assistant powered by Ollama with read-only tools to list, find, search, read
+local files, and inspect Git status. It cannot edit files or run general commands.
 
 ## Run
 
@@ -98,7 +98,7 @@ Every registered tool declares one risk category: `read_only`, `write`,
 
 Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
 `HARNESS_EXECUTION_POLICY`, `HARNESS_NETWORK_POLICY`, and
-`HARNESS_DEPLOYMENT_POLICY`. The current five tools are all explicitly categorized
+`HARNESS_DEPLOYMENT_POLICY`. The current six tools are all explicitly categorized
 as read-only, whose default is `always_allow`; therefore a default installation has
 no general tool-approval prompts. The other categories default to `ask_first` so
 future tools do not run silently when registered with those categories. Any
@@ -171,6 +171,7 @@ Representative result shapes (payload fields are abbreviated) are:
 | `find_files(pattern, root=".", max_results=100)` | Matches filenames case-insensitively, including wildcards such as `*.py`. A plain extensionless name prefers exact matches and otherwise matches that name with any extension. Returns absolute `matches`, resolved `root`, `extension_inferred`, `complete`, `stop_reason`, `skipped_links`, and `errors`. |
 | `search_project(text, path=".", file_pattern="*", max_results=100)` | Searches nested UTF-8 files for case-sensitive literal text. `path` may be an absolute or working-directory-relative file or directory; `file_pattern` is a case-insensitive filename wildcard. Returns resolved paths, one-based line numbers, excerpts, counts, skipped-file categories, errors, and explicit `complete`/`stop_reason` status. |
 | `read_file(path, start_line=1, max_lines=100)` | Returns numbered UTF-8 text, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`. |
+| `git_status()` | Reports staged, unstaged, untracked, renamed, deleted, and conflicted workspace-relative paths. `clean=true` explicitly identifies a clean repository. Paths may appear in multiple categories; rename entries include old and new paths plus index/worktree status. Non-Git workspaces return a structured error. |
 
 Standard user-folder discovery uses Windows settings, including OneDrive redirection. Linux and other Unix-like systems consult XDG user-directory configuration and then existing conventional home folders; macOS uses existing conventional home folders. Missing or unavailable folders return errors, never guessed paths.
 
@@ -180,6 +181,7 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 - **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 error messages are returned. `error_count` retains the total and `errors_truncated=true` reports omitted diagnostics. Narrow the root when limits are reached.
 - **Content search:** searches an authorized file or directory, stopping at 1–100 matching lines (default 100), 20,000 entries, 8,000 JSON-encoded result characters, or a best-effort 10-second deadline. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
 - **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
+- **Git status:** inspects only the active workspace, returns at most 1,000 entries, and times out after 10 seconds. A limited result is marked incomplete and truncated. It uses Git's NUL-delimited porcelain format, does not contact remotes, and disables optional index locking and refresh. Ignored files are not reported.
 
 Individual filesystem operations may still block on a slow or unavailable drive.
 Search deadlines are best effort, not hard timeouts.
@@ -265,6 +267,7 @@ before sharing them.
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
 | `src/harness_prototype/files.py` | Directory listing, bounded recursive search, and text reading |
+| `src/harness_prototype/git.py` | Bounded, read-only Git workspace status inspection |
 | `src/harness_prototype/config.py` | Validated configuration |
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
 | `setup.ps1` | Windows teammate prerequisite checks, remote Ollama validation, and local setup |

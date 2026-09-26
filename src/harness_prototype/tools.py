@@ -4,6 +4,7 @@ from inspect import signature
 
 from .approval import ToolCategory
 from .files import find_files, list_files, read_file, search_project
+from .git import git_status
 from .locations import get_location
 from .tool_results import tool_error
 
@@ -15,6 +16,7 @@ AVAILABLE_TOOLS = {
     "find_files": find_files,
     "search_project": search_project,
     "read_file": read_file,
+    "git_status": git_status,
 }
 
 # Every registered tool must have an explicit category so policy lookup cannot
@@ -25,6 +27,7 @@ TOOL_CATEGORIES = {
     "find_files": ToolCategory.READ_ONLY,
     "search_project": ToolCategory.READ_ONLY,
     "read_file": ToolCategory.READ_ONLY,
+    "git_status": ToolCategory.READ_ONLY,
 }
 
 if AVAILABLE_TOOLS.keys() != TOOL_CATEGORIES.keys():

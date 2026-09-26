@@ -1,6 +1,7 @@
 """Registration and dispatch checks for model-facing tools."""
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +17,7 @@ class ToolDispatchTests(unittest.TestCase):
         """Expose exactly the supported read-only tool set."""
         self.assertEqual(
             set(AVAILABLE_TOOLS),
-            {"get_location", "list_files", "find_files", "search_project", "read_file"},
+            {"get_location", "list_files", "find_files", "search_project", "read_file", "git_status"},
         )
 
     def test_all_current_tools_are_explicitly_read_only(self) -> None:
@@ -52,6 +53,9 @@ class ToolDispatchTests(unittest.TestCase):
             root = Path(temporary)
             sample = root / "sample.txt"
             sample.write_text("needle\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "init"], cwd=root, capture_output=True, check=True,
+            )
             original_directory = Path.cwd()
             try:
                 os.chdir(root)
@@ -61,6 +65,7 @@ class ToolDispatchTests(unittest.TestCase):
                     "find_files": {"pattern": "sample.txt", "root": temporary},
                     "search_project": {"text": "needle"},
                     "read_file": {"path": str(sample)},
+                    "git_status": {},
                 }
                 for name in AVAILABLE_TOOLS:
                     with self.subTest(name=name, outcome="success"):
