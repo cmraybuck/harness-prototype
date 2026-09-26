@@ -22,6 +22,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((settings.temperature, settings.context_length, settings.max_tool_rounds), (0.15, 4096, 8))
         self.assertEqual(settings.identical_tool_call_limit, 2)
         self.assertEqual(settings.consecutive_tool_failure_limit, 3)
+        self.assertEqual(settings.test_command[:3], ("uv", "run", "python"))
+        self.assertEqual(settings.targeted_test_command[-1], "{targets}")
+        self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (120, 12000))
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
         self.assertEqual(settings.log_redact_values, ())
         self.assertEqual(settings.approval_policies[ToolCategory.READ_ONLY], ApprovalPolicy.ALWAYS_ALLOW)
@@ -38,6 +41,9 @@ class ConfigTests(unittest.TestCase):
                 'HARNESS_CONTEXT_LENGTH=8192\nHARNESS_MAX_TOOL_ROUNDS=12\n'
                 'HARNESS_IDENTICAL_TOOL_CALL_LIMIT=4\n'
                 'HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT=5\n'
+                'HARNESS_TEST_COMMAND=["python","-m","pytest"]\n'
+                'HARNESS_TARGETED_TEST_COMMAND=["python","-m","pytest","{targets}"]\n'
+                'HARNESS_TEST_TIMEOUT_SECONDS=45\nHARNESS_TEST_OUTPUT_LIMIT=9000\n'
                 'HARNESS_TEMPERATURE=0.3\nHARNESS_OLLAMA_HOST=http://localhost:1234\n',
                 encoding="utf-8",
             )
@@ -48,6 +54,12 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.max_tool_rounds, 12)
         self.assertEqual(settings.identical_tool_call_limit, 4)
         self.assertEqual(settings.consecutive_tool_failure_limit, 5)
+        self.assertEqual(settings.test_command, ("python", "-m", "pytest"))
+        self.assertEqual(
+            settings.targeted_test_command,
+            ("python", "-m", "pytest", "{targets}"),
+        )
+        self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (45, 9000))
         self.assertEqual(settings.temperature, 0.3)
         self.assertEqual(settings.host, "http://localhost:1234")
 
@@ -63,10 +75,31 @@ class ConfigTests(unittest.TestCase):
             "HARNESS_MAX_TOOL_ROUNDS": ["0", "abc"],
             "HARNESS_IDENTICAL_TOOL_CALL_LIMIT": ["0", "false"],
             "HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT": ["-1", "1.5"],
+            "HARNESS_TEST_TIMEOUT_SECONDS": ["0", "1.5"],
+            "HARNESS_TEST_OUTPUT_LIMIT": ["-1", "false"],
             "HARNESS_TEMPERATURE": ["nan", "inf", "-0.1", "3"],
             "HARNESS_MODEL": ["", " "],
             "HARNESS_MODELS": ["", " ", ", ,"],
             "HARNESS_OLLAMA_HOST": ["localhost", "http://localhost/api/chat", "http://localhost:99999", "http://user:secret@localhost"],
+        }
+        for key, values in cases.items():
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
+                    load_settings(None, {key: value})
+
+    def test_test_commands_require_safe_json_templates(self) -> None:
+        """Reject shell strings, malformed arguments, and misplaced target placeholders."""
+        cases = {
+            "HARNESS_TEST_COMMAND": [
+                "uv run pytest",
+                "[]",
+                '["pytest","{targets}"]',
+            ],
+            "HARNESS_TARGETED_TEST_COMMAND": [
+                '["pytest"]',
+                '["pytest","{targets}","{targets}"]',
+                '["pytest",""]',
+            ],
         }
         for key, values in cases.items():
             for value in values:

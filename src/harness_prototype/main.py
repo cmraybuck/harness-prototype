@@ -15,7 +15,14 @@ from .agent_loop import (
     new_conversation,
     run_turn,
 )
-from .config import HOST, LOG_DIRECTORY, LOG_REDACT_VALUES, MODEL, MODELS
+from .config import (
+    HOST,
+    LOG_DIRECTORY,
+    LOG_REDACT_VALUES,
+    MODEL,
+    MODELS,
+    TEST_TIMEOUT_SECONDS,
+)
 from .files import file_change_target_paths
 from .interaction_log import InteractionLogger
 
@@ -305,6 +312,18 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
         f"Risk       {_terminal_text(request.category.value)}",
         f"Operation  {_terminal_text(request.tool_name)}",
     ]
+    if request.tool_name == "run_tests" and isinstance(request.arguments, dict):
+        targets = request.arguments.get("targets")
+        if targets is None:
+            lines.append("Scope      Full configured test suite")
+        elif isinstance(targets, list):
+            lines.append(f"Scope      {len(targets)} targeted test selector(s)")
+            for target in targets[:10]:
+                lines.append(f"- {_terminal_text(target)}")
+            if len(targets) > 10:
+                lines.append(f"- and {len(targets) - 10} more targets")
+        lines.append(f"Timeout    {TEST_TIMEOUT_SECONDS} seconds")
+        return lines
     if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
         return lines
 
@@ -343,6 +362,15 @@ def _tool_approval_receipt(
 ) -> str:
     """Return a compact conversation receipt for a tool permission decision."""
     decision = "Allowed" if allowed else "Denied"
+    if request.tool_name == "run_tests" and isinstance(request.arguments, dict):
+        targets = request.arguments.get("targets")
+        if targets is None:
+            scope = "the full test suite"
+        elif isinstance(targets, list):
+            scope = f"{len(targets)} test target(s)"
+        else:
+            scope = "the requested test operation"
+        return f"{decision} {scope}."
     if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
         changes = request.arguments.get("changes")
         if isinstance(changes, list):
