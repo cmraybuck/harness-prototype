@@ -7,23 +7,49 @@ import unittest
 from pathlib import Path
 
 from harness_prototype.approval import ToolCategory
-from harness_prototype.tools import AVAILABLE_TOOLS, TOOL_CATEGORIES, execute_tool
+from harness_prototype.tools import (
+    AVAILABLE_TOOLS,
+    MODEL_TOOLS,
+    TOOL_CATEGORIES,
+    TOOL_SPECS,
+    TOOL_TARGET_RESOLVERS,
+    execute_tool,
+)
 
 
 class ToolDispatchTests(unittest.TestCase):
     """Cover registry membership and dispatch-boundary validation."""
 
     def test_expected_tools_are_registered(self) -> None:
-        """Expose exactly the supported read-only tool set."""
+        """Expose exactly the supported model-facing tool set."""
         self.assertEqual(
             set(AVAILABLE_TOOLS),
-            {"get_location", "list_files", "find_files", "search_project", "read_file", "git_status"},
+            {
+                "get_location", "list_files", "find_files", "search_project",
+                "read_file", "git_status", "apply_file_changes",
+            },
         )
 
-    def test_all_current_tools_are_explicitly_read_only(self) -> None:
-        """Assign every existing capability to the separately configurable read-only policy."""
+    def test_all_current_tools_have_explicit_risk_categories(self) -> None:
+        """Assign every capability to its separately configurable risk policy."""
         self.assertEqual(set(TOOL_CATEGORIES), set(AVAILABLE_TOOLS))
-        self.assertEqual(set(TOOL_CATEGORIES.values()), {ToolCategory.READ_ONLY})
+        self.assertEqual(TOOL_CATEGORIES["apply_file_changes"], ToolCategory.WRITE)
+        read_only_tools = set(AVAILABLE_TOOLS) - {"apply_file_changes"}
+        self.assertEqual(
+            {TOOL_CATEGORIES[name] for name in read_only_tools},
+            {ToolCategory.READ_ONLY},
+        )
+        self.assertEqual(set(TOOL_SPECS), set(AVAILABLE_TOOLS))
+        self.assertEqual(set(TOOL_TARGET_RESOLVERS), {"apply_file_changes"})
+        file_change_schema = next(
+            tool for tool in MODEL_TOOLS
+            if isinstance(tool, dict) and tool["function"]["name"] == "apply_file_changes"
+        )
+        change_items = file_change_schema["function"]["parameters"]["properties"]["changes"]["items"]
+        self.assertEqual(
+            change_items["properties"]["action"]["enum"],
+            ["create", "overwrite", "append", "replace"],
+        )
 
     def test_rejects_unknown_tool_and_invalid_argument_shape(self) -> None:
         """Return structured errors for invalid dispatch requests."""
@@ -33,6 +59,10 @@ class ToolDispatchTests(unittest.TestCase):
     def test_rejects_signature_mismatch(self) -> None:
         """Reject unexpected arguments before invoking a tool."""
         self.assertFalse(execute_tool("list_files", {"extra": True})["ok"])
+        self.assertFalse(execute_tool(
+            "apply_file_changes",
+            {"changes": []},
+        )["ok"])
 
     def assert_common_contract(self, result: dict, expected_ok: bool) -> None:
         """Check the status fields shared by every model-facing result."""
@@ -66,6 +96,12 @@ class ToolDispatchTests(unittest.TestCase):
                     "search_project": {"text": "needle"},
                     "read_file": {"path": str(sample)},
                     "git_status": {},
+                    "apply_file_changes": {
+                        "base_path": ".",
+                        "changes": [
+                            {"path": "created.txt", "action": "create", "content": "created"},
+                        ],
+                    },
                 }
                 for name in AVAILABLE_TOOLS:
                     with self.subTest(name=name, outcome="success"):

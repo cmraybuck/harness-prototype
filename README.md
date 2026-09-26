@@ -1,7 +1,7 @@
 # Harness
 
-A terminal assistant powered by Ollama with read-only tools to list, find, search, read
-local files, and inspect Git status. It cannot edit files or run general commands.
+A terminal assistant powered by Ollama with tools to list, find, search, read, and
+change UTF-8 files, plus inspect Git status. It cannot run general commands.
 
 ## Run
 
@@ -76,9 +76,15 @@ and read it.” In an interactive terminal, startup clears prior terminal output
 shows a temporary model-selection screen. After selection, that screen and the
 existing scrollback are cleared so the **Coding Agent** conversation starts at the
 top of its own view. The interface labels each side of the conversation and shows
-tool activity as a subdued `Working` status. Type `clear` to reset the conversation,
-`quit` to exit, or Ctrl+C during a response to cancel the turn. ANSI color is used
-only in an interactive terminal; set `NO_COLOR` to disable color styling.
+tool activity as a subdued `Working` status. Permission requests use the terminal's
+alternate screen as a temporary review view; after a decision, the conversation is
+restored with only a short, subdued permission receipt beside tool activity. All
+selection views use Up/Down to move and Space or Enter to confirm; typing a number
+or yes/no is not required. Menus use the conversation's cyan and green palette,
+and permission menus initially select the least-broad allow option. Type `clear`
+to reset the conversation, `quit` to exit, or Ctrl+C during a response to cancel
+the turn. ANSI color is used only in an interactive terminal; set `NO_COLOR` to
+disable color styling.
 
 The directory where the app starts is the default workspace. File operations
 inside it require no confirmation. Before a file tool accesses another directory,
@@ -91,17 +97,22 @@ Every registered tool declares one risk category: `read_only`, `write`,
 `execution`, `network`, or `deployment`. Each category has an independent policy:
 
 - `always_allow` dispatches the operation without a tool-approval prompt.
-- `ask_first` displays the category, tool name, and complete argument object, then
-  requires explicit approval for that exact operation. Empty input, Ctrl+C, EOF,
-  and a negative response deny it.
+- `ask_first` displays the category, tool name, and a concise description of the
+  operation, then requires explicit approval for that exact operation. Structured
+  file changes show their action and path but omit file contents and revision data.
+  Their review view also offers session-long edit access to the exact files in the
+  batch. Later changes are approved automatically only when every target has that
+  grant. Ctrl+C and EOF deny the request.
 - `deny` refuses the operation without prompting.
 
 Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
 `HARNESS_EXECUTION_POLICY`, `HARNESS_NETWORK_POLICY`, and
-`HARNESS_DEPLOYMENT_POLICY`. The current six tools are all explicitly categorized
-as read-only, whose default is `always_allow`; therefore a default installation has
-no general tool-approval prompts. The other categories default to `ask_first` so
-future tools do not run silently when registered with those categories. Any
+`HARNESS_DEPLOYMENT_POLICY`. The six inspection tools are explicitly categorized
+as read-only, whose default is `always_allow`; therefore they have no general
+tool-approval prompts in a default installation. `apply_file_changes` is
+categorized as write, whose default is `ask_first`, so its summarized structured
+change batch must be approved before dispatch. The other categories also default
+to `ask_first`. Any
 category can instead be set to any of the three policies. Invalid values stop
 startup rather than falling back to a permissive policy.
 
@@ -111,11 +122,14 @@ occur. Every policy decision is recorded as a `tool_approval` interaction-log
 event with that same exact operation. This policy gate is distinct from the
 session workspace boundary below: a read-only tool that is generally allowed may
 still require directory access when it targets a path outside the workspace.
+Session file-edit grants affect only the write approval gate: they never bypass
+directory access checks, file revisions, validation, or application shutdown.
 
 ## File discovery and reading
 
 Paths refer to the computer running Python, including when Ollama is remote.
-Relative paths start at the process's working directory; tools never change it.
+Relative paths start at the process's working directory unless a tool exposes an
+explicit base path; tools never change the working directory.
 
 - For an explicit path, use that path. For only a filename, search the working directory first. A plain name without an extension prefers an exact filename, then falls back to files with the same name and any extension.
 - For Desktop, Documents, Downloads, Pictures, Music, Videos, or home, call `get_location` with the normalized folder name and pass its returned path to a file tool.
@@ -170,8 +184,9 @@ Representative result shapes (payload fields are abbreviated) are:
 | `list_files(path=".", offset=0, max_entries=100)` | Lists sorted immediate names, including hidden entries; folders end in `/`. Continue with `next_offset` when `truncated=true`. |
 | `find_files(pattern, root=".", max_results=100)` | Matches filenames case-insensitively, including wildcards such as `*.py`. A plain extensionless name prefers exact matches and otherwise matches that name with any extension. Returns absolute `matches`, resolved `root`, `extension_inferred`, `complete`, `stop_reason`, `skipped_links`, and `errors`. |
 | `search_project(text, path=".", file_pattern="*", max_results=100)` | Searches nested UTF-8 files for case-sensitive literal text. `path` may be an absolute or working-directory-relative file or directory; `file_pattern` is a case-insensitive filename wildcard. Returns resolved paths, one-based line numbers, excerpts, counts, skipped-file categories, errors, and explicit `complete`/`stop_reason` status. |
-| `read_file(path, start_line=1, max_lines=100)` | Returns numbered UTF-8 text, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`. |
+| `read_file(path, start_line=1, max_lines=100)` | Returns raw UTF-8 text, a SHA-256 `revision`, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`; the revision identifies the complete file and remains the same across pages. |
 | `git_status()` | Reports staged, unstaged, untracked, renamed, deleted, and conflicted workspace-relative paths. `clean=true` explicitly identifies a clean repository. Paths may appear in multiple categories; rename entries include old and new paths plus index/worktree status. Non-Git workspaces return a structured error. |
+| `apply_file_changes(base_path, changes)` | Applies one preflighted batch of 1–100 structured `create`, `overwrite`, `append`, or `replace` actions to UTF-8 files of any extension. Relative paths start at `base_path`; absolute paths are used directly. Existing-file actions require the current `revision` from `read_file`; `replace` also requires `old_text` that occurs exactly once. Returns absolute `affected_paths` and per-file actions and new revisions. |
 
 Standard user-folder discovery uses Windows settings, including OneDrive redirection. Linux and other Unix-like systems consult XDG user-directory configuration and then existing conventional home folders; macOS uses existing conventional home folders. Missing or unavailable folders return errors, never guessed paths.
 
@@ -180,8 +195,9 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 - **Listing:** 1–100 entries and 4,000 characters of JSON-encoded entry text per page. Directories over 20,000 entries return an error before sorting. Offsets assume the directory has not changed.
 - **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 error messages are returned. `error_count` retains the total and `errors_truncated=true` reports omitted diagnostics. Narrow the root when limits are reached.
 - **Content search:** searches an authorized file or directory, stopping at 1–100 matching lines (default 100), 20,000 entries, 8,000 JSON-encoded result characters, or a best-effort 10-second deadline. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
-- **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
+- **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Content is returned raw with line endings normalized to LF; `revision` hashes the original complete bytes. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
 - **Git status:** inspects only the active workspace, returns at most 1,000 entries, and times out after 10 seconds. A limited result is marked incomplete and truncated. It uses Git's NUL-delimited porcelain format, does not contact remotes, and disables optional index locking and refresh. Ignored files are not reported.
+- **Changing files:** accepts 1–100 distinct files and limits every existing and resulting file to 1 MiB. `create` fails if the target exists. `overwrite`, `append`, and `replace` fail with `revision_mismatch` unless their `expected_revision` matches the complete current bytes. `append` inserts one detected-style line separator when needed. `replace` changes one unique exact `old_text` occurrence. Any extension is accepted, but contents must be UTF-8 text; binary formats are unsupported. Existing UTF-8 BOM and newline style are preserved. Every resolved target directory is checked against session grants before dispatch, including paths reached through links. All changes are preflighted and staged before commit; failures trigger best-effort rollback and report `rolled_back` or `outcome_unknown`.
 
 Individual filesystem operations may still block on a slow or unavailable drive.
 Search deadlines are best effort, not hard timeouts.
@@ -220,8 +236,8 @@ notice and history is retained. Use `clear` and a narrower prompt, smaller read
 pages, or a larger `HARNESS_CONTEXT_LENGTH` (which needs more model memory).
 The estimate is not an exact tokenizer and cannot guarantee a request fits.
 
-There is no automatic compaction, disk-backed conversation recovery, or rollback.
-The current read-only tools are not a sandbox for future write or execution tools.
+There is no automatic compaction or disk-backed conversation recovery. Filesystem
+authorization is an application policy, not an operating-system sandbox.
 
 ## Interaction logs
 
@@ -263,10 +279,10 @@ before sharing them.
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
 | `src/harness_prototype/access.py` | Session workspace grants, denials, and canonical path authorization |
-| `src/harness_prototype/tools.py` | Shared tool registry and dispatch |
+| `src/harness_prototype/tools.py` | Tool specifications, risk categories, target resolvers, and dispatch |
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
-| `src/harness_prototype/files.py` | Directory listing, bounded recursive search, and text reading |
+| `src/harness_prototype/files.py` | Directory listing, bounded search/read, revisions, and atomic UTF-8 changes |
 | `src/harness_prototype/git.py` | Bounded, read-only Git workspace status inspection |
 | `src/harness_prototype/config.py` | Validated configuration |
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
@@ -276,9 +292,11 @@ before sharing them.
 | `evaluate.py`, `tests/` | Live-model scenarios and deterministic checks |
 
 Tool functions are reusable independently of the terminal and Ollama client.
-`AVAILABLE_TOOLS` supplies both model schemas and dispatch; `execute_tool` is
-internal dispatch code, not an additional model tool. The application uses Ollama
-directly; LangGraph, IDE integration, and training are future work.
+`TOOL_SPECS` is the single registration source for model functions, risk
+categories, and optional access-target resolvers. Derived registry views supply
+schemas, policy lookup, and dispatch; `execute_tool` is internal code, not an
+additional model tool. The application uses Ollama directly; LangGraph, IDE
+integration, and training are future work.
 
 ## Verify and extend
 
@@ -307,11 +325,10 @@ Existing result files are never overwritten. Successful requests start as
 `pass` or `fail`. Check the tool evidence, not just fluent answers. Request failures
 are recorded as failures. The temporary sample project is removed after the run.
 
-To add a tool, implement a reusable function, register it in `AVAILABLE_TOOLS`,
-assign its risk category in `TOOL_CATEGORIES`, update relevant model instructions,
-and add tests for meaningful success, denial, and failure paths. Registration
-fails at startup if the tool and category sets differ. Agents must obtain test
-authorization before running tests.
+To add a tool, implement a reusable function, register one `ToolSpec` with its risk
+category and any access-target resolver, update relevant model instructions, and
+add tests for meaningful success, denial, and failure paths. Agents must obtain
+test authorization before running tests.
 Update this README when the interface or limits change. Before adding writes or
 commands, define allowed targets, validation, timeouts, output limits, and recovery
 for uncertain effects. See `AGENTS.md` for contributor guidance and

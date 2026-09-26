@@ -9,14 +9,13 @@ unrelated changes.
 
 This is a senior-design prototype for a locally hosted software-engineering agent.
 It uses the Ollama Python client directly and provides a terminal conversation
-loop with four read-only tools: standard-location discovery, directory listing,
-bounded recursive filename search, and paged UTF-8 text reading. Tool calls are
-visible in the terminal, and completed exchanges survive tool-round exhaustion or
-an interrupted turn. A heuristic context guard stops oversized requests without
-compacting or discarding retained history. The aim is understandable, reusable
-tool execution that can grow into more complex workflows. LangGraph, code editing,
-command execution, IDE integration, and training are future work, not existing
-capabilities.
+loop with bounded inspection tools plus a permission-gated structured UTF-8 file
+change tool. Tool calls are visible in the terminal, and completed exchanges
+survive tool-round exhaustion or an interrupted turn. A heuristic context guard
+stops oversized requests without compacting or discarding retained history. The
+aim is understandable, reusable tool execution that can grow into more complex
+workflows. LangGraph, command execution, IDE integration, and training are future
+work, not existing capabilities.
 
 ## Conserve session usage
 
@@ -84,6 +83,27 @@ an error or partial result as success.
 Write source and documentation as UTF-8 with explicit encoding when using scripts
 to edit files. Keep user-specific paths and credentials out of source defaults.
 
+## Permission UI standard
+
+Treat every interactive permission as a temporary decision view, not conversation
+content. In an interactive terminal, render it in the alternate screen buffer and
+restore the conversation after the answer. Every selection dialogue, including
+non-permission views, must use Up/Down navigation and Space or Enter confirmation
+through the shared `TerminalUI.choose_option` interface; do not ask users to type
+numbers or yes/no answers. Use the established cyan/green conversation palette.
+Permission menus initially select the least-broad allow option, while interruption
+and EOF still deny, and every choice must show the scope and lifetime of access.
+
+Summarize what will happen in human terms. Show operation names, risk categories,
+paths, counts, and file actions when relevant, but never dump raw argument objects,
+file contents, revisions, credentials, or other large or sensitive payloads. After
+the temporary view closes, leave one short `Permission` receipt recording whether
+access was allowed or denied and its scope. Style the receipt exactly like subdued,
+indented `Working` activity rather than agent/user dialogue. Future permission
+types must use the same `TerminalUI` seam and add navigation, denial/default,
+transient-screen restoration, payload-redaction, scoped-grant, and receipt coverage
+in `tests/test_main.py`.
+
 ## Tool and conversation contracts
 
 When adding or changing a tool:
@@ -113,7 +133,8 @@ completed tool outcomes and mark interrupted or unexecuted calls explicitly.
 
 Keep new behavior within the user's requested scope. If introducing write or
 execution tools, explicitly design their target boundaries, validation, and failure
-behavior as part of that feature; existing read-only access is not a sandbox.
+behavior as part of that feature; filesystem authorization is an application
+policy, not an operating-system sandbox.
 
 ## Verification and review before completion
 

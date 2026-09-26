@@ -38,29 +38,38 @@ class WorkspaceAccess:
         name: str,
         arguments: object,
         prompt: PermissionPrompt,
+        target_resolver: Callable[[object], list[Path] | dict | None] | None = None,
     ) -> dict | None:
         """Authorize a tool target or return a structured refusal result."""
-        target = self._tool_directory(name, arguments)
-        if target is None or self.full_access:
+        targets = (
+            target_resolver(arguments)
+            if target_resolver is not None
+            else self._tool_directories(name, arguments)
+        )
+        if isinstance(targets, dict):
+            return targets
+        if targets is None or self.full_access:
             return None
-        if self._overlaps_denial(target):
-            return self._denied_result(target, remembered=True)
-        if self._covered_by(target, self.granted_directories):
-            return None
+        for target in targets:
+            if self._overlaps_denial(target):
+                return self._denied_result(target, remembered=True)
+            if self._covered_by(target, self.granted_directories):
+                continue
 
-        choice = prompt(target)
-        if choice == AccessChoice.GRANT_ALL:
-            self.full_access = True
-            return None
-        if choice == AccessChoice.GRANT_DIRECTORY:
-            self.granted_directories.append(target)
-            return None
+            choice = prompt(target)
+            if choice == AccessChoice.GRANT_ALL:
+                self.full_access = True
+                return None
+            if choice == AccessChoice.GRANT_DIRECTORY:
+                self.granted_directories.append(target)
+                continue
 
-        self.denied_directories.append(target)
-        return self._denied_result(target, remembered=False)
+            self.denied_directories.append(target)
+            return self._denied_result(target, remembered=False)
+        return None
 
-    def _tool_directory(self, name: str, arguments: object) -> Path | None:
-        """Return the directory whose subtree a filesystem tool would access."""
+    def _tool_directories(self, name: str, arguments: object) -> list[Path] | dict | None:
+        """Return every directory whose subtree a filesystem tool would access."""
         if not isinstance(arguments, dict):
             return None
         argument_name = {
@@ -79,8 +88,8 @@ class WorkspaceAccess:
         try:
             target = Path(raw_path).expanduser().resolve()
             if name == "read_file" or (name == "search_project" and target.is_file()):
-                return target.parent
-            return target
+                return [target.parent]
+            return [target]
         except (OSError, RuntimeError, ValueError):
             return None
 

@@ -69,7 +69,19 @@ class ApprovalDecision:
         )
 
 
-ApprovalPrompt = Callable[[ApprovalRequest], bool]
+@dataclass(frozen=True)
+class ApprovalPromptResult:
+    """Carry an interactive decision and its audit source to policy handling."""
+
+    allowed: bool
+    source: str = "user"
+
+    def __bool__(self) -> bool:
+        """Allow prompt results to retain the existing truth-value interface."""
+        return self.allowed
+
+
+ApprovalPrompt = Callable[[ApprovalRequest], bool | ApprovalPromptResult]
 
 
 def deny_approval_by_default(request: ApprovalRequest) -> bool:
@@ -88,4 +100,7 @@ def decide_tool_approval(
         return ApprovalDecision(request, policy, True, "policy")
     if policy == ApprovalPolicy.DENY:
         return ApprovalDecision(request, policy, False, "policy")
-    return ApprovalDecision(request, policy, bool(prompt(request)), "user")
+    prompt_result = prompt(request)
+    if isinstance(prompt_result, ApprovalPromptResult):
+        return ApprovalDecision(request, policy, prompt_result.allowed, prompt_result.source)
+    return ApprovalDecision(request, policy, bool(prompt_result), "user")

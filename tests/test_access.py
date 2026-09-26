@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from harness_prototype.access import AccessChoice, WorkspaceAccess
+from harness_prototype.files import file_change_target_directories
 
 
 class WorkspaceAccessTests(unittest.TestCase):
@@ -100,6 +101,96 @@ class WorkspaceAccessTests(unittest.TestCase):
             lambda path: self.fail("location discovery should not prompt"),
         )
         self.assertIsNone(result)
+
+    def test_file_changes_prompt_for_each_outside_target_directory(self) -> None:
+        """Authorize every structured change target before writes can dispatch."""
+        second_outside = self.root / "second-outside"
+        second_outside.mkdir()
+        prompted = []
+
+        def grant(path: Path) -> AccessChoice:
+            """Record and grant each requested target directory."""
+            prompted.append(path)
+            return AccessChoice.GRANT_DIRECTORY
+
+        result = self.access.authorize_tool(
+            "apply_file_changes",
+            {
+                "base_path": ".",
+                "changes": [
+                    {
+                        "path": str(self.outside / "first.txt"),
+                        "action": "create",
+                        "content": "first",
+                    },
+                    {
+                        "path": str(second_outside / "second.txt"),
+                        "action": "create",
+                        "content": "second",
+                    },
+                ],
+            },
+            grant,
+            file_change_target_directories,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(prompted, [self.outside, second_outside])
+
+    def test_file_changes_use_explicit_base_path_for_relative_target(self) -> None:
+        """Prompt for base_path rather than silently resolving in the workspace."""
+        prompted = []
+        result = self.access.authorize_tool(
+            "apply_file_changes",
+            {
+                "base_path": str(self.outside),
+                "changes": [
+                    {"path": "selected.txt", "action": "create", "content": "text"},
+                ],
+            },
+            lambda path: prompted.append(path) or AccessChoice.GRANT_DIRECTORY,
+            file_change_target_directories,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(prompted, [self.outside])
+
+    def test_file_change_denial_prevents_outside_dispatch(self) -> None:
+        """Return access_denied when an outside change target is not granted."""
+        result = self.access.authorize_tool(
+            "apply_file_changes",
+            {
+                "base_path": ".",
+                "changes": [{
+                    "path": str(self.outside / "denied.txt"),
+                    "action": "create",
+                    "content": "nope",
+                }],
+            },
+            lambda path: AccessChoice.DENY,
+            file_change_target_directories,
+        )
+        self.assertEqual(result["status"], "access_denied")
+
+    def test_file_changes_resolve_linked_parent_before_authorizing(self) -> None:
+        """Prompt for a linked target's canonical outside directory."""
+        link = self.workspace / "linked"
+        try:
+            link.symlink_to(self.outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Directory symlinks are unavailable: {error}")
+        prompted = []
+        result = self.access.authorize_tool(
+            "apply_file_changes",
+            {
+                "base_path": str(self.workspace),
+                "changes": [
+                    {"path": "linked/file.txt", "action": "create", "content": "text"},
+                ],
+            },
+            lambda path: prompted.append(path) or AccessChoice.DENY,
+            file_change_target_directories,
+        )
+        self.assertEqual(result["status"], "access_denied")
+        self.assertEqual(prompted, [self.outside])
 
 
 if __name__ == "__main__":
