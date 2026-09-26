@@ -26,6 +26,8 @@ class Settings:
     temperature: float
     context_length: int
     max_tool_rounds: int
+    identical_tool_call_limit: int
+    consecutive_tool_failure_limit: int
     log_directory: Path
     log_redact_values: tuple[str, ...]
     approval_policies: dict[ToolCategory, ApprovalPolicy]
@@ -143,6 +145,14 @@ def load_settings(
         temperature=temperature,
         context_length=positive_integer("HARNESS_CONTEXT_LENGTH", "4096"),
         max_tool_rounds=positive_integer("HARNESS_MAX_TOOL_ROUNDS", "8"),
+        identical_tool_call_limit=positive_integer(
+            "HARNESS_IDENTICAL_TOOL_CALL_LIMIT",
+            "2",
+        ),
+        consecutive_tool_failure_limit=positive_integer(
+            "HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT",
+            "3",
+        ),
         log_directory=log_directory.resolve(),
         log_redact_values=tuple(str(values[name]) for name in redact_names),
         approval_policies=approval_policies,
@@ -156,6 +166,8 @@ MODELS = _settings.models
 TEMPERATURE = _settings.temperature
 CONTEXT_LENGTH = _settings.context_length
 MAX_TOOL_ROUNDS = _settings.max_tool_rounds
+IDENTICAL_TOOL_CALL_LIMIT = _settings.identical_tool_call_limit
+CONSECUTIVE_TOOL_FAILURE_LIMIT = _settings.consecutive_tool_failure_limit
 LOG_DIRECTORY = _settings.log_directory
 LOG_REDACT_VALUES = _settings.log_redact_values
 APPROVAL_POLICIES = _settings.approval_policies

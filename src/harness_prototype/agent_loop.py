@@ -15,8 +15,16 @@ from .approval import (
     decide_tool_approval,
     deny_approval_by_default,
 )
-from .config import APPROVAL_POLICIES, CONTEXT_LENGTH, MAX_TOOL_ROUNDS, TEMPERATURE
+from .config import (
+    APPROVAL_POLICIES,
+    CONSECUTIVE_TOOL_FAILURE_LIMIT,
+    CONTEXT_LENGTH,
+    IDENTICAL_TOOL_CALL_LIMIT,
+    MAX_TOOL_ROUNDS,
+    TEMPERATURE,
+)
 from .interaction_log import TurnLog
+from .loop_guard import ToolLoopGuard, ToolLoopStop
 from .tools import AVAILABLE_TOOLS, TOOL_CATEGORIES, execute_tool
 
 SYSTEM_PROMPT = (
@@ -60,7 +68,9 @@ SYSTEM_PROMPT = (
     "user approval prompt for paths outside it. If a tool reports "
     "status=access_denied, do not retry that directory or a path beneath it. "
     "If a tool reports status=approval_denied, treat it as recoverable and do "
-    "not retry unless the user changes the request or policy."
+    "not retry unless the user changes the request or policy. If a tool reports "
+    "status=tool_loop_stopped, follow its guidance and do not repeat the same "
+    "operation."
 )
 
 
@@ -103,6 +113,52 @@ def check_context_budget(messages: list) -> None:
         )
 
 
+def append_unexecuted_calls(
+    messages: list,
+    tool_calls: list,
+    start_index: int,
+    turn_log: TurnLog | None,
+) -> None:
+    """Pair later calls in a stopped batch with explicit non-execution results."""
+    for pending in tool_calls[start_index:]:
+        result = {
+            "ok": False,
+            "complete": False,
+            "truncated": False,
+            "status": "not_executed",
+            "error": "Skipped because tool-loop protection stopped this turn.",
+        }
+        messages.append({
+            "role": "tool",
+            "tool_name": pending.function.name,
+            "content": json.dumps(result),
+        })
+        if turn_log:
+            turn_log.add_event(
+                "tool_call",
+                name=pending.function.name,
+                arguments=pending.function.arguments,
+            )
+            turn_log.add_event(
+                "tool_result",
+                name=pending.function.name,
+                duration_ms=0,
+                result=result,
+            )
+
+
+def record_loop_stop(turn_log: TurnLog | None, stop: ToolLoopStop) -> None:
+    """Log the threshold, reason, guidance, and operation for a stopped turn."""
+    if turn_log:
+        turn_log.add_event(
+            "tool_loop_stop",
+            reason=stop.reason,
+            threshold=stop.threshold,
+            guidance=stop.guidance,
+            operation=stop.operation,
+        )
+
+
 def run_turn(
     client: Client,
     model: str,
@@ -120,6 +176,10 @@ def run_turn(
     approval_prompt = on_approval or deny_approval_by_default
     empty_response_retried = False
     rounds_remaining = MAX_TOOL_ROUNDS
+    loop_guard = ToolLoopGuard(
+        IDENTICAL_TOOL_CALL_LIMIT,
+        CONSECUTIVE_TOOL_FAILURE_LIMIT,
+    )
     while rounds_remaining:
         check_context_budget(messages)
         round_number = MAX_TOOL_ROUNDS - rounds_remaining + 1
@@ -132,6 +192,8 @@ def run_turn(
                     "temperature": TEMPERATURE,
                     "context_length": CONTEXT_LENGTH,
                     "max_tool_rounds": MAX_TOOL_ROUNDS,
+                    "identical_tool_call_limit": IDENTICAL_TOOL_CALL_LIMIT,
+                    "consecutive_tool_failure_limit": CONSECUTIVE_TOOL_FAILURE_LIMIT,
                 },
                 prompts=messages,
                 tool_schemas=[{
@@ -187,11 +249,31 @@ def run_turn(
             "content": content,
             "tool_calls": [call.model_dump() for call in tool_calls],
         })
+        loop_stop = None
         for index, call in enumerate(tool_calls):
             name = call.function.name
             tool_started = monotonic()
             if turn_log:
                 turn_log.add_event("tool_call", name=name, arguments=call.function.arguments)
+            repeated_call_stop = loop_guard.before_call(name, call.function.arguments)
+            if repeated_call_stop is not None:
+                result = repeated_call_stop.result()
+                messages.append({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": json.dumps(result),
+                })
+                if turn_log:
+                    turn_log.add_event(
+                        "tool_result",
+                        name=name,
+                        duration_ms=0,
+                        result=result,
+                    )
+                record_loop_stop(turn_log, repeated_call_stop)
+                append_unexecuted_calls(messages, tool_calls, index + 1, turn_log)
+                loop_stop = repeated_call_stop
+                break
             try:
                 on_tool(name)
                 result = None
@@ -214,7 +296,6 @@ def run_turn(
                     )
                 if result is None:
                     result = execute_tool(name, call.function.arguments)
-                serialized = json.dumps(result)
             except (Exception, KeyboardInterrupt):
                 # Pair every request with a result without claiming to undo effects.
                 for pending_index, pending in enumerate(tool_calls[index:]):
@@ -246,10 +327,13 @@ def run_turn(
                             result=pending_result,
                         )
                 raise
+            failure_stop = loop_guard.after_result(result)
+            if failure_stop is not None and isinstance(result, dict):
+                result = {**result, "loop_stop": failure_stop.fields()}
             messages.append({
                 "role": "tool",
                 "tool_name": name,
-                "content": serialized,
+                "content": json.dumps(result),
             })
             if turn_log:
                 turn_log.add_event(
@@ -258,6 +342,17 @@ def run_turn(
                     duration_ms=round((monotonic() - tool_started) * 1000, 3),
                     result=result,
                 )
+            if failure_stop is not None:
+                record_loop_stop(turn_log, failure_stop)
+                append_unexecuted_calls(messages, tool_calls, index + 1, turn_log)
+                loop_stop = failure_stop
+                break
+
+        if loop_stop is not None:
+            notice = "\n" + loop_stop.notice()
+            messages.append({"role": "assistant", "content": notice})
+            on_text(notice)
+            return "tool_loop_limit"
 
     # Preserve completed exchanges so the user can continue in a later turn.
     notice = (
