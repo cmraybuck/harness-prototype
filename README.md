@@ -65,10 +65,11 @@ Set-ExecutionPolicy -Scope Process RemoteSigned
 
 Defaults: local server `http://127.0.0.1:11434`; startup choice between the more
 capable but heavier `devstral-small-2:latest` and the faster, lighter
-`qwen3:8b`; Devstral as the default selection; temperature `0.15`,
-context window `4096`; and eight model/tool rounds per turn. Set `HARNESS_MODELS`
-to a comma-separated list to change the choices and `HARNESS_MODEL` to set the
-default offered by the startup prompt.
+`qwen3:8b`; Devstral as the default selection; temperature `0.15`, context window
+`4096`; eight model/tool rounds per turn; two executions of an identical tool
+operation; and three consecutive tool failures. Set `HARNESS_MODELS` to a
+comma-separated list to change the choices and `HARNESS_MODEL` to set the default
+offered by the startup prompt.
 
 Try “What files are in the current directory?” or “Find hello.txt on my Desktop
 and read it.” In an interactive terminal, startup clears prior terminal output and
@@ -185,6 +186,23 @@ Search deadlines are best effort, not hard timeouts.
 
 ## Conversation limits and recovery
 
+Tool-loop protection is scoped to each user turn. The harness executes an exact
+tool name and argument object at most twice; a third identical request is returned
+without dispatch as `tool_loop_stopped`. Calls with changed arguments are distinct,
+so corrected retries and pagination through `offset`, `start_line`, or other
+continuation values remain available. The harness also stops after three
+consecutive results with `ok=false`; any successful result resets that failure
+streak. Configure the positive thresholds with
+`HARNESS_IDENTICAL_TOOL_CALL_LIMIT` and
+`HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT`.
+
+When either threshold stops a turn, completed tool exchanges remain in history,
+later calls in the same batch receive `not_executed` results, and the terminal
+explains how to continue with corrected arguments, a different approach, or a
+narrower request. The stopped result includes recovery guidance for the model.
+These guards compare structured calls, not intent, and do not replace the overall
+tool-round limit.
+
 At the tool-round limit, completed exchanges remain in history and the assistant
 asks you to continue or narrow the request. Failed or cancelled turns retain
 recorded tool results. An interrupted call is marked `outcome_unknown`; later
@@ -219,8 +237,10 @@ Every line is a complete schema-version-1 JSON object with stable UUID
 and registered tool signatures/descriptions; `model_response` events contain
 text, calls, and duration; `tool_approval` events contain the configured policy,
 decision source, category, and exact requested operation; paired `tool_call` and
-`tool_result` events contain arguments, results, and duration. Failed, cancelled,
-context-limited, and tool-round-limited turns are recorded. Interrupted tool calls use
+`tool_result` events contain arguments, results, and duration. A
+`tool_loop_stop` event records the reason, threshold, recovery guidance, and exact
+operation when applicable. Failed, cancelled, context-limited, tool-loop-limited,
+and tool-round-limited turns are recorded. Interrupted tool calls use
 `outcome_unknown`, while later calls in that batch use `not_executed`.
 
 Logs may contain prompts, model output, filenames, file contents, and tool
@@ -239,6 +259,7 @@ before sharing them.
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
 | `src/harness_prototype/agent_loop.py` | Model instructions, streaming, context checks, and tool exchanges |
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
+| `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
 | `src/harness_prototype/access.py` | Session workspace grants, denials, and canonical path authorization |
 | `src/harness_prototype/tools.py` | Shared tool registry and dispatch |
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |

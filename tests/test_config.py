@@ -20,6 +20,8 @@ class ConfigTests(unittest.TestCase):
             ("devstral-small-2:latest", "qwen3:8b"),
         )
         self.assertEqual((settings.temperature, settings.context_length, settings.max_tool_rounds), (0.15, 4096, 8))
+        self.assertEqual(settings.identical_tool_call_limit, 2)
+        self.assertEqual(settings.consecutive_tool_failure_limit, 3)
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
         self.assertEqual(settings.log_redact_values, ())
         self.assertEqual(settings.approval_policies[ToolCategory.READ_ONLY], ApprovalPolicy.ALWAYS_ALLOW)
@@ -34,6 +36,8 @@ class ConfigTests(unittest.TestCase):
                 '# Local setup\nHARNESS_MODEL="another:latest"\n'
                 'HARNESS_MODELS="another:latest,second:latest"\n'
                 'HARNESS_CONTEXT_LENGTH=8192\nHARNESS_MAX_TOOL_ROUNDS=12\n'
+                'HARNESS_IDENTICAL_TOOL_CALL_LIMIT=4\n'
+                'HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT=5\n'
                 'HARNESS_TEMPERATURE=0.3\nHARNESS_OLLAMA_HOST=http://localhost:1234\n',
                 encoding="utf-8",
             )
@@ -42,6 +46,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.models, ("override:latest", "another:latest", "second:latest"))
         self.assertEqual(settings.context_length, 8192)
         self.assertEqual(settings.max_tool_rounds, 12)
+        self.assertEqual(settings.identical_tool_call_limit, 4)
+        self.assertEqual(settings.consecutive_tool_failure_limit, 5)
         self.assertEqual(settings.temperature, 0.3)
         self.assertEqual(settings.host, "http://localhost:1234")
 
@@ -55,6 +61,8 @@ class ConfigTests(unittest.TestCase):
         cases = {
             "HARNESS_CONTEXT_LENGTH": ["0", "-1", "1.5", "true"],
             "HARNESS_MAX_TOOL_ROUNDS": ["0", "abc"],
+            "HARNESS_IDENTICAL_TOOL_CALL_LIMIT": ["0", "false"],
+            "HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT": ["-1", "1.5"],
             "HARNESS_TEMPERATURE": ["nan", "inf", "-0.1", "3"],
             "HARNESS_MODEL": ["", " "],
             "HARNESS_MODELS": ["", " ", ", ,"],

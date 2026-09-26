@@ -23,7 +23,7 @@ class AgentLoopTests(unittest.TestCase):
     """Cover successful, exhausted, interrupted, and empty model turns."""
 
     def test_four_tool_rounds_can_finish(self) -> None:
-        """Allow discovery, search, and two read pages before the final answer."""
+        """Allow pagination with changed arguments before the final answer."""
         calls = [
             ("get_location", {"location": "desktop"}),
             ("find_files", {"pattern": "x"}),
@@ -41,9 +41,95 @@ class AgentLoopTests(unittest.TestCase):
         with patch("harness_prototype.agent_loop.execute_tool", return_value={"ok": True}) as execute:
             client = Mock()
             client.chat.side_effect = [[response] for response in responses]
-            run_turn(client, "test", messages, lambda text: None, lambda name: None)
+            outcome = run_turn(client, "test", messages, lambda text: None, lambda name: None)
         self.assertEqual(execute.call_count, 4)
+        self.assertEqual(outcome, "success")
         self.assertEqual(messages[-1]["content"], "Finished both pages.")
+
+    def test_third_identical_call_stops_without_execution(self) -> None:
+        """Stop an identical operation after two executions and retain its results."""
+        response = ChatResponse(message={"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_files", "arguments": {"path": "."}}}
+        ]})
+        client = Mock()
+        client.chat.side_effect = [[response], [response], [response]]
+        messages = new_conversation() + [{"role": "user", "content": "list files"}]
+        turn_log = TurnLog("session", "list files")
+        with patch("harness_prototype.agent_loop.IDENTICAL_TOOL_CALL_LIMIT", 2), patch(
+            "harness_prototype.agent_loop.execute_tool",
+            return_value={"ok": True, "complete": True, "truncated": False, "error": None},
+        ) as execute:
+            outcome = run_turn(
+                client,
+                "test",
+                messages,
+                lambda text: None,
+                lambda name: None,
+                turn_log=turn_log,
+            )
+        self.assertEqual(outcome, "tool_loop_limit")
+        self.assertEqual(execute.call_count, 2)
+        results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+        self.assertEqual(results[-1]["status"], "tool_loop_stopped")
+        stop = next(event for event in turn_log.events if event["type"] == "tool_loop_stop")
+        self.assertEqual(stop["reason"], "identical_call_limit")
+        self.assertIn("Completed results are retained", messages[-1]["content"])
+
+    def test_changed_arguments_allow_corrected_retry(self) -> None:
+        """Execute a corrected call and reset the failure streak after it succeeds."""
+        responses = [
+            ChatResponse(message={"role": "assistant", "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "missing.txt"}}}
+            ]}),
+            ChatResponse(message={"role": "assistant", "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "found.txt"}}}
+            ]}),
+            ChatResponse(message={"role": "assistant", "content": "Recovered."}),
+        ]
+        client = Mock()
+        client.chat.side_effect = [[response] for response in responses]
+        messages = new_conversation() + [{"role": "user", "content": "read a file"}]
+        with patch(
+            "harness_prototype.agent_loop.execute_tool",
+            side_effect=[
+                {"ok": False, "complete": False, "truncated": False, "error": "missing"},
+                {"ok": True, "complete": True, "truncated": False, "error": None},
+            ],
+        ) as execute:
+            outcome = run_turn(client, "test", messages, lambda text: None, lambda name: None)
+        self.assertEqual(outcome, "success")
+        self.assertEqual(execute.call_count, 2)
+
+    def test_consecutive_failures_stop_remaining_calls(self) -> None:
+        """Stop after three failures and mark later calls in the batch unexecuted."""
+        response = ChatResponse(message={"role": "assistant", "tool_calls": [
+            {"function": {"name": "read_file", "arguments": {"path": f"missing-{index}.txt"}}}
+            for index in range(4)
+        ]})
+        client = Mock()
+        client.chat.return_value = [response]
+        messages = new_conversation() + [{"role": "user", "content": "read files"}]
+        turn_log = TurnLog("session", "read files")
+        failure = {"ok": False, "complete": False, "truncated": False, "error": "missing"}
+        with patch("harness_prototype.agent_loop.CONSECUTIVE_TOOL_FAILURE_LIMIT", 3), patch(
+            "harness_prototype.agent_loop.execute_tool",
+            return_value=failure,
+        ) as execute:
+            outcome = run_turn(
+                client,
+                "test",
+                messages,
+                lambda text: None,
+                lambda name: None,
+                turn_log=turn_log,
+            )
+        self.assertEqual(outcome, "tool_loop_limit")
+        self.assertEqual(execute.call_count, 3)
+        results = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+        self.assertEqual(results[-1]["status"], "not_executed")
+        self.assertIn("guidance", results[-2]["loop_stop"])
+        stop = next(event for event in turn_log.events if event["type"] == "tool_loop_stop")
+        self.assertEqual(stop["reason"], "consecutive_failure_limit")
 
     def test_round_limit_keeps_results_and_allows_continuation(self) -> None:
         """Retain complete tool history when a turn reaches its round limit."""
@@ -54,6 +140,9 @@ class AgentLoopTests(unittest.TestCase):
         client.chat.side_effect = [[response], [response]]
         messages = new_conversation()
         with patch("harness_prototype.agent_loop.MAX_TOOL_ROUNDS", 2), patch(
+            "harness_prototype.agent_loop.IDENTICAL_TOOL_CALL_LIMIT",
+            2,
+        ), patch(
             "harness_prototype.agent_loop.execute_tool", return_value={"ok": True}
         ):
             outcome = run_turn(client, "test", messages, lambda text: None, lambda name: None)
@@ -88,7 +177,7 @@ class AgentLoopTests(unittest.TestCase):
                 messages = new_conversation() + [{"role": "user", "content": "inspect"}]
                 client = Mock()
                 client.chat.return_value = [response]
-                with patch(
+                with patch("harness_prototype.agent_loop.IDENTICAL_TOOL_CALL_LIMIT", 3), patch(
                     "harness_prototype.agent_loop.execute_tool",
                     side_effect=[{"ok": True}, failure],
                 ) as execute:
