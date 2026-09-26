@@ -23,7 +23,7 @@ EXCLUDED_SEARCH_DIRECTORIES = {
 
 
 def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict:
-    """List a bounded sorted page of immediate names in a directory."""
+    """List a bounded sorted page of immediate names in an authorized directory."""
     if type(offset) is not int or offset < 0:
         return tool_error("offset must be a nonnegative integer.")
     if type(max_entries) is not int or not 1 <= max_entries <= 100:
@@ -61,7 +61,7 @@ def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict
 
 
 def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
-    """Recursively find files by case-insensitive filename pattern.
+    """Recursively find files by case-insensitive pattern in an authorized root.
 
     A plain name without an extension first looks for that exact filename. If
     there are no exact matches, files with the same name and any extension are
@@ -162,17 +162,17 @@ def search_project(
     file_pattern: str = "*",
     max_results: int = 100,
 ) -> dict:
-    """Search nested UTF-8 project files for literal text.
+    """Search nested UTF-8 files for literal text in an authorized path.
 
     Args:
         text: Nonempty, case-sensitive literal text to find within a source line.
-        path: Workspace-relative file or directory to search. Absolute paths and
-            paths outside the process working directory are rejected.
+        path: File or directory to search, absolute or relative to the working
+            directory. Session authorization is enforced before this function.
         file_pattern: Optional case-insensitive filename wildcard, such as
             ``*.py``. It must be a filename pattern rather than a path.
         max_results: Maximum matching lines to return, between 1 and 100.
 
-    Results include workspace-relative paths, one-based line numbers, and line
+    Results include resolved paths, one-based line numbers, and line
     excerpts. Git metadata, common dependency/generated directories, links,
     binary or non-UTF-8 files, and files over 1 MiB are skipped. Traversal,
     runtime, result count, and JSON-encoded result text are bounded; ``complete``
@@ -183,9 +183,7 @@ def search_project(
     if "\n" in text or "\r" in text:
         return tool_error("text must not contain a newline.")
     if not isinstance(path, str) or not path.strip():
-        return tool_error("path must be a nonempty workspace-relative path.")
-    if Path(path).is_absolute():
-        return tool_error("path must be relative to the working directory.")
+        return tool_error("path must be a nonempty file or directory path.")
     if (not isinstance(file_pattern, str) or not file_pattern
             or any(character in file_pattern for character in "/\\")):
         return tool_error("file_pattern must be a nonempty filename wildcard, not a path.")
@@ -194,8 +192,7 @@ def search_project(
 
     try:
         workspace = Path.cwd().resolve()
-        search_path = (workspace / path).resolve()
-        search_path.relative_to(workspace)
+        search_path = Path(path).expanduser().resolve()
         if not search_path.exists():
             return tool_error(f"Path does not exist: {search_path}")
         if not search_path.is_file() and not search_path.is_dir():
@@ -205,7 +202,7 @@ def search_project(
 
     result = tool_success(
         workspace=str(workspace),
-        path=search_path.relative_to(workspace).as_posix() or ".",
+        path=str(search_path),
         matches=[],
         stop_reason=None,
         files_searched=0,
@@ -243,7 +240,7 @@ def search_project(
                 result["skipped_files"]["links"] += 1
                 result["complete"] = False
                 continue
-            relative_parts = current.relative_to(workspace).parts
+            relative_parts = current.relative_to(search_path).parts
             directory_parts = relative_parts if current.is_dir() else relative_parts[:-1]
             if any(part.casefold() in EXCLUDED_SEARCH_DIRECTORIES for part in directory_parts):
                 result["skipped_files"]["excluded"] += 1
@@ -285,7 +282,7 @@ def search_project(
                 if excerpt_end < len(line):
                     excerpt += "…"
                 match = {
-                    "path": current.relative_to(workspace).as_posix(),
+                    "path": str(current),
                     "line_number": line_number,
                     "excerpt": excerpt,
                 }
@@ -302,7 +299,7 @@ def search_project(
 
 
 def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
-    """Read a page of a UTF-8 text file, with one-based line numbers.
+    """Read a page of an authorized UTF-8 text file with one-based line numbers.
 
     Args:
         path: Absolute file path, or a path relative to the working directory.

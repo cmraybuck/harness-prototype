@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 from ollama import ChatResponse
 
 from harness_prototype.agent_loop import ContextBudgetError, new_conversation
-from harness_prototype.main import main, recover_turn
+from harness_prototype.access import AccessChoice
+from harness_prototype.main import main, recover_turn, request_directory_access
 
 
 class MainTests(unittest.TestCase):
@@ -19,6 +20,14 @@ class MainTests(unittest.TestCase):
         messages.append({"role": "user", "content": "hello"})
         recover_turn(messages, len(before))
         self.assertEqual(messages, before)
+
+    def test_permission_prompt_retries_invalid_input(self) -> None:
+        """Render the choices again until the user supplies a valid number."""
+        with patch("builtins.input", side_effect=["no", "2"]), patch("builtins.print") as output:
+            choice = request_directory_access(Path("outside"))
+        self.assertEqual(choice, AccessChoice.GRANT_ALL)
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Please enter 1, 2, or 3", rendered)
 
     def test_context_stop_can_be_cleared(self) -> None:
         """Allow explicit reset after a budget stop and submit a fresh prompt."""

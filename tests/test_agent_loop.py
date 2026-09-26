@@ -2,10 +2,12 @@
 
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from ollama import ChatResponse
 
+from harness_prototype.access import AccessChoice, WorkspaceAccess
 from harness_prototype.agent_loop import (
     ContextBudgetError,
     EmptyModelResponseError,
@@ -107,6 +109,32 @@ class AgentLoopTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 run_turn(client, "test", messages, lambda text: None, lambda name: None)
         self.assertEqual(messages[-1]["role"], "tool")
+
+    def test_denied_access_returns_a_tool_result_without_execution(self) -> None:
+        """Return a refusal to the model without invoking the filesystem tool."""
+        response = ChatResponse(message={"role": "assistant", "tool_calls": [
+            {"function": {"name": "list_files", "arguments": {"path": "../outside"}}}
+        ]})
+        client = Mock()
+        client.chat.side_effect = [
+            [response],
+            [ChatResponse(message={"role": "assistant", "content": "Access was denied."})],
+        ]
+        messages = new_conversation() + [{"role": "user", "content": "look outside"}]
+        access = WorkspaceAccess(Path.cwd())
+        with patch("harness_prototype.agent_loop.execute_tool") as execute:
+            run_turn(
+                client,
+                "test",
+                messages,
+                lambda text: None,
+                lambda name: None,
+                access,
+                lambda path: AccessChoice.DENY,
+            )
+        execute.assert_not_called()
+        outcome = json.loads(messages[-2]["content"])
+        self.assertEqual(outcome["status"], "access_denied")
 
     def test_transient_empty_response_is_retried(self) -> None:
         """Retry one empty completion and retain the eventual answer."""
