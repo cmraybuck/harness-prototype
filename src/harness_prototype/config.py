@@ -24,6 +24,8 @@ class Settings:
     temperature: float
     context_length: int
     max_tool_rounds: int
+    log_directory: Path
+    log_redact_values: tuple[str, ...]
 
 
 def load_settings(
@@ -86,6 +88,24 @@ def load_settings(
     if model not in models:
         models = (model, *models)
 
+    log_directory = Path(value("HARNESS_LOG_DIRECTORY", "work/logs")).expanduser()
+    if not log_directory.is_absolute():
+        log_directory = PROJECT_ROOT / log_directory
+    redact_setting = values.get("HARNESS_LOG_REDACT_VARIABLES") or ""
+    redact_names = tuple(
+        dict.fromkeys(
+            name.strip()
+            for name in redact_setting.split(",")
+            if name.strip()
+        )
+    )
+    missing_redactions = [name for name in redact_names if not values.get(name)]
+    if missing_redactions:
+        raise ValueError(
+            "HARNESS_LOG_REDACT_VARIABLES names unset or empty variables: "
+            + ", ".join(missing_redactions)
+        )
+
     return Settings(
         host=host,
         model=model,
@@ -93,6 +113,8 @@ def load_settings(
         temperature=temperature,
         context_length=positive_integer("HARNESS_CONTEXT_LENGTH", "4096"),
         max_tool_rounds=positive_integer("HARNESS_MAX_TOOL_ROUNDS", "8"),
+        log_directory=log_directory.resolve(),
+        log_redact_values=tuple(str(values[name]) for name in redact_names),
     )
 
 
@@ -103,3 +125,5 @@ MODELS = _settings.models
 TEMPERATURE = _settings.temperature
 CONTEXT_LENGTH = _settings.context_length
 MAX_TOOL_ROUNDS = _settings.max_tool_rounds
+LOG_DIRECTORY = _settings.log_directory
+LOG_REDACT_VALUES = _settings.log_redact_values

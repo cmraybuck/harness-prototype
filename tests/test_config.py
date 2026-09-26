@@ -19,6 +19,8 @@ class ConfigTests(unittest.TestCase):
             ("devstral-small-2:latest", "qwen3:8b"),
         )
         self.assertEqual((settings.temperature, settings.context_length, settings.max_tool_rounds), (0.15, 4096, 8))
+        self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
+        self.assertEqual(settings.log_redact_values, ())
 
     def test_dotenv_and_environment_precedence(self):
         """Load quoted dotenv values and let explicit environment variables win."""
@@ -67,6 +69,22 @@ class ConfigTests(unittest.TestCase):
             file.write_text("HARNESS_MODEL=test-model\n", encoding="utf-8")
             load_settings(file, {})
         self.assertEqual(dict(os.environ), before)
+
+    def test_logging_configuration_resolves_path_and_redactions(self) -> None:
+        """Resolve relative storage and load only explicitly named secret values."""
+        settings = load_settings(None, {
+            "HARNESS_LOG_DIRECTORY": "private/logs",
+            "HARNESS_LOG_REDACT_VARIABLES": "API_TOKEN, PASSWORD",
+            "API_TOKEN": "token-value",
+            "PASSWORD": "password-value",
+        })
+        self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "private/logs").resolve())
+        self.assertEqual(settings.log_redact_values, ("token-value", "password-value"))
+
+    def test_logging_rejects_missing_redaction_variable(self) -> None:
+        """Prevent a misspelled secret name from silently producing unsafe logs."""
+        with self.assertRaisesRegex(ValueError, "MISSING_SECRET"):
+            load_settings(None, {"HARNESS_LOG_REDACT_VARIABLES": "MISSING_SECRET"})
 
 
 if __name__ == "__main__":

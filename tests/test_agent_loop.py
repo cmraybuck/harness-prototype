@@ -15,6 +15,7 @@ from harness_prototype.agent_loop import (
     new_conversation,
     run_turn,
 )
+from harness_prototype.interaction_log import TurnLog
 
 
 class AgentLoopTests(unittest.TestCase):
@@ -54,8 +55,9 @@ class AgentLoopTests(unittest.TestCase):
         with patch("harness_prototype.agent_loop.MAX_TOOL_ROUNDS", 2), patch(
             "harness_prototype.agent_loop.execute_tool", return_value={"ok": True}
         ):
-            run_turn(client, "test", messages, lambda text: None, lambda name: None)
+            outcome = run_turn(client, "test", messages, lambda text: None, lambda name: None)
         self.assertEqual(sum(message["role"] == "tool" for message in messages), 2)
+        self.assertEqual(outcome, "tool_round_limit")
         self.assertIn("retained", messages[-1]["content"])
         messages.append({"role": "user", "content": "continue"})
         client.chat.side_effect = [[ChatResponse(message={"role": "assistant", "content": "Done."})]]
@@ -157,6 +159,33 @@ class AgentLoopTests(unittest.TestCase):
         with self.assertRaises(EmptyModelResponseError):
             run_turn(client, "test", messages, lambda text: None, lambda name: None)
         self.assertEqual(messages[-1]["role"], "user")
+
+    def test_log_preserves_tool_order_and_interrupted_outcomes(self) -> None:
+        """Record calls and paired results in order, including skipped calls."""
+        response = ChatResponse(message={"role": "assistant", "tool_calls": [
+            {"function": {"name": "get_location", "arguments": {"location": "desktop"}}},
+            {"function": {"name": "read_file", "arguments": {"path": "x"}}},
+        ]})
+        client = Mock()
+        client.chat.return_value = [response]
+        turn_log = TurnLog("session", "inspect")
+        with patch("harness_prototype.agent_loop.execute_tool", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                run_turn(
+                    client,
+                    "test",
+                    new_conversation() + [{"role": "user", "content": "inspect"}],
+                    lambda text: None,
+                    lambda name: None,
+                    turn_log=turn_log,
+                )
+        event_types = [event["type"] for event in turn_log.events]
+        self.assertEqual(event_types, [
+            "model_request", "model_response", "tool_call", "tool_result",
+            "tool_call", "tool_result",
+        ])
+        results = [event["result"] for event in turn_log.events if event["type"] == "tool_result"]
+        self.assertEqual([result["status"] for result in results], ["outcome_unknown", "not_executed"])
 
 
 if __name__ == "__main__":
