@@ -25,7 +25,7 @@ class AgentLoopTests(unittest.TestCase):
     def test_system_prompt_explains_structured_file_changes(self) -> None:
         """Tell the model how to select safe structured file actions."""
         system_prompt = new_conversation()[0]["content"]
-        self.assertIn("never redirect an outside request", system_prompt)
+        self.assertIn("never redirect that request into the workspace", system_prompt)
         self.assertIn("structured create, overwrite, append, and replace", system_prompt)
         self.assertIn("pass its revision as expected_revision", system_prompt)
         self.assertIn("Never repeat a failed write unchanged", system_prompt)
