@@ -44,6 +44,16 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("\r", rendered)
         self.assertIn("first\nsecond", rendered)
 
+    def test_tool_activity_is_human_readable_and_terminal_safe(self) -> None:
+        """Render useful activity dialogue without allowing terminal control codes."""
+        ui = TerminalUI()
+        with patch("builtins.print") as output:
+            ui.show_tool_call("Reading AGENTS.md\033[2J\nnext")
+        rendered = output.call_args.args[0]
+        self.assertIn("Working    Reading AGENTS.md", rendered)
+        self.assertNotIn("\033[2J", rendered)
+        self.assertNotIn("\n", rendered)
+
     def test_clear_screen_erases_display_and_scrollback_for_a_terminal(self) -> None:
         """Clear both prior output and scrollback only for interactive output."""
         ui = TerminalUI()

@@ -33,6 +33,7 @@ from .tools import (
     TOOL_CATEGORIES,
     TOOL_SPECS,
     TOOL_TARGET_RESOLVERS,
+    describe_tool_activity,
     execute_tool,
 )
 
@@ -1333,7 +1334,7 @@ def run_turn(
                 loop_stop = repeated_call_stop
                 break
             try:
-                on_tool(name)
+                on_tool(describe_tool_activity(name, call.function.arguments))
                 result = None
                 category = TOOL_CATEGORIES.get(name)
                 if category is not None:
