@@ -18,6 +18,7 @@ from harness_prototype.agent_loop import (
     inspection_retry_instruction,
     new_conversation,
     request_context_length,
+    requires_repository_inspection,
     remember_role_candidates,
     requested_answer_checklist,
     requested_evidence_targets,
@@ -41,6 +42,28 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Never repeat a failed write unchanged", system_prompt)
         self.assertIn("pass only test selectors", system_prompt)
         self.assertIn("status=failed", system_prompt)
+
+    def test_explicit_tool_request_bypasses_repository_evidence_gate(self) -> None:
+        """Let a named inspection tool answer directly instead of forcing searches."""
+        prompt = (
+            "Use detect_project_technologies on the current working directory. "
+            "Do not run tests or execute project code. Report every detected project, "
+            "language, package manager, test framework, and script."
+        )
+
+        self.assertFalse(requires_repository_inspection([
+            {"role": "user", "content": prompt},
+        ]))
+
+    def test_implementation_question_still_requires_repository_evidence(self) -> None:
+        """Retain the evidence gate for questions about a named tool's implementation."""
+        self.assertTrue(requires_repository_inspection([{
+            "role": "user",
+            "content": (
+                "Explain the implementation and tests for "
+                "detect_project_technologies in this repository."
+            ),
+        }]))
 
     def test_system_prompt_requires_evidence_before_diagnosis(self) -> None:
         """Require implementation evidence, causal tracing, and honest confidence."""

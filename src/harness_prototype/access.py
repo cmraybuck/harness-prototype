@@ -77,6 +77,7 @@ class WorkspaceAccess:
             "find_files": "root",
             "search_project": "path",
             "read_file": "path",
+            "detect_project_technologies": "path",
         }.get(name)
         if argument_name is None:
             return None
