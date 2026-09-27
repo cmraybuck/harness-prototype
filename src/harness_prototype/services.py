@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .config import SERVICES, TEST_OUTPUT_LIMIT, ServiceConfig
 from .execution import _BoundedOutput, _terminate_process
+from .runtime_context import active_conversation_id, active_workspace
 from .tool_results import tool_error, tool_success
 
 READINESS_POLL_SECONDS = 0.02
@@ -21,12 +22,14 @@ class _ManagedService:
 
     def __init__(
         self, name: str, handle: str, process: subprocess.Popen[bytes], config: ServiceConfig,
+        owner_id: str | None,
     ) -> None:
         """Initialize process metadata and synchronized output captures."""
         self.name = name
         self.handle = handle
         self.process = process
         self.config = config
+        self.owner_id = owner_id
         self.started = monotonic()
         self.stdout = _BoundedOutput(TEST_OUTPUT_LIMIT)
         self.stderr = _BoundedOutput(TEST_OUTPUT_LIMIT)
@@ -81,7 +84,7 @@ class _ManagedService:
 
 
 _services_by_handle: dict[str, _ManagedService] = {}
-_handles_by_name: dict[str, str] = {}
+_handles_by_name: dict[tuple[str | None, str], str] = {}
 _registry_lock = Lock()
 
 
@@ -132,18 +135,20 @@ def start_service(name: str) -> dict:
     """
     if not isinstance(name, str) or name not in SERVICES:
         return tool_error("Unknown configured service name.", status="unknown_service")
+    owner_id = active_conversation_id()
+    owner_key = (owner_id, name)
     with _registry_lock:
-        existing_handle = _handles_by_name.get(name)
+        existing_handle = _handles_by_name.get(owner_key)
         existing = _services_by_handle.get(existing_handle or "")
         if existing is not None and existing.process.poll() is None:
             return _service_payload(existing, "already_running")
         if existing is not None:
             existing.join_output()
             _services_by_handle.pop(existing.handle, None)
-            _handles_by_name.pop(name, None)
+            _handles_by_name.pop(owner_key, None)
 
         config = SERVICES[name]
-        workspace = Path.cwd().resolve()
+        workspace = active_workspace()
         directory = _service_directory(config, workspace)
         if isinstance(directory, dict):
             return directory
@@ -165,9 +170,9 @@ def start_service(name: str) -> dict:
                 f"Could not launch configured service '{name}': {error}",
                 status="launch_error",
             )
-        service = _ManagedService(name, uuid4().hex, process, config)
+        service = _ManagedService(name, uuid4().hex, process, config, owner_id)
         _services_by_handle[service.handle] = service
-        _handles_by_name[name] = service.handle
+        _handles_by_name[owner_key] = service.handle
 
     deadline = monotonic() + config.startup_timeout_seconds
     while monotonic() < deadline:
@@ -177,7 +182,7 @@ def start_service(name: str) -> dict:
             service.join_output()
             with _registry_lock:
                 _services_by_handle.pop(service.handle, None)
-                _handles_by_name.pop(name, None)
+                _handles_by_name.pop(owner_key, None)
             return tool_error(
                 f"Configured service '{name}' exited before becoming ready.",
                 status="startup_failed",
@@ -197,7 +202,7 @@ def start_service(name: str) -> dict:
     service.join_output()
     with _registry_lock:
         _services_by_handle.pop(service.handle, None)
-        _handles_by_name.pop(name, None)
+        _handles_by_name.pop(owner_key, None)
     return tool_error(
         f"Configured service '{name}' did not become ready within "
         f"{config.startup_timeout_seconds} seconds.",
@@ -221,10 +226,11 @@ def stop_service(handle: str) -> dict:
     if not isinstance(handle, str) or not handle:
         return tool_error("handle must be a nonempty string.", status="unknown_handle")
     with _registry_lock:
-        service = _services_by_handle.pop(handle, None)
-        if service is None:
+        service = _services_by_handle.get(handle)
+        if service is None or service.owner_id != active_conversation_id():
             return tool_error("Unknown managed service handle.", status="unknown_handle")
-        _handles_by_name.pop(service.name, None)
+        _services_by_handle.pop(handle)
+        _handles_by_name.pop((service.owner_id, service.name), None)
     was_running = service.process.poll() is None
     if was_running:
         _terminate_process(service.process)
@@ -235,6 +241,10 @@ def stop_service(handle: str) -> dict:
 def stop_all_services() -> None:
     """Stop and forget every process launched by this harness session."""
     with _registry_lock:
-        handles = list(_services_by_handle)
-    for handle in handles:
-        stop_service(handle)
+        services = list(_services_by_handle.values())
+        _services_by_handle.clear()
+        _handles_by_name.clear()
+    for service in services:
+        if service.process.poll() is None:
+            _terminate_process(service.process)
+        service.join_output()

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from harness_prototype.config import ServiceConfig
 from harness_prototype.services import start_service, stop_all_services, stop_service
+from harness_prototype.runtime_context import conversation_context
 
 
 class ServiceTests(unittest.TestCase):
@@ -74,6 +75,26 @@ class ServiceTests(unittest.TestCase):
             stop_all_services()
         self.assertTrue(started["ok"])
         self.assertEqual(stop_service(started["handle"])["status"], "unknown_handle")
+
+    def test_conversations_own_independent_service_handles(self) -> None:
+        """Do not deduplicate or stop a managed service across conversations."""
+        config = ServiceConfig(
+            (sys.executable, "-u", "-c", "import time; time.sleep(30)"),
+            ".", None, 3,
+        )
+        with patch("harness_prototype.services.SERVICES", {"worker": config}):
+            with conversation_context(self.workspace, "first"):
+                first = start_service("worker")
+            with conversation_context(self.workspace, "second"):
+                second = start_service("worker")
+                denied = stop_service(first["handle"])
+                stopped_second = stop_service(second["handle"])
+            with conversation_context(self.workspace, "first"):
+                stopped_first = stop_service(first["handle"])
+        self.assertNotEqual(first["handle"], second["handle"])
+        self.assertEqual(denied["status"], "unknown_handle")
+        self.assertEqual(stopped_second["status"], "stopped")
+        self.assertEqual(stopped_first["status"], "stopped")
 
 
 if __name__ == "__main__":

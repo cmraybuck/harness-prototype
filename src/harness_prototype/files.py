@@ -22,6 +22,7 @@ from docx import Document
 from PIL import Image, UnidentifiedImageError
 from pypdf import PdfReader
 
+from .runtime_context import active_workspace, resolve_path
 from .tool_results import tool_error, tool_success
 
 MAX_FILE_BYTES = 1_048_576
@@ -132,7 +133,7 @@ def _resolve_change_paths(
     if not isinstance(base_path, str) or not base_path.strip():
         return None, "base_path must be a nonempty directory path."
     try:
-        base = Path(base_path).expanduser().resolve()
+        base = resolve_path(base_path)
         resolved = [(change, (base / change.path).resolve()) for change in parsed]
     except (OSError, RuntimeError, ValueError) as path_error:
         return None, str(path_error)
@@ -232,7 +233,7 @@ def apply_file_changes(base_path: str, changes: list[dict]) -> dict:
     resolved, resolve_error = _resolve_change_paths(base_path, changes)
     if resolved is None:
         return tool_error(resolve_error or "Could not resolve file changes.")
-    base = Path(base_path).expanduser().resolve()
+    base = resolve_path(base_path)
     if not base.is_dir():
         return tool_error(f"Base path is not a directory: {base}")
 
@@ -466,7 +467,7 @@ def list_files(
     if extension_error is not None:
         return tool_error(extension_error)
     try:
-        directory = Path(path).expanduser().resolve()
+        directory = resolve_path(path)
         with os.scandir(directory) as iterator:
             entries = list(islice(iterator, MAX_ENTRIES + 1))
         if len(entries) > MAX_ENTRIES:
@@ -538,7 +539,7 @@ def find_files(pattern: str, root: str = ".", max_results: int = 100) -> dict:
     if type(max_results) is not int or not 1 <= max_results <= 100:
         return tool_error("max_results must be an integer between 1 and 100.")
     try:
-        directory = Path(root).expanduser().resolve()
+        directory = resolve_path(root)
         if not directory.is_dir():
             return tool_error(f"Not a directory: {directory}")
     except (OSError, ValueError) as error:
@@ -675,8 +676,8 @@ def search_project(
     )
 
     try:
-        workspace = Path.cwd().resolve()
-        search_path = Path(path).expanduser().resolve()
+        workspace = active_workspace()
+        search_path = resolve_path(path)
         if not search_path.exists():
             return tool_error(f"Path does not exist: {search_path}")
         if not search_path.is_file() and not search_path.is_dir():
@@ -880,7 +881,7 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
         return tool_error("max_lines must be an integer between 1 and 200.")
 
     try:
-        file_path = Path(path).expanduser().resolve()
+        file_path = resolve_path(path)
         if not file_path.is_file():
             return tool_error(f"Not a regular file: {file_path}")
         with file_path.open("rb") as source:
@@ -1234,7 +1235,7 @@ def inspect_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
     if type(max_lines) is not int or not 1 <= max_lines <= 200:
         return tool_error("max_lines must be an integer between 1 and 200.")
     try:
-        file_path = Path(path).expanduser().resolve()
+        file_path = resolve_path(path)
     except (OSError, RuntimeError, ValueError) as error:
         return tool_error(str(error))
     extension = file_path.suffix.casefold()
