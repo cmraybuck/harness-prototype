@@ -1,1 +1,1 @@
-"""A small local-model harness with read-only filesystem tools."""
+"""FLUX, a local-first software engineering agent powered by Ollama."""

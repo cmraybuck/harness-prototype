@@ -1,6 +1,7 @@
 """Terminal workflow and failed-turn recovery checks."""
 
 from pathlib import Path
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -10,6 +11,8 @@ from harness_prototype.agent_loop import ContextBudgetError, new_conversation
 from harness_prototype.access import AccessChoice
 from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.main import (
+    APP_DESCRIPTION,
+    APP_DISPLAY_NAME,
     MODEL_DESCRIPTIONS,
     TerminalUI,
     main,
@@ -22,6 +25,33 @@ from harness_prototype.main import (
 
 class MainTests(unittest.TestCase):
     """Cover terminal commands, failure reporting, and conversation recovery."""
+
+    def test_application_identity_is_canonical(self) -> None:
+        """Keep the product name and short description stable for later interfaces."""
+        self.assertEqual(APP_DISPLAY_NAME, "FLUX")
+        self.assertEqual(
+            APP_DESCRIPTION,
+            "A local-first software engineering agent powered by Ollama.",
+        )
+
+    def test_header_uses_flux_identity(self) -> None:
+        """Present FLUX instead of a legacy or generic name in the session header."""
+        ui = TerminalUI()
+        with patch("builtins.print") as output:
+            ui.show_header("test-model", "http://localhost:11434", Path("workspace"))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("FLUX", rendered)
+        self.assertNotIn("CODING AGENT", rendered)
+
+    def test_package_metadata_uses_flux_identity_and_compatibility_name(self) -> None:
+        """Brand package metadata as FLUX without renaming the installed package."""
+        project_file = Path(__file__).parents[1] / "pyproject.toml"
+        project = tomllib.loads(project_file.read_text(encoding="utf-8"))["project"]
+        self.assertEqual(project["name"], "harness-prototype")
+        self.assertEqual(
+            project["description"],
+            f"{APP_DISPLAY_NAME} — {APP_DESCRIPTION[0].lower()}{APP_DESCRIPTION[1:-1]}",
+        )
 
     def test_select_model_uses_arrow_keys_and_space(self) -> None:
         """Move between configured models and confirm the selection with Space."""
@@ -299,7 +329,7 @@ class MainTests(unittest.TestCase):
             self.assertTrue(request_tool_approval(stop))
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertIn("service start for web", rendered)
-        self.assertIn("harness-managed service", rendered)
+        self.assertIn("FLUX-managed service", rendered)
         self.assertNotIn("secret-handle", rendered)
 
     def test_command_session_grant_is_reused_for_the_same_executable(self) -> None:

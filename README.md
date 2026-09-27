@@ -1,6 +1,7 @@
-# Harness
+# FLUX
 
-A terminal assistant powered by Ollama with tools to list, find, search, read, and
+A local-first software engineering agent powered by Ollama, with tools to list,
+find, search, read, and
 change UTF-8 files; safely inspect structured data, documents, and images; inspect
 Git status and diffs; install recognized project
 dependencies, run configured tests and checks, manage configured background
@@ -17,9 +18,12 @@ ollama pull qwen3-vl:8b
 uv run python -m harness_prototype
 ```
 
-Run from this checkout. The installed command `uv run harness-prototype` and
-`uv run python -m harness_prototype` also work. The package and command retain the
-name `harness-prototype` even if your checkout is named `harness-og`.
+Run from this checkout. FLUX is the canonical user-facing name and is always
+written in uppercase. The installed command `uv run harness-prototype`, Python
+package/module `harness_prototype`, and `HARNESS_*` environment variables retain
+their existing names as compatibility interfaces during the branding transition.
+`uv run python -m harness_prototype` also remains supported. These technical names
+should not be used as the product name in new user-facing text.
 
 Copy `.env.example` to `.env` to configure the server, model choices, temperature,
 context window, tool-round limit, or tool approval policies. Environment variables
@@ -69,7 +73,7 @@ even if added to the allowlist. Commands run with the active workspace as their
 working directory, standard input disabled, and the configured test timeout and
 per-stream output limits. This is not an operating-system sandbox: an allowed
 executable or project code can still read, write, start child processes, use the
-network, or access paths outside the workspace with the harness process's OS
+network, or access paths outside the workspace with the FLUX process's OS
 permissions. Keep the allowlist narrow and review every approval carefully.
 
 Change these commands for another project or test runner. The timeout is a positive
@@ -126,14 +130,14 @@ identical tool operation; and three consecutive tool failures. Set
 `HARNESS_MODELS` to a comma-separated list to change and order the choices. The
 startup selector always begins on the first entry and requires confirmation.
 
-`qwen3-vl:8b` requires Ollama 0.12.7 or newer. Its visual capabilities let the
-harness send supported raster images inspected with `inspect_file` to the model
+`qwen3-vl:8b` requires Ollama 0.12.7 or newer. Its visual capabilities let
+FLUX send supported raster images inspected with `inspect_file` to the model
 for understanding, spatial reasoning, and image-informed coding tasks.
 
 Try “What files are in the current directory?” or “Find hello.txt on my Desktop
 and read it.” In an interactive terminal, startup clears prior terminal output and
 shows a temporary model-selection screen. After selection, that screen and the
-existing scrollback are cleared so the **Coding Agent** conversation starts at the
+existing scrollback are cleared so the **FLUX** conversation starts at the
 top of its own view. The interface labels each side of the conversation and shows
 each tool's purpose and safe scope as a subdued `Working` status, such as
 `Reading AGENTS.md` or `Looking for README* under src`. Permission requests use
@@ -285,13 +289,13 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 
 - **Listing:** 1–100 entries and 4,000 characters of JSON-encoded entry text per page. Directories over 20,000 entries return an error before filtering or sorting. Filename and exclusion globs are filename-only and case-insensitive; at most 100 exclusions or extensions are accepted. Malformed patterns return an error. Offsets address the filtered, sorted sequence and assume the directory and filter options have not changed.
 - **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 error messages are returned. `error_count` retains the total and `errors_truncated=true` reports omitted diagnostics. Narrow the root when limits are reached.
-- **Content search:** searches an authorized file or directory once while classifying matches as exact literal, case-insensitive literal, or case-and-whitespace-flexible. It returns up to 1–100 lines (default 100), leading with the strongest match and reserving early visibility for every available quality when the limit permits; fallback matching does not interpret regex syntax. Broad searches skip the harness's generated `work/logs` tree so retained prompts and model output cannot outrank source, while directly targeting that directory or one of its files still searches it. Traversal stops at 20,000 entries or a best-effort 10-second deadline, and selected result text stops at 8,000 JSON-encoded characters. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
+- **Content search:** searches an authorized file or directory once while classifying matches as exact literal, case-insensitive literal, or case-and-whitespace-flexible. It returns up to 1–100 lines (default 100), leading with the strongest match and reserving early visibility for every available quality when the limit permits; fallback matching does not interpret regex syntax. Broad searches skip FLUX's generated `work/logs` tree so retained prompts and model output cannot outrank source, while directly targeting that directory or one of its files still searches it. Traversal stops at 20,000 entries or a best-effort 10-second deadline, and selected result text stops at 8,000 JSON-encoded characters. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
 - **Reading:** `read_file` accepts at most 1 MiB per UTF-8 file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Content is returned raw with line endings normalized to LF; `revision` hashes the original complete bytes. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines.
 - **Structured and document inspection:** `inspect_file` accepts JSON, TOML, YAML/YML up to 2 MiB; PDF and DOCX up to 20 MiB; and supported raster images up to 20 MiB. Structured values are limited to 32 levels and 20,000 nodes; YAML aliases and binary values are rejected. JSON, TOML, and YAML parse failures include line and column details where the parser provides them. PDF extraction is limited to 500 pages and 1,000,000 extracted characters. DOCX packages are limited to 10,000 archive entries and 50 MB expanded content; macros, embedded objects, tracked-change semantics, drawings, headers, footers, footnotes, and OCR are not extracted. Text output uses 1–200 lines and 8,000 characters per page. Images are limited to 40 million decoded pixels, validated before forwarding, and may disclose their bytes to the configured Ollama server. Visual interpretation requires a model that accepts images; animated images may be interpreted from only one frame. Legacy `.doc`, encrypted PDFs, SVG, PDFs consisting only of scanned images, and other formats are unsupported.
-- **Remote documentation:** only public HTTPS URLs are accepted, redirects are revalidated, requests time out after 10 seconds, at most 256 KiB is read, and extracted text stops at 12,000 characters. Supported responses are HTML and plain text; scripts, styles, and other non-content HTML elements are omitted. Network, HTTP, decoding, unsupported-format, and empty-content failures are structured errors. Network approval is an application policy, not a privacy boundary or network sandbox: requests disclose the harness machine's IP address and URL to the destination, DNS and proxy infrastructure may observe it, remote pages may be malicious or inaccurate, and hostname checks cannot fully prevent DNS rebinding. Returned text is untrusted data rather than instructions. The tool does not authenticate sources, execute page scripts, accept credentials in URLs, or support private/local hosts, binary documents, pagination, or sites requiring browser rendering.
+- **Remote documentation:** only public HTTPS URLs are accepted, redirects are revalidated, requests time out after 10 seconds, at most 256 KiB is read, and extracted text stops at 12,000 characters. Supported responses are HTML and plain text; scripts, styles, and other non-content HTML elements are omitted. Network, HTTP, decoding, unsupported-format, and empty-content failures are structured errors. Network approval is an application policy, not a privacy boundary or network sandbox: requests disclose the FLUX machine's IP address and URL to the destination, DNS and proxy infrastructure may observe it, remote pages may be malicious or inaccurate, and hostname checks cannot fully prevent DNS rebinding. Returned text is untrusted data rather than instructions. The tool does not authenticate sources, execute page scripts, accept credentials in URLs, or support private/local hosts, binary documents, pagination, or sites requiring browser rendering.
 - **Git status:** inspects only the active workspace, returns at most 1,000 entries, and times out after 10 seconds. A limited result is marked incomplete and truncated. It uses Git's NUL-delimited porcelain format, does not contact remotes, and disables optional index locking and refresh. Ignored files are not reported.
 - **Git diff:** inspects only the active workspace, returns at most 20,000 patch characters and 200 per-file summaries, and times out after 10 seconds per Git operation. Limited patch or file-summary output is marked incomplete and truncated; `file_count` and `files_truncated` retain its scope. It does not contact remotes, invoke external diff drivers, include untracked contents, or modify the index or working tree. Use `git_status` for a compact categorized inventory and `git_diff` to inspect actual line changes.
-- **Execution:** test and check commands launch only configured argument arrays. `install_dependencies` derives a fixed shell-free operation from one project directory's recognized manifests and lockfiles; it never accepts package names or arbitrary command arguments, rejects paths outside the active workspace, and disables standard input. It reports changes only for recognized dependency manifests and lockfiles in that project root, not generated dependency directories. `run_command` accepts a model-provided argument array only when its bare executable name is configured; shell executables remain denied. Services likewise use only named, shell-free `HARNESS_SERVICES` commands, with configured working directories confined to the active workspace. Service output is drained continuously and bounded by `HARNESS_TEST_OUTPUT_LIMIT`; readiness can require configured text on either stream. A readiness timeout stops the process. Handles are random session identifiers, never PIDs, and only handles in the in-memory registry can be stopped. All remaining managed services are terminated when the interactive session exits, including exceptional exit from the prompt loop. No execution tool invokes a shell. Tests, checks, and ad hoc commands use the active workspace as their working directory; dependency installation and services use their selected project directories within it. A targeted test run accepts at most 50 printable selectors of at most 500 characters; selectors cannot begin with `-`, and path-like selectors cannot leave the workspace. Project checks accept only exact configured check and target names. Ad hoc commands accept 1–100 printable arguments of at most 1,000 characters. Runtime and each captured output stream use the configured limits. A timeout terminates the launched process group. Interruption is recorded as an uncertain outcome by the conversation loop. This is an application policy, not an OS sandbox: approved commands and project code run with the harness process's operating-system permissions and may affect resources outside the workspace.
+- **Execution:** test and check commands launch only configured argument arrays. `install_dependencies` derives a fixed shell-free operation from one project directory's recognized manifests and lockfiles; it never accepts package names or arbitrary command arguments, rejects paths outside the active workspace, and disables standard input. It reports changes only for recognized dependency manifests and lockfiles in that project root, not generated dependency directories. `run_command` accepts a model-provided argument array only when its bare executable name is configured; shell executables remain denied. Services likewise use only named, shell-free `HARNESS_SERVICES` commands, with configured working directories confined to the active workspace. Service output is drained continuously and bounded by `HARNESS_TEST_OUTPUT_LIMIT`; readiness can require configured text on either stream. A readiness timeout stops the process. Handles are random session identifiers, never PIDs, and only handles in the in-memory registry can be stopped. All remaining managed services are terminated when the interactive session exits, including exceptional exit from the prompt loop. No execution tool invokes a shell. Tests, checks, and ad hoc commands use the active workspace as their working directory; dependency installation and services use their selected project directories within it. A targeted test run accepts at most 50 printable selectors of at most 500 characters; selectors cannot begin with `-`, and path-like selectors cannot leave the workspace. Project checks accept only exact configured check and target names. Ad hoc commands accept 1–100 printable arguments of at most 1,000 characters. Runtime and each captured output stream use the configured limits. A timeout terminates the launched process group. Interruption is recorded as an uncertain outcome by the conversation loop. This is an application policy, not an OS sandbox: approved commands and project code run with the FLUX process's operating-system permissions and may affect resources outside the workspace.
 - **Changing files:** accepts 1–100 distinct files and limits every existing and resulting file to 1 MiB. `create` fails if the target exists. `overwrite`, `append`, and `replace` fail with `revision_mismatch` unless their `expected_revision` matches the complete current bytes. `append` inserts one detected-style line separator when needed. `replace` changes one unique exact `old_text` occurrence. Any extension is accepted, but contents must be UTF-8 text; binary formats are unsupported. Existing UTF-8 BOM and newline style are preserved. Every resolved target directory is checked against session grants before dispatch, including paths reached through links. All changes are preflighted and staged before commit; failures trigger best-effort rollback and report `rolled_back` or `outcome_unknown`.
 
 Individual filesystem operations may still block on a slow or unavailable drive.
@@ -303,7 +307,7 @@ Repository-specific requests that ask for implementation, files, functions,
 configuration, tests, or causal tracing use an evidence gate. A direct request to
 use, call, invoke, or execute a named registered tool bypasses that gate so the
 requested operation can supply its own structured evidence. Unsupported prose
-is withheld while the harness supplies bounded, progress-aware instructions to
+is withheld while FLUX supplies bounded, progress-aware instructions to
 search a short source anchor and read returned files. The requested language
 determines required evidence categories: implementation is always required;
 configuration, CLI, tests, and documentation are added when named, and causal
@@ -316,12 +320,12 @@ and line ranges. Search discoveries are cached for the turn, independent reads
 are requested as one tool-call batch, and later planning advances to unread
 matches instead of repeating discovery. Repository turns receive a concrete
 inspection instruction on their first model request rather than spending a round
-on an unsupported draft. For synthesis, the harness exposes that ledger through
+on an unsupported draft. For synthesis, FLUX exposes that ledger through
 short evidence IDs. Final codebase claims cite them as `E#:line`; brackets are
 preferred, while parentheses and fully inspected line ranges are accepted.
 Claims must cover every required category and cite the required number of
 implementation files. When a draft cites useful lines outside the ledger, the
-harness retains that exact draft, permits one batched focused-read expansion,
+FLUX retains that exact draft, permits one batched focused-read expansion,
 and revalidates the unchanged draft locally. A now-grounded draft is released
 without another model rewrite, preventing citation churn and an unnecessary
 synthesis request. Other invalid drafts are withheld and receive up to two
@@ -332,7 +336,7 @@ criteria, enforcement, retained history, the user-visible outcome, relevant
 symbols, tests, and confirmed facts versus inference. A response missing a
 requested facet uses the existing grounding correction; it does not trigger more
 repository discovery. Repeated-tool-operation questions additionally receive a
-semantic evidence plan: the harness batches exact searches for the configuration
+semantic evidence plan: FLUX batches exact searches for the configuration
 setting, signature construction, threshold branch, notice method, `run_turn`
 guard/history path, and focused regression test. Overlapping reads are coalesced,
 and synthesis cites named roles such as `CONFIG`, `IDENTITY`, `ENFORCEMENT`,
@@ -355,11 +359,11 @@ explicit `tool_round_limit` non-execution results and the turn stops.
 Repository requests governed by the evidence gate receive the separately bounded
 `HARNESS_INSPECTION_TOOL_ROUND_ALLOWANCE` (default 4) because mandatory discovery
 and reads are backend requirements rather than unconstrained model exploration.
-The harness
+FLUX
 executes an exact tool name and argument object at most twice; a third identical
 request is returned without dispatch as `tool_loop_stopped`. Calls with changed
 arguments are distinct, so corrected retries and pagination through `offset`,
-`start_line`, or other continuation values remain available. The harness also stops after three
+`start_line`, or other continuation values remain available. FLUX also stops after three
 consecutive results with `ok=false`; any successful result resets that failure
 streak. Configure the positive thresholds with
 `HARNESS_IDENTICAL_TOOL_CALL_LIMIT` and

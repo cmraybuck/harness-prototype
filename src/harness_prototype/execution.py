@@ -440,7 +440,7 @@ def run_command(command: list[str]) -> dict:
 
     Shells and shell interpreters are always denied, even if configured in the
     allowlist. Arguments are bounded printable strings. The process inherits the
-    harness's OS permissions, but its working directory is fixed to the active
+    FLUX's OS permissions, but its working directory is fixed to the active
     workspace and standard input is disabled.
     """
     if (

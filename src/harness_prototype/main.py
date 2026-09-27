@@ -35,6 +35,9 @@ MODEL_DESCRIPTIONS = {
     "qwen3-vl:8b": "vision-language reasoning for images, text, coding, and tool use",
 }
 
+APP_DISPLAY_NAME = "FLUX"
+APP_DESCRIPTION = "A local-first software engineering agent powered by Ollama."
+
 
 def _terminal_text(value: object, max_chars: int = 160) -> str:
     """Return bounded single-line text that cannot control the terminal."""
@@ -77,7 +80,7 @@ class TerminalUI:
     def show_header(self, model: str, host: str, workspace: Path) -> None:
         """Display the application identity and active session details."""
         print(self.style(self.rule(), "2"))
-        print(self.style("  CODING AGENT", "1;36"))
+        print(self.style(f"  {APP_DISPLAY_NAME}", "1;36"))
         print(self.style(self.rule(), "2"))
         print(f"  Model      {model}")
         print(f"  Server     {host}")
@@ -347,7 +350,7 @@ def select_model(
         label = model if description is None else f"{model} - {description}"
         options.append(label)
     selected = active_ui.choose_option(
-        "Coding Agent - Select a model",
+        f"{APP_DISPLAY_NAME} - Select a model",
         [],
         options,
         initial=0,
@@ -406,7 +409,7 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
         lines.append(f"Directory   {_terminal_text(Path.cwd())}")
         return lines
     if request.tool_name == "stop_service" and isinstance(request.arguments, dict):
-        lines.append("Scope       One harness-managed service handle")
+        lines.append(f"Scope       One {APP_DISPLAY_NAME}-managed service handle")
         return lines
     if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
         return lines
@@ -500,7 +503,7 @@ def _tool_approval_receipt(
         name = _terminal_text(request.arguments.get("name", "unknown"))
         return f"{decision} service start for {name}."
     if request.tool_name == "stop_service":
-        return f"{decision} stopping one harness-managed service."
+        return f"{decision} stopping one {APP_DISPLAY_NAME}-managed service."
     if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
         changes = request.arguments.get("changes")
         if isinstance(changes, list):

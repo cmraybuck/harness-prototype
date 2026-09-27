@@ -180,10 +180,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "uv could not install Python 3.12." }
     & uv sync --locked
     if ($LASTEXITCODE -ne 0) { throw "uv could not create the project environment. Review the output above." }
-    Write-Host "Setup complete. Start the harness with: uv run harness-prototype"
+    Write-Host "Setup complete. Start FLUX with: uv run harness-prototype"
     if ($Launch) {
         & uv run harness-prototype
-        if ($LASTEXITCODE -ne 0) { throw "The harness exited with code $LASTEXITCODE." }
+        if ($LASTEXITCODE -ne 0) { throw "FLUX exited with code $LASTEXITCODE." }
     }
 } finally {
     Pop-Location
