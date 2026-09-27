@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [string]$OllamaHost,
-    [string]$Model,
     [string]$Models,
     [string]$TailscaleProfile,
     [switch]$Launch
@@ -133,10 +132,8 @@ $envPath = Join-Path $projectRoot ".env"
 $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExamplePath }
 $dotEnv = Import-DotEnv $settingsPath
 $baseUrl = Get-OllamaBaseUrl (Get-SetupValue $OllamaHost "HARNESS_OLLAMA_HOST" $dotEnv "http://127.0.0.1:11434")
-$selectedModel = Get-SetupValue $Model "HARNESS_MODEL" $dotEnv "devstral-small-2:latest"
-$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b"
+$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b,qwen3-vl:8b"
 $selectedModels = @(ConvertTo-ModelList $modelListValue)
-if ($selectedModel -notin $selectedModels) { $selectedModels = @($selectedModel) + $selectedModels }
 $selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
 $hostName = ([System.Uri]$baseUrl).Host
 
@@ -171,7 +168,6 @@ if (Test-Path -LiteralPath $envPath) {
     Write-Host "Creating .env from .env.example..."
 }
 $envContent = Set-DotEnvValue $envContent "HARNESS_OLLAMA_HOST" $baseUrl
-$envContent = Set-DotEnvValue $envContent "HARNESS_MODEL" $selectedModel
 $envContent = Set-DotEnvValue $envContent "HARNESS_MODELS" ($selectedModels -join ",")
 if ($selectedProfile) { $envContent = Set-DotEnvValue $envContent "HARNESS_TAILSCALE_PROFILE" $selectedProfile }
 $utf8WithoutBom = New-Object System.Text.UTF8Encoding -ArgumentList $false

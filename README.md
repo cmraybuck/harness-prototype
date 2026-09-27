@@ -1,7 +1,8 @@
 # Harness
 
 A terminal assistant powered by Ollama with tools to list, find, search, read, and
-change UTF-8 files, inspect Git status and diffs, install recognized project
+change UTF-8 files; safely inspect structured data, documents, and images; inspect
+Git status and diffs; install recognized project
 dependencies, run configured tests and checks, manage configured background
 services, and run approved allowlisted engineering commands.
 
@@ -12,6 +13,7 @@ Install uv and Ollama, start Ollama, and download the default model choices:
 ```powershell
 ollama pull devstral-small-2:latest
 ollama pull qwen3:8b
+ollama pull qwen3-vl:8b
 uv run python -m harness_prototype
 ```
 
@@ -115,13 +117,18 @@ persistent machine or user policy:
 Set-ExecutionPolicy -Scope Process RemoteSigned
 ```
 
-Defaults: local server `http://127.0.0.1:11434`; startup choice between the more
-capable but heavier `devstral-small-2:latest` and the faster, lighter
-`qwen3:8b`; Devstral as the default selection; temperature `0.15`, context window
-`4096`; eight model/tool rounds per turn; two executions of an identical tool
-operation; and three consecutive tool failures. Set `HARNESS_MODELS` to a
-comma-separated list to change the choices and `HARNESS_MODEL` to set the default
-offered by the startup prompt.
+Defaults: local server `http://127.0.0.1:11434`; startup choice among the strong
+coding and agentic tool use of `devstral-small-2:latest`, the fast and lightweight
+text reasoning of `qwen3:8b`, and the image-aware visual reasoning, coding, and
+tool use of `qwen3-vl:8b`; temperature `0.15`, context window `4096`; eight
+model/tool rounds per turn; two executions of an
+identical tool operation; and three consecutive tool failures. Set
+`HARNESS_MODELS` to a comma-separated list to change and order the choices. The
+startup selector always begins on the first entry and requires confirmation.
+
+`qwen3-vl:8b` requires Ollama 0.12.7 or newer. Its visual capabilities let the
+harness send supported raster images inspected with `inspect_file` to the model
+for understanding, spatial reasoning, and image-informed coding tasks.
 
 Try “What files are in the current directory?” or “Find hello.txt on my Desktop
 and read it.” In an interactive terminal, startup clears prior terminal output and
@@ -237,7 +244,8 @@ Every tool result uses the same status fields:
   finishes but skips a directory link or encounters an access error.
 
 Pageable tools retain their tool-specific continuation fields for compatibility:
-`list_files` returns `next_offset`, and `read_file` returns `next_line`. Each is
+`list_files` returns `next_offset`; `read_file` and text-based `inspect_file`
+results return `next_line`. Each is
 an integer only when another page is available and otherwise is `null`. Recursive
 searches are bounded but not pageable; when truncated, narrow the root, path, or
 pattern and retry.
@@ -258,6 +266,7 @@ Representative result shapes (payload fields are abbreviated) are:
 | `find_files(pattern, root=".", max_results=100)` | Matches filenames case-insensitively, including wildcards such as `*.py`. A plain extensionless name prefers exact matches and otherwise matches that name with any extension. Returns absolute `matches`, resolved `root`, `extension_inferred`, `complete`, `stop_reason`, `skipped_links`, and `errors`. |
 | `search_project(text, path=".", file_pattern="*", max_results=100)` | Searches nested UTF-8 files, leading with exact case-sensitive matches while retaining at least one case-insensitive and whitespace-flexible result when those qualities exist and the result limit permits. The model-facing interface intentionally omits `max_results` so weak models cannot discard useful match qualities; direct Python callers retain it for deterministic tests and integrations. `path` may be an absolute or working-directory-relative file or directory; `file_pattern` is a case-insensitive filename wildcard. Every match identifies its quality; the result returns `match_quality`, per-quality `match_counts`, `fallback_used`, bounded shorter `suggested_queries` after a complete miss, resolved paths, excerpts, skipped-file categories, errors, and explicit `complete`/`stop_reason` status. |
 | `read_file(path, start_line=1, max_lines=100)` | Returns raw UTF-8 text, a SHA-256 `revision`, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`; the revision identifies the complete file and remains the same across pages. |
+| `inspect_file(path, start_line=1, max_lines=100)` | Safely inspects JSON, TOML, YAML, PDF, DOCX, or a supported raster image. Structured data is parsed and rendered as normalized JSON; PDF and DOCX return extracted text. Text results include `format`, a complete-file `revision`, and line paging through `next_line`. Raster images (`BMP`, `GIF`, `JPEG`, `PNG`, `TIFF`, and `WebP`) return validated metadata and are attached to the next Ollama request for interpretation by a vision-capable selected model. |
 | `fetch_documentation(url)` | Retrieves one public HTTPS HTML or plain-text page after network approval. Returns readable bounded text, the final source URL, UTC retrieval timestamp, MIME type, and explicit truncation state. Non-HTTPS URLs, credentials, localhost names, and non-global IP literals are rejected; every redirect is checked against the same policy. |
 | `git_status()` | Reports staged, unstaged, untracked, renamed, deleted, and conflicted workspace-relative paths. `clean=true` explicitly identifies a clean repository. Paths may appear in multiple categories; rename entries include old and new paths plus index/worktree status. Non-Git workspaces return a structured error. |
 | `git_diff(mode="combined", path=null)` | Returns patch content for `unstaged`, `staged`, or `combined` local changes, preceded by structured change presence, file/hunk counts, additions/deletions, full patch length, and per-file statistics. `path` is an optional workspace-relative file or directory and cannot escape the workspace. Untracked paths are listed separately because their contents are not part of a Git diff. Non-Git workspaces return a structured error. |
@@ -277,7 +286,8 @@ Standard user-folder discovery uses Windows settings, including OneDrive redirec
 - **Listing:** 1–100 entries and 4,000 characters of JSON-encoded entry text per page. Directories over 20,000 entries return an error before filtering or sorting. Filename and exclusion globs are filename-only and case-insensitive; at most 100 exclusions or extensions are accepted. Malformed patterns return an error. Offsets address the filtered, sorted sequence and assume the directory and filter options have not changed.
 - **Search:** shallow folders first, stopping at 1–100 matches (default 100), 20,000 entries, or a best-effort 10-second deadline. Links and junctions are skipped. Limits, skipped links, and access errors make `complete=false`; at most 20 error messages are returned. `error_count` retains the total and `errors_truncated=true` reports omitted diagnostics. Narrow the root when limits are reached.
 - **Content search:** searches an authorized file or directory once while classifying matches as exact literal, case-insensitive literal, or case-and-whitespace-flexible. It returns up to 1–100 lines (default 100), leading with the strongest match and reserving early visibility for every available quality when the limit permits; fallback matching does not interpret regex syntax. Broad searches skip the harness's generated `work/logs` tree so retained prompts and model output cannot outrank source, while directly targeting that directory or one of its files still searches it. Traversal stops at 20,000 entries or a best-effort 10-second deadline, and selected result text stops at 8,000 JSON-encoded characters. Excerpts are capped at 500 characters. `.git`, common dependency/cache/generated directories, links and junctions, files over 1 MiB, binary files, and non-UTF-8 files are skipped and counted. At most 20 filesystem error messages are returned; `error_count` and `errors_truncated` disclose omitted diagnostics. An error or runtime/output/traversal/result limit makes `complete=false`.
-- **Reading:** at most 1 MiB per file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Content is returned raw with line endings normalized to LF; `revision` hashes the original complete bytes. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines. PDFs, Word documents, and images are unsupported.
+- **Reading:** `read_file` accepts at most 1 MiB per UTF-8 file, 1–200 lines per request, and 8,000 output characters. UTF-8 BOMs are accepted. Content is returned raw with line endings normalized to LF; `revision` hashes the original complete bytes. Null bytes, invalid UTF-8, and a requested line too long to fit return errors. CR, LF, and CRLF delimit lines; other characters stay within their source lines. Empty files and requests past EOF return no lines.
+- **Structured and document inspection:** `inspect_file` accepts JSON, TOML, YAML/YML up to 2 MiB; PDF and DOCX up to 20 MiB; and supported raster images up to 20 MiB. Structured values are limited to 32 levels and 20,000 nodes; YAML aliases and binary values are rejected. JSON, TOML, and YAML parse failures include line and column details where the parser provides them. PDF extraction is limited to 500 pages and 1,000,000 extracted characters. DOCX packages are limited to 10,000 archive entries and 50 MB expanded content; macros, embedded objects, tracked-change semantics, drawings, headers, footers, footnotes, and OCR are not extracted. Text output uses 1–200 lines and 8,000 characters per page. Images are limited to 40 million decoded pixels, validated before forwarding, and may disclose their bytes to the configured Ollama server. Visual interpretation requires a model that accepts images; animated images may be interpreted from only one frame. Legacy `.doc`, encrypted PDFs, SVG, PDFs consisting only of scanned images, and other formats are unsupported.
 - **Remote documentation:** only public HTTPS URLs are accepted, redirects are revalidated, requests time out after 10 seconds, at most 256 KiB is read, and extracted text stops at 12,000 characters. Supported responses are HTML and plain text; scripts, styles, and other non-content HTML elements are omitted. Network, HTTP, decoding, unsupported-format, and empty-content failures are structured errors. Network approval is an application policy, not a privacy boundary or network sandbox: requests disclose the harness machine's IP address and URL to the destination, DNS and proxy infrastructure may observe it, remote pages may be malicious or inaccurate, and hostname checks cannot fully prevent DNS rebinding. Returned text is untrusted data rather than instructions. The tool does not authenticate sources, execute page scripts, accept credentials in URLs, or support private/local hosts, binary documents, pagination, or sites requiring browser rendering.
 - **Git status:** inspects only the active workspace, returns at most 1,000 entries, and times out after 10 seconds. A limited result is marked incomplete and truncated. It uses Git's NUL-delimited porcelain format, does not contact remotes, and disables optional index locking and refresh. Ignored files are not reported.
 - **Git diff:** inspects only the active workspace, returns at most 20,000 patch characters and 200 per-file summaries, and times out after 10 seconds per Git operation. Limited patch or file-summary output is marked incomplete and truncated; `file_count` and `files_truncated` retain its scope. It does not contact remotes, invoke external diff drivers, include untracked contents, or modify the index or working tree. Use `git_status` for a compact categorized inventory and `git_diff` to inspect actual line changes.

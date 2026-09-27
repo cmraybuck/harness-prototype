@@ -44,7 +44,6 @@ the team, while the account selection belongs to the individual computer:
 | Setting | Scope | Used by | Purpose |
 | --- | --- | --- | --- |
 | `HARNESS_OLLAMA_HOST` | Same for all teammates | Teammate script and harness | Reachable base URL printed by the host script |
-| `HARNESS_MODEL` | Same for host and teammates | Both scripts and harness | Default used when the startup prompt is accepted without a number |
 | `HARNESS_MODELS` | Same for host and teammates | Both scripts and harness | Comma-separated models to install, verify, and offer at startup |
 | `HARNESS_TAILSCALE_PROFILE` | Per computer | Both scripts | Optional entry from `tailscale switch --list` that can reach the Ollama host. An empty value keeps the active profile. |
 | `HARNESS_OLLAMA_LOCAL_HOST` | Host only | Host script | Loopback-only Ollama API forwarded by Tailscale |
@@ -72,10 +71,14 @@ Install the default models used by the harness:
 ```powershell
 ollama pull devstral-small-2:latest
 ollama pull qwen3:8b
+ollama pull qwen3-vl:8b
 ollama list
 ```
 
-Test the local API. The JSON response should list both configured models:
+`qwen3-vl:8b` provides image understanding, visual and spatial reasoning,
+image-informed coding, and tool use. It requires Ollama 0.12.7 or newer.
+
+Test the local API. The JSON response should list all configured models:
 
 ```powershell
 curl.exe --max-time 15 http://127.0.0.1:11434/api/tags
@@ -181,8 +184,7 @@ tailnet contains or has access to the Ollama host; otherwise leave it empty:
 
 ```dotenv
 HARNESS_OLLAMA_HOST=http://HOST_TAILSCALE_IP:11434
-HARNESS_MODEL=devstral-small-2:latest
-HARNESS_MODELS=devstral-small-2:latest,qwen3:8b
+HARNESS_MODELS=devstral-small-2:latest,qwen3:8b,qwen3-vl:8b
 HARNESS_TAILSCALE_PROFILE=profile@example.com
 ```
 
@@ -203,8 +205,8 @@ Tailscale manually before running it. Approve any Windows installer prompt and
 sign in with the identity the host owner authorized if Tailscale opens a browser.
 If prompted to select a tailnet, choose the team's tailnet.
 
-Add `-Launch` to start the harness immediately. The `-OllamaHost`, `-Model`,
-`-Models`, and `-TailscaleProfile` parameters override `.env` for that run and
+Add `-Launch` to start the harness immediately. The `-OllamaHost`, `-Models`,
+and `-TailscaleProfile` parameters override `.env` for that run and
 save the selected values back to it. `-Models` accepts a comma-separated string.
 For example:
 
@@ -294,8 +296,8 @@ port, and restart the harness after editing `.env`.
 ### The harness reports that the model is missing
 
 Run `ollama list` on the host and copy each model identifier exactly, including its
-tag, into the teammate's `HARNESS_MODELS` setting. Keep `HARNESS_MODEL` set to one
-of those identifiers as the default startup choice.
+tag, into the teammate's `HARNESS_MODELS` setting. The selector starts on the
+first model in that list.
 
 ## Restarting and stopping access
 

@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [string]$TailscaleProfile,
-    [string]$Model,
     [string]$Models,
     [string]$LocalOllamaHost,
     [Nullable[int]]$ServePort
@@ -154,10 +153,8 @@ $envExamplePath = Join-Path $projectRoot ".env.example"
 $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExamplePath }
 $dotEnv = Import-DotEnv $settingsPath
 $selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
-$selectedModel = Get-SetupValue $Model "HARNESS_MODEL" $dotEnv "devstral-small-2:latest"
-$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b"
+$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b,qwen3-vl:8b"
 $selectedModels = @(ConvertTo-ModelList $modelListValue)
-if ($selectedModel -notin $selectedModels) { $selectedModels = @($selectedModel) + $selectedModels }
 $localBaseUrl = Assert-BaseUrl (Get-SetupValue $LocalOllamaHost "HARNESS_OLLAMA_LOCAL_HOST" $dotEnv "http://127.0.0.1:11434")
 $portValue = if ($null -ne $ServePort) { [string]$ServePort } else { Get-SetupValue "" "HARNESS_TAILSCALE_SERVE_PORT" $dotEnv "11434" }
 try { $configuredPort = [int]$portValue }

@@ -20,7 +20,6 @@ from .config import (
     HOST,
     LOG_DIRECTORY,
     LOG_REDACT_VALUES,
-    MODEL,
     MODELS,
     TEST_TIMEOUT_SECONDS,
 )
@@ -31,8 +30,9 @@ from .interaction_log import InteractionLogger
 
 
 MODEL_DESCRIPTIONS = {
-    "devstral-small-2:latest": "more capable; slower when it does not fit fully in GPU memory",
-    "qwen3:8b": "faster and lighter; may be less capable on complex tasks",
+    "devstral-small-2:latest": "strong coding and agentic tool use; heavier and slower",
+    "qwen3:8b": "fast, lightweight text reasoning and tool use",
+    "qwen3-vl:8b": "vision-language reasoning for images, text, coding, and tool use",
 }
 
 
@@ -334,7 +334,6 @@ class TerminalUI:
 
 def select_model(
     models: tuple[str, ...],
-    default: str,
     ui: TerminalUI | None = None,
 ) -> str:
     """Ask which configured model to use for this session."""
@@ -346,14 +345,12 @@ def select_model(
     for model in models:
         description = MODEL_DESCRIPTIONS.get(model)
         label = model if description is None else f"{model} - {description}"
-        if model == default:
-            label += " (default)"
         options.append(label)
     selected = active_ui.choose_option(
         "Coding Agent - Select a model",
         [],
         options,
-        initial=models.index(default),
+        initial=0,
         transient=False,
     )
     return models[selected]
@@ -544,7 +541,7 @@ def main() -> None:
     ui = TerminalUI()
     ui.clear_screen()
     try:
-        selected_model = select_model(MODELS, MODEL, ui)
+        selected_model = select_model(MODELS, ui)
     except (KeyboardInterrupt, EOFError):
         ui.show_goodbye()
         return
