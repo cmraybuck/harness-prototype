@@ -10,6 +10,7 @@ from ollama import ChatResponse
 from harness_prototype.access import AccessChoice, WorkspaceAccess
 from harness_prototype.approval import ApprovalPolicy, ToolCategory
 from harness_prototype.agent_loop import (
+    AgentRuntime,
     CapabilityState,
     ContextBudgetError,
     EmptyModelResponseError,
@@ -43,6 +44,60 @@ def run_turn(*args: object, **kwargs: object) -> str:
 
 class AgentLoopTests(unittest.TestCase):
     """Cover successful, exhausted, interrupted, and empty model turns."""
+
+    def test_runtime_drives_conversation_without_terminal_ui(self) -> None:
+        """Let a non-terminal caller submit, retain, and clear a conversation."""
+        client = Mock()
+        client.chat.return_value = [
+            ChatResponse(message={"role": "assistant", "content": "Hello."})
+        ]
+        rendered = []
+        runtime = AgentRuntime(client, "test", Path.cwd())
+
+        result = runtime.continue_conversation("Hi", on_text=rendered.append)
+
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(rendered, ["Hello."])
+        self.assertEqual(runtime.messages[-1]["content"], "Hello.")
+        runtime.clear_conversation()
+        self.assertEqual(len(runtime.messages), 1)
+        self.assertEqual(runtime.capability_state.active_groups, set())
+
+    def test_runtime_interrupt_recovers_unfinished_turn(self) -> None:
+        """Cancel through the runtime API without retaining an unfinished prompt."""
+        client = Mock()
+        client.chat.return_value = iter([
+            ChatResponse(message={"role": "assistant", "content": "partial"}),
+            ChatResponse(message={"role": "assistant", "content": "ignored"}),
+        ])
+        runtime = AgentRuntime(client, "test", Path.cwd())
+        original_messages = list(runtime.messages)
+
+        result = runtime.continue_conversation(
+            "Stop this",
+            on_text=lambda text: runtime.interrupt(),
+        )
+
+        self.assertEqual(result.outcome, "cancelled")
+        self.assertEqual(runtime.messages, original_messages)
+
+    def test_runtime_preserves_completed_tool_exchange_on_failure(self) -> None:
+        """Retain a recorded tool result when a later part of the turn fails."""
+        def failing_turn(**kwargs: object) -> str:
+            """Record one tool outcome before simulating a request failure."""
+            messages = kwargs["messages"]
+            assert isinstance(messages, list)
+            messages.append({"role": "tool", "content": "{}"})
+            raise RuntimeError("later failure")
+
+        runtime = AgentRuntime(Mock(), "test", Path.cwd(), turn_runner=failing_turn)
+
+        result = runtime.continue_conversation("Use a tool")
+
+        self.assertEqual(result.outcome, "failed")
+        self.assertIn("later failure", result.error or "")
+        self.assertEqual(runtime.messages[-2]["role"], "tool")
+        self.assertIn("Recorded tool outcomes", runtime.messages[-1]["content"])
 
     def test_system_prompt_explains_structured_file_changes(self) -> None:
         """Load write and verification guidance only with their capabilities."""

@@ -5,9 +5,10 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
+from threading import Event
 from time import monotonic
 
-from ollama import Client
+from ollama import Client, ResponseError
 
 from .access import AccessChoice, PermissionPrompt, WorkspaceAccess
 from .approval import (
@@ -26,7 +27,7 @@ from .config import (
     RESEARCH_CONTEXT_LENGTH,
     TEMPERATURE,
 )
-from .interaction_log import TurnLog
+from .interaction_log import InteractionLogger, TurnLog
 from .loop_guard import ToolLoopGuard, ToolLoopStop
 from .tools import (
     AVAILABLE_TOOLS,
@@ -799,12 +800,12 @@ def inspection_retry_instruction(
     return INSPECTION_REMINDER
 
 
-def new_conversation() -> list:
+def new_conversation(working_directory: Path | None = None) -> list:
     """Start a fresh transcript with only invariant model instructions."""
-    working_directory = str(Path.cwd().resolve())
+    resolved_directory = str((working_directory or Path.cwd()).resolve())
     return [{
         "role": "system",
-        "content": SYSTEM_PROMPT + f" The process working directory is {working_directory}; "
+        "content": SYSTEM_PROMPT + f" The process working directory is {resolved_directory}; "
         "ordinary relative path arguments start there, while apply_file_changes "
         "paths start at its base_path.",
     }]
@@ -816,6 +817,10 @@ class ContextBudgetError(RuntimeError):
 
 class EmptyModelResponseError(RuntimeError):
     """Indicate that Ollama ended a response without text or tool calls."""
+
+
+class RuntimeInterrupted(RuntimeError):
+    """Indicate that a caller requested interruption of the active runtime turn."""
 
 
 @dataclass
@@ -863,6 +868,14 @@ class RequestComposition:
     tool_names: tuple[str, ...]
     character_counts: dict[str, int]
     estimated_tokens: int
+
+
+@dataclass(frozen=True)
+class RuntimeTurnResult:
+    """Describe one completed, stopped, cancelled, or failed runtime turn."""
+
+    outcome: str
+    error: str | None = None
 
 
 def _activation_error(error: str) -> dict:
@@ -985,6 +998,40 @@ def append_unexecuted_calls(
             )
 
 
+def append_interrupted_calls(
+    messages: list,
+    tool_calls: list,
+    start_index: int,
+    turn_log: TurnLog | None,
+) -> None:
+    """Pair calls skipped by cancellation with explicit non-execution results."""
+    for pending in tool_calls[start_index:]:
+        result = {
+            "ok": False,
+            "complete": False,
+            "truncated": False,
+            "status": "not_executed",
+            "error": "Skipped because the caller interrupted this turn.",
+        }
+        messages.append({
+            "role": "tool",
+            "tool_name": pending.function.name,
+            "content": json.dumps(result),
+        })
+        if turn_log:
+            turn_log.add_event(
+                "tool_call",
+                name=pending.function.name,
+                arguments=pending.function.arguments,
+            )
+            turn_log.add_event(
+                "tool_result",
+                name=pending.function.name,
+                duration_ms=0,
+                result=result,
+            )
+
+
 def record_loop_stop(turn_log: TurnLog | None, stop: ToolLoopStop) -> None:
     """Log the threshold, reason, guidance, and operation for a stopped turn."""
     if turn_log:
@@ -995,6 +1042,18 @@ def record_loop_stop(turn_log: TurnLog | None, stop: ToolLoopStop) -> None:
             guidance=stop.guidance,
             operation=stop.operation,
         )
+
+
+def recover_turn(messages: list, turn_start: int) -> None:
+    """Keep recorded tool outcomes; discard failed turns that performed no tools."""
+    if any(message["role"] == "tool" for message in messages[turn_start:]):
+        messages.append({
+            "role": "assistant",
+            "content": "Turn interrupted. Recorded tool outcomes are retained; "
+            "inspect any unknown outcome before retrying an action.",
+        })
+    else:
+        del messages[turn_start:]
 
 
 def run_turn(
@@ -1008,6 +1067,7 @@ def run_turn(
     turn_log: TurnLog | None = None,
     on_approval: ApprovalPrompt | None = None,
     capability_state: CapabilityState | None = None,
+    is_interrupted: Callable[[], bool] | None = None,
 ) -> str:
     """Stream a reply, execute requested tools, and return the turn outcome."""
     active_capabilities = capability_state or CapabilityState()
@@ -1046,6 +1106,8 @@ def run_turn(
         CONSECUTIVE_TOOL_FAILURE_LIMIT,
     )
     while True:
+        if is_interrupted and is_interrupted():
+            raise RuntimeInterrupted("Request cancelled.")
         request_messages = messages
         inspected_categories = set().union(
             *(evidence_categories(path) for path in inspection_evidence),
@@ -1209,6 +1271,8 @@ def run_turn(
             stream=True,
             options={"temperature": TEMPERATURE, "num_ctx": model_context_length},
         ):
+            if is_interrupted and is_interrupted():
+                raise RuntimeInterrupted("Request cancelled.")
             text = chunk.message.content or ""
             content += text
             if not withhold_unverified_text:
@@ -1337,6 +1401,9 @@ def run_turn(
         loop_stop = None
         request_active_groups = set(composition.active_groups)
         for index, call in enumerate(tool_calls):
+            if is_interrupted and is_interrupted():
+                append_interrupted_calls(messages, tool_calls, index, turn_log)
+                raise RuntimeInterrupted("Request cancelled.")
             name = call.function.name
             tool_started = monotonic()
             if turn_log:
@@ -1566,3 +1633,102 @@ def run_turn(
             messages.append({"role": "assistant", "content": notice})
             on_text(notice)
             return "tool_loop_limit"
+
+
+class AgentRuntime:
+    """Own reusable conversation state independently of any presentation adapter."""
+
+    def __init__(
+        self,
+        client: Client,
+        model: str,
+        workspace: Path,
+        access: WorkspaceAccess | None = None,
+        interaction_logger: InteractionLogger | None = None,
+        turn_runner: Callable[..., str] = run_turn,
+    ) -> None:
+        """Create a runtime with injected model, workspace, access, and logging services."""
+        self.client = client
+        self.model = model
+        self.workspace = workspace.resolve()
+        self.access = access or WorkspaceAccess(self.workspace)
+        self.interaction_logger = interaction_logger
+        self.turn_runner = turn_runner
+        self.messages: list = []
+        self.capability_state = CapabilityState()
+        self._interrupt_requested = Event()
+        self.start_conversation()
+
+    def start_conversation(self) -> None:
+        """Start a fresh conversation while retaining session-scoped access grants."""
+        self.messages = new_conversation(self.workspace)
+        self.capability_state = CapabilityState()
+        self._interrupt_requested.clear()
+
+    def clear_conversation(self) -> None:
+        """Clear retained conversation and capability state."""
+        self.start_conversation()
+
+    def change_model(self, model: str) -> None:
+        """Select a model and start a fresh conversation for it."""
+        self.model = model
+        self.start_conversation()
+
+    def interrupt(self) -> None:
+        """Request cooperative cancellation of the active conversation turn."""
+        self._interrupt_requested.set()
+
+    def continue_conversation(
+        self,
+        user_input: str,
+        on_text: Callable[[str], None] | None = None,
+        on_tool: Callable[[str], None] | None = None,
+        on_permission: PermissionPrompt | None = None,
+        on_approval: ApprovalPrompt | None = None,
+    ) -> RuntimeTurnResult:
+        """Run one user turn and return its presentation-independent outcome."""
+        self._interrupt_requested.clear()
+        turn_start = len(self.messages)
+        self.messages.append({"role": "user", "content": user_input})
+        turn_log = (
+            self.interaction_logger.start_turn(user_input)
+            if self.interaction_logger else None
+        )
+        outcome = "failed"
+        error_detail = None
+        try:
+            outcome = self.turn_runner(
+                client=self.client,
+                model=self.model,
+                messages=self.messages,
+                on_text=on_text or (lambda text: None),
+                on_tool=on_tool or (lambda name: None),
+                access=self.access,
+                on_permission=on_permission,
+                turn_log=turn_log,
+                on_approval=on_approval,
+                capability_state=self.capability_state,
+                is_interrupted=self._interrupt_requested.is_set,
+            ) or "success"
+        except ContextBudgetError as error:
+            outcome = "context_limit"
+            error_detail = str(error)
+        except EmptyModelResponseError as error:
+            outcome = "model_error"
+            error_detail = f"Model response failed: {error}"
+            recover_turn(self.messages, turn_start)
+        except ResponseError as error:
+            outcome = "model_error"
+            error_detail = f"{error.status_code} - {error.error}"
+            recover_turn(self.messages, turn_start)
+        except (RuntimeInterrupted, KeyboardInterrupt):
+            outcome = "cancelled"
+            error_detail = "Request cancelled."
+            recover_turn(self.messages, turn_start)
+        except Exception as error:
+            error_detail = f"Request failed: {error}"
+            recover_turn(self.messages, turn_start)
+        finally:
+            if self.interaction_logger and turn_log:
+                self.interaction_logger.finish_turn(turn_log, outcome, error_detail)
+        return RuntimeTurnResult(outcome, error_detail)

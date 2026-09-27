@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 from ollama import ChatResponse
 
-from harness_prototype.agent_loop import ContextBudgetError, new_conversation
+from harness_prototype.agent_loop import ContextBudgetError, new_conversation, recover_turn
 from harness_prototype.access import AccessChoice
 from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.main import (
@@ -17,7 +17,6 @@ from harness_prototype.main import (
     MODEL_DESCRIPTIONS,
     TerminalUI,
     main,
-    recover_turn,
     request_directory_access,
     request_tool_approval,
     select_model,
