@@ -30,7 +30,7 @@ class ToolDispatchTests(unittest.TestCase):
             {
                 "get_location", "list_files", "find_files", "search_project",
                 "read_file", "git_status", "git_diff", "apply_file_changes",
-                "run_tests",
+                "run_tests", "run_checks",
                 "detect_project_technologies",
             },
         )
@@ -40,7 +40,10 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(set(TOOL_CATEGORIES), set(AVAILABLE_TOOLS))
         self.assertEqual(TOOL_CATEGORIES["apply_file_changes"], ToolCategory.WRITE)
         self.assertEqual(TOOL_CATEGORIES["run_tests"], ToolCategory.EXECUTION)
-        read_only_tools = set(AVAILABLE_TOOLS) - {"apply_file_changes", "run_tests"}
+        self.assertEqual(TOOL_CATEGORIES["run_checks"], ToolCategory.EXECUTION)
+        read_only_tools = set(AVAILABLE_TOOLS) - {
+            "apply_file_changes", "run_tests", "run_checks",
+        }
         self.assertEqual(
             {TOOL_CATEGORIES[name] for name in read_only_tools},
             {ToolCategory.READ_ONLY},
@@ -63,6 +66,14 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(
             run_tests_schema["function"]["parameters"]["properties"]["targets"]["maxItems"],
             50,
+        )
+        run_checks_schema = next(
+            tool for tool in MODEL_TOOLS
+            if isinstance(tool, dict) and tool["function"]["name"] == "run_checks"
+        )
+        self.assertEqual(
+            run_checks_schema["function"]["parameters"]["required"],
+            ["name"],
         )
         search_schema = next(
             tool for tool in MODEL_TOOLS
@@ -200,6 +211,7 @@ class ToolDispatchTests(unittest.TestCase):
                     },
                 }
                 successful_arguments["run_tests"] = {}
+                successful_arguments["run_checks"] = {"name": "lint"}
                 def fake_run_tests(targets=None):
                     """Return a deterministic successful execution result."""
                     return {
@@ -208,7 +220,18 @@ class ToolDispatchTests(unittest.TestCase):
                         "complete": True,
                         "truncated": False,
                     }
-                with patch.dict(AVAILABLE_TOOLS, {"run_tests": fake_run_tests}):
+                def fake_run_checks(name, target=None):
+                    """Return a deterministic successful configured-check result."""
+                    return {
+                        "ok": True,
+                        "error": None,
+                        "complete": True,
+                        "truncated": False,
+                    }
+                with patch.dict(AVAILABLE_TOOLS, {
+                    "run_tests": fake_run_tests,
+                    "run_checks": fake_run_checks,
+                }):
                     for name in AVAILABLE_TOOLS:
                         with self.subTest(name=name, outcome="success"):
                             self.assert_common_contract(

@@ -33,6 +33,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.consecutive_tool_failure_limit, 3)
         self.assertEqual(settings.test_command[:3], ("uv", "run", "python"))
         self.assertEqual(settings.targeted_test_command[-1], "{targets}")
+        self.assertEqual(settings.checks, {})
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (120, 12000))
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
         self.assertEqual(settings.log_redact_values, ())
@@ -55,6 +56,7 @@ class ConfigTests(unittest.TestCase):
                 'HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT=5\n'
                 'HARNESS_TEST_COMMAND=["python","-m","pytest"]\n'
                 'HARNESS_TARGETED_TEST_COMMAND=["python","-m","pytest","{targets}"]\n'
+                'HARNESS_CHECKS={"lint":{"command":["ruff","check","."],"targets":{"source":["ruff","check","src"]}}}\n'
                 'HARNESS_TEST_TIMEOUT_SECONDS=45\nHARNESS_TEST_OUTPUT_LIMIT=9000\n'
                 'HARNESS_TEMPERATURE=0.3\nHARNESS_OLLAMA_HOST=http://localhost:1234\n',
                 encoding="utf-8",
@@ -73,6 +75,8 @@ class ConfigTests(unittest.TestCase):
             settings.targeted_test_command,
             ("python", "-m", "pytest", "{targets}"),
         )
+        self.assertEqual(settings.checks["lint"].command, ("ruff", "check", "."))
+        self.assertEqual(settings.checks["lint"].targets["source"], ("ruff", "check", "src"))
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (45, 9000))
         self.assertEqual(settings.temperature, 0.3)
         self.assertEqual(settings.host, "http://localhost:1234")
@@ -142,6 +146,18 @@ class ConfigTests(unittest.TestCase):
             file.write_text("HARNESS_MODEL=test-model\n", encoding="utf-8")
             load_settings(file, {})
         self.assertEqual(dict(os.environ), before)
+
+    def test_checks_require_named_shell_free_commands(self) -> None:
+        """Reject malformed checks, commands, targets, and unexpected fields."""
+        values = [
+            "[]", '{"lint":[]}', '{"lint":{"targets":{}}}',
+            '{"lint":{"command":"ruff check ."}}',
+            '{"lint":{"command":["ruff"],"extra":true}}',
+            '{"lint":{"command":["ruff"],"targets":{"source":"src"}}}',
+        ]
+        for value in values:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "HARNESS_CHECKS"):
+                load_settings(None, {"HARNESS_CHECKS": value})
 
     def test_logging_configuration_resolves_path_and_redactions(self) -> None:
         """Resolve relative storage and load only explicitly named secret values."""

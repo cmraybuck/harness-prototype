@@ -155,6 +155,22 @@ class MainTests(unittest.TestCase):
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertIn("Denied the full test suite", rendered)
 
+    def test_check_approval_shows_only_configured_identity_and_limits(self) -> None:
+        """Show the check and target without exposing its configured command."""
+        request = ApprovalRequest(
+            "run_checks", {"name": "lint", "target": "source"}, ToolCategory.EXECUTION,
+        )
+        with patch.object(
+            TerminalUI, "_read_key", return_value="confirm"
+        ), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(request))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("lint", rendered)
+        self.assertIn("source", rendered)
+        self.assertIn("Timeout", rendered)
+        self.assertNotIn("ruff", rendered)
+        self.assertIn("Allowed check lint target source", rendered)
+
     def test_interactive_permission_uses_and_restores_alternate_screen(self) -> None:
         """Keep an interactive permission screen out of conversation scrollback."""
         ui = TerminalUI()

@@ -324,6 +324,14 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
                 lines.append(f"- and {len(targets) - 10} more targets")
         lines.append(f"Timeout    {TEST_TIMEOUT_SECONDS} seconds")
         return lines
+    if request.tool_name == "run_checks" and isinstance(request.arguments, dict):
+        name = request.arguments.get("name", "unknown check")
+        target = request.arguments.get("target")
+        lines.append(f"Check      {_terminal_text(name)}")
+        if isinstance(target, str):
+            lines.append(f"Target     {_terminal_text(target)}")
+        lines.append(f"Timeout    {TEST_TIMEOUT_SECONDS} seconds")
+        return lines
     if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
         return lines
 
@@ -370,6 +378,13 @@ def _tool_approval_receipt(
             scope = f"{len(targets)} test target(s)"
         else:
             scope = "the requested test operation"
+        return f"{decision} {scope}."
+    if request.tool_name == "run_checks" and isinstance(request.arguments, dict):
+        name = _terminal_text(request.arguments.get("name", "requested check"))
+        target = request.arguments.get("target")
+        scope = f"check {name}"
+        if isinstance(target, str):
+            scope += f" target {_terminal_text(target)}"
         return f"{decision} {scope}."
     if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
         changes = request.arguments.get("changes")
