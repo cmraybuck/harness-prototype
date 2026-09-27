@@ -478,9 +478,9 @@ before sharing them.
 
 | File | Responsibility |
 | --- | --- |
-| `src/harness_prototype/main.py` | Terminal input/output, conversation recovery, and application entry point |
+| `src/harness_prototype/main.py` | Terminal input/output adapter and application entry point |
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
-| `src/harness_prototype/agent_loop.py` | Model instructions, streaming, context checks, and tool exchanges |
+| `src/harness_prototype/agent_loop.py` | Reusable conversation runtime, model streaming, context checks, tool exchanges, and recovery |
 | `src/harness_prototype/documentation.py` | HTTPS documentation retrieval, URL policy, bounds, and text extraction |
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
@@ -501,6 +501,13 @@ before sharing them.
 | `evaluate.py`, `tests/` | Live-model scenarios and deterministic checks |
 
 Tool functions are reusable independently of the terminal and Ollama client.
+`AgentRuntime` is the presentation-independent application seam. A caller injects
+an Ollama client, model, workspace, and optional logging and approval callbacks,
+then starts, continues, interrupts, or clears a conversation without constructing
+`TerminalUI`. The terminal entry point is a supported adapter over that runtime;
+it owns terminal input, rendering, selection views, and process cleanup. Runtime
+state and behavior remain platform-neutral, while location discovery, terminal
+control, and managed-process lifecycle stay in their existing adapters.
 `TOOL_SPECS` is the single registration source for model functions, risk
 categories, human-readable activity formatters, material limits, and optional
 access-target resolvers. Activity formatters summarize safe arguments without

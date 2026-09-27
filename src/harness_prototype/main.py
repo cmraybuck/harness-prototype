@@ -6,17 +6,14 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ollama import Client, ResponseError
+from ollama import Client
 
-from .access import AccessChoice, WorkspaceAccess
+from .access import AccessChoice
 from .approval import ApprovalPromptResult, ApprovalRequest
 from .agent_loop import (
-    CapabilityState,
-    ContextBudgetError,
-    EmptyModelResponseError,
+    AgentRuntime,
     compose_request,
     estimate_context_usage,
-    new_conversation,
     run_turn,
 )
 from .config import (
@@ -762,18 +759,6 @@ def request_tool_approval(request: ApprovalRequest) -> ApprovalPromptResult:
     return TerminalUI().request_tool_approval(request)
 
 
-def recover_turn(messages: list, turn_start: int) -> None:
-    """Keep recorded tool outcomes; discard failed turns that performed no tools."""
-    if any(message["role"] == "tool" for message in messages[turn_start:]):
-        messages.append({
-            "role": "assistant",
-            "content": "Turn interrupted. Recorded tool outcomes are retained; "
-            "inspect any unknown outcome before retrying an action.",
-        })
-    else:
-        del messages[turn_start:]
-
-
 def main() -> None:
     """Read prompts and keep conversation history until the user exits."""
     ui = TerminalUI()
@@ -785,10 +770,14 @@ def main() -> None:
         return
     ui.clear_screen()
     client = Client(host=HOST)
-    access = WorkspaceAccess(Path.cwd())
-    messages = new_conversation()
-    capability_state = CapabilityState()
     interaction_logger = InteractionLogger(LOG_DIRECTORY, LOG_REDACT_VALUES)
+    runtime = AgentRuntime(
+        client,
+        selected_model,
+        Path.cwd(),
+        interaction_logger=interaction_logger,
+        turn_runner=run_turn,
+    )
     ui.show_header(selected_model, HOST, Path.cwd())
 
     try:
@@ -806,8 +795,7 @@ def main() -> None:
                 ui.show_goodbye()
                 break
             if normalized_input in {"clear", "/clear"}:
-                messages = new_conversation()
-                capability_state = CapabilityState()
+                runtime.clear_conversation()
                 ui.show_notice("Reset", "Conversation cleared.", "32")
                 continue
             if normalized_input == "/model":
@@ -823,8 +811,7 @@ def main() -> None:
                     ui.show_notice("Model", "Model switch cancelled.")
                     continue
                 selected_model = requested_model
-                messages = new_conversation()
-                capability_state = CapabilityState()
+                runtime.change_model(selected_model)
                 ui.show_notice(
                     "Model",
                     f"Switched to {selected_model}. Started a new conversation.",
@@ -843,8 +830,11 @@ def main() -> None:
                 ui.show_notice("Tools", f"Tool activity display set to {mode}.", "32")
                 continue
             if normalized_input == "/status":
-                composition = compose_request(messages, capability_state)
-                context_used = estimate_context_usage(messages, capability_state)
+                composition = compose_request(runtime.messages, runtime.capability_state)
+                context_used = estimate_context_usage(
+                    runtime.messages,
+                    runtime.capability_state,
+                )
                 context_percent = context_used / CONTEXT_LENGTH
                 ui.show_notice(
                     "Status",
@@ -852,7 +842,7 @@ def main() -> None:
                         f"  Model          {selected_model}",
                         f"  Server         {HOST}",
                         f"  Workspace      {Path.cwd()}",
-                        f"  Messages       {max(0, len(messages) - 1)} retained",
+                        f"  Messages       {max(0, len(runtime.messages) - 1)} retained",
                         f"  Context used   ~{context_used} tokens ({context_percent:.0%})",
                         f"  Context limit  {CONTEXT_LENGTH} tokens (heuristic guard)",
                         "  Capabilities   " + (
@@ -871,49 +861,22 @@ def main() -> None:
             if normalized_input == "/help":
                 ui.show_command_help()
                 continue
-            turn_start = len(messages)
-            messages.append({"role": "user", "content": user_input})
-            turn_log = interaction_logger.start_turn(user_input)
-            outcome = "failed"
-            error_detail = None
-            try:
-                outcome = run_turn(
-                client=client,
-                model=selected_model,
-                messages=messages,
+            result = runtime.continue_conversation(
+                user_input,
                 on_text=ui.write_response,
                 on_tool=ui.show_tool_call,
-                access=access,
                 on_permission=ui.request_directory_access,
-                turn_log=turn_log,
                 on_approval=ui.request_tool_approval,
-                capability_state=capability_state,
-            ) or "success"
+            )
+            if result.outcome not in {"context_limit", "model_error", "cancelled", "failed"}:
                 ui.finish_response()
-            except ContextBudgetError as error:
-                outcome = "context_limit"
-                error_detail = str(error)
-                ui.show_notice("Context", str(error))
-            except EmptyModelResponseError as error:
-                outcome = "model_error"
-                error_detail = str(error)
-                recover_turn(messages, turn_start)
-                ui.show_notice("Model error", f"Model response failed: {error}", "31")
-            except ResponseError as error:
-                outcome = "model_error"
-                error_detail = f"{error.status_code} - {error.error}"
-                recover_turn(messages, turn_start)
-                ui.show_notice("Ollama", f"{error.status_code} - {error.error}", "31")
-            except KeyboardInterrupt:
-                outcome = "cancelled"
-                error_detail = "Request cancelled."
-                recover_turn(messages, turn_start)
-                ui.show_notice("Cancelled", "Request cancelled.")
-            except Exception as error:
-                error_detail = str(error)
-                recover_turn(messages, turn_start)
-                ui.show_notice("Error", f"Request failed: {error}", "31")
-            finally:
-                interaction_logger.finish_turn(turn_log, outcome, error_detail)
+            elif result.outcome == "context_limit":
+                ui.show_notice("Context", result.error or "Context limit reached.")
+            elif result.outcome == "model_error":
+                ui.show_notice("Model error", result.error or "Model request failed.", "31")
+            elif result.outcome == "cancelled":
+                ui.show_notice("Cancelled", result.error or "Request cancelled.")
+            else:
+                ui.show_notice("Error", result.error or "Request failed.", "31")
     finally:
         stop_all_services()
