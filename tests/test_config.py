@@ -14,10 +14,9 @@ class ConfigTests(unittest.TestCase):
         """Run with portable defaults when no dotenv file or overrides are supplied."""
         settings = load_settings(None, {})
         self.assertEqual(settings.host, "http://127.0.0.1:11434")
-        self.assertEqual(settings.model, "devstral-small-2:latest")
         self.assertEqual(
             settings.models,
-            ("devstral-small-2:latest", "qwen3:8b"),
+            ("devstral-small-2:latest", "qwen3:8b", "qwen3-vl:8b"),
         )
         self.assertEqual(
             (
@@ -48,8 +47,7 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / ".env"
             file.write_text(
-                '# Local setup\nHARNESS_MODEL="another:latest"\n'
-                'HARNESS_MODELS="another:latest,second:latest"\n'
+                '# Local setup\nHARNESS_MODELS="another:latest,second:latest"\n'
                 'HARNESS_CONTEXT_LENGTH=8192\n'
                 'HARNESS_RESEARCH_CONTEXT_LENGTH=24576\n'
                 'HARNESS_MAX_TOOL_ROUNDS=12\n'
@@ -65,9 +63,8 @@ class ConfigTests(unittest.TestCase):
                 'HARNESS_TEMPERATURE=0.3\nHARNESS_OLLAMA_HOST=http://localhost:1234\n',
                 encoding="utf-8",
             )
-            settings = load_settings(file, {"HARNESS_MODEL": "override:latest"})
-        self.assertEqual(settings.model, "override:latest")
-        self.assertEqual(settings.models, ("override:latest", "another:latest", "second:latest"))
+            settings = load_settings(file, {})
+        self.assertEqual(settings.models, ("another:latest", "second:latest"))
         self.assertEqual(settings.context_length, 8192)
         self.assertEqual(settings.research_context_length, 24576)
         self.assertEqual(settings.max_tool_rounds, 12)
@@ -110,7 +107,6 @@ class ConfigTests(unittest.TestCase):
                 "", " , ", "../tool", "tools/runner", "tools\\runner", "bad tool",
             ],
             "HARNESS_TEMPERATURE": ["nan", "inf", "-0.1", "3"],
-            "HARNESS_MODEL": ["", " "],
             "HARNESS_MODELS": ["", " ", ", ,"],
             "HARNESS_OLLAMA_HOST": ["localhost", "http://localhost/api/chat", "http://localhost:99999", "http://user:secret@localhost"],
         }
@@ -155,7 +151,7 @@ class ConfigTests(unittest.TestCase):
         before = dict(os.environ)
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / ".env"
-            file.write_text("HARNESS_MODEL=test-model\n", encoding="utf-8")
+            file.write_text("HARNESS_MODELS=test-model\n", encoding="utf-8")
             load_settings(file, {})
         self.assertEqual(dict(os.environ), before)
 

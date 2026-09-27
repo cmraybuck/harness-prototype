@@ -30,7 +30,7 @@ class ToolDispatchTests(unittest.TestCase):
             set(AVAILABLE_TOOLS),
             {
                 "get_location", "list_files", "find_files", "search_project",
-                "read_file", "git_status", "git_diff", "apply_file_changes",
+                "read_file", "inspect_file", "git_status", "git_diff", "apply_file_changes",
                 "run_tests", "run_checks", "run_command",
                 "install_dependencies", "start_service", "stop_service",
                 "detect_project_technologies",
@@ -229,6 +229,8 @@ class ToolDispatchTests(unittest.TestCase):
             root = Path(temporary)
             sample = root / "sample.txt"
             sample.write_text("needle\n", encoding="utf-8")
+            structured_sample = root / "sample.json"
+            structured_sample.write_text('{"needle": true}\n', encoding="utf-8")
             subprocess.run(
                 ["git", "init"], cwd=root, capture_output=True, check=True,
             )
@@ -241,6 +243,7 @@ class ToolDispatchTests(unittest.TestCase):
                     "find_files": {"pattern": "sample.txt", "root": temporary},
                     "search_project": {"text": "needle"},
                     "read_file": {"path": str(sample)},
+                    "inspect_file": {"path": str(structured_sample)},
                     "git_status": {},
                     "git_diff": {},
                     "detect_project_technologies": {"path": temporary},

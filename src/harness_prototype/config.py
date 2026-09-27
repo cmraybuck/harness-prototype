@@ -40,7 +40,6 @@ class Settings:
     """Validated connection and generation settings for one application startup."""
 
     host: str
-    model: str
     models: tuple[str, ...]
     temperature: float
     context_length: int
@@ -280,19 +279,15 @@ def load_settings(
     except ValueError:
         raise ValueError("HARNESS_TEMPERATURE must be a number between 0 and 2.") from None
 
-    model = value("HARNESS_MODEL", "devstral-small-2:latest")
     configured_models = value(
         "HARNESS_MODELS",
-        "devstral-small-2:latest,qwen3:8b",
+        "devstral-small-2:latest,qwen3:8b,qwen3-vl:8b",
     )
     models = tuple(dict.fromkeys(
         candidate.strip() for candidate in configured_models.split(",") if candidate.strip()
     ))
     if not models:
         raise ValueError("HARNESS_MODELS must contain at least one model identifier.")
-    if model not in models:
-        models = (model, *models)
-
     log_directory = Path(value("HARNESS_LOG_DIRECTORY", "work/logs")).expanduser()
     if not log_directory.is_absolute():
         log_directory = PROJECT_ROOT / log_directory
@@ -352,7 +347,6 @@ def load_settings(
 
     return Settings(
         host=host,
-        model=model,
         models=models,
         temperature=temperature,
         context_length=context_length,
@@ -385,7 +379,6 @@ def load_settings(
 
 _settings = load_settings()
 HOST = _settings.host
-MODEL = _settings.model
 MODELS = _settings.models
 TEMPERATURE = _settings.temperature
 CONTEXT_LENGTH = _settings.context_length

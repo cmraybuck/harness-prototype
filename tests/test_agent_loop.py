@@ -42,6 +42,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("Never repeat a failed write unchanged", system_prompt)
         self.assertIn("pass only test selectors", system_prompt)
         self.assertIn("status=failed", system_prompt)
+        self.assertIn("Use inspect_file for JSON, TOML, YAML, PDF, DOCX", system_prompt)
+        self.assertIn("selected model to support vision", system_prompt)
 
     def test_explicit_tool_request_bypasses_repository_evidence_gate(self) -> None:
         """Let a named inspection tool answer directly instead of forcing searches."""
@@ -54,6 +56,29 @@ class AgentLoopTests(unittest.TestCase):
         self.assertFalse(requires_repository_inspection([
             {"role": "user", "content": prompt},
         ]))
+
+    def test_image_inspection_is_forwarded_to_the_model(self) -> None:
+        """Attach a validated image path to its tool-result message."""
+        tool_call = ChatResponse(message={"role": "assistant", "tool_calls": [{
+            "function": {"name": "inspect_file", "arguments": {"path": "sample.png"}}
+        }]})
+        answer = ChatResponse(message={"role": "assistant", "content": "A red square."})
+        client = Mock()
+        client.chat.side_effect = [[tool_call], [answer]]
+        result = {
+            "ok": True,
+            "error": None,
+            "complete": True,
+            "truncated": False,
+            "path": "sample.png",
+            "image_for_model": True,
+        }
+        messages = new_conversation() + [{"role": "user", "content": "Inspect sample.png"}]
+        with patch("harness_prototype.agent_loop.execute_tool", return_value=result):
+            outcome = run_turn(client, "test", messages, lambda text: None, lambda name: None)
+        tool_message = next(message for message in messages if message["role"] == "tool")
+        self.assertEqual(outcome, "success")
+        self.assertEqual(tool_message["images"], ["sample.png"])
 
     def test_implementation_question_still_requires_repository_evidence(self) -> None:
         """Retain the evidence gate for questions about a named tool's implementation."""

@@ -31,6 +31,7 @@ from .files import (
     apply_file_changes,
     file_change_target_directories,
     find_files,
+    inspect_file,
     list_files,
     read_file,
     search_project,
@@ -441,6 +442,16 @@ TOOL_SPECS = {
     "read_file": ToolSpec(
         read_file, ToolCategory.READ_ONLY, _path_activity("Reading"),
         material_limits=("1 MiB UTF-8 files", "1-200 lines", "8,000 output characters"),
+    ),
+    "inspect_file": ToolSpec(
+        inspect_file, ToolCategory.READ_ONLY, _path_activity("Inspecting"),
+        material_limits=(
+            "JSON, TOML, YAML, PDF, DOCX, and supported raster images",
+            "2 MiB structured data", "20 MiB documents and images",
+            "32 structured levels", "20,000 structured nodes",
+            "500 PDF pages", "40 million image pixels",
+            "1-200 lines", "8,000 output characters",
+        ),
     ),
     "fetch_documentation": ToolSpec(
         fetch_documentation,

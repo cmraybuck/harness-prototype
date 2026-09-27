@@ -8,10 +8,19 @@ import re
 import shutil
 import tempfile
 import time
+import tomllib
+import warnings
+import zipfile
 from collections import deque
 from dataclasses import dataclass
+from datetime import date, datetime, time as datetime_time
 from itertools import islice
 from pathlib import Path
+
+import yaml
+from docx import Document
+from PIL import Image, UnidentifiedImageError
+from pypdf import PdfReader
 
 from .tool_results import tool_error, tool_success
 
@@ -29,6 +38,21 @@ EXCLUDED_SEARCH_DIRECTORIES = {
 EXCLUDED_SEARCH_DIRECTORY_PATHS = {("work", "logs")}
 DEFAULT_LIST_EXCLUSIONS = tuple(sorted(EXCLUDED_SEARCH_DIRECTORIES))
 MAX_LIST_PATTERNS = 100
+MAX_STRUCTURED_FILE_BYTES = 2_097_152
+MAX_DOCUMENT_FILE_BYTES = 20_971_520
+MAX_IMAGE_FILE_BYTES = 20_971_520
+MAX_STRUCTURED_DEPTH = 32
+MAX_STRUCTURED_NODES = 20_000
+MAX_DOCUMENT_PAGES = 500
+MAX_DOCUMENT_TEXT_CHARS = 1_000_000
+MAX_ARCHIVE_ENTRIES = 10_000
+MAX_ARCHIVE_EXPANDED_BYTES = 50_000_000
+MAX_IMAGE_PIXELS = 40_000_000
+
+STRUCTURED_EXTENSIONS = {
+    ".json": "json", ".toml": "toml", ".yaml": "yaml", ".yml": "yaml",
+}
+IMAGE_FORMATS = {"BMP", "GIF", "JPEG", "PNG", "TIFF", "WEBP"}
 
 
 @dataclass(frozen=True)
@@ -902,4 +926,329 @@ def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
         content=raw_content,
         revision=_file_revision(data),
         next_line=next_line if truncated else None,
+    )
+
+
+class _NoAliasSafeLoader(yaml.SafeLoader):
+    """Load safe YAML values while rejecting aliases that can amplify content."""
+
+    def compose_node(self, parent: object, index: object) -> yaml.Node:
+        """Reject YAML aliases before constructing their referenced value."""
+        if self.check_event(yaml.AliasEvent):
+            event = self.peek_event()
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                "YAML aliases are not supported",
+                event.start_mark,
+            )
+        return super().compose_node(parent, index)
+
+
+def _bounded_file_bytes(path: Path, limit: int, label: str) -> bytes | dict:
+    """Read one regular file without crossing its format-specific byte limit."""
+    if not path.is_file():
+        return tool_error(f"Not a regular file: {path}")
+    try:
+        with path.open("rb") as source:
+            data = source.read(limit + 1)
+    except OSError as error:
+        return tool_error(str(error))
+    if len(data) > limit:
+        return tool_error(f"{label} exceeds the {limit // 1_048_576} MiB inspection limit.")
+    return data
+
+
+def _normalized_data(value: object, depth: int = 0, counter: list[int] | None = None) -> object:
+    """Convert parsed values to bounded JSON-compatible data for stable rendering."""
+    if counter is None:
+        counter = [0]
+    counter[0] += 1
+    if counter[0] > MAX_STRUCTURED_NODES:
+        raise ValueError(f"Structured data exceeds the {MAX_STRUCTURED_NODES:,}-node limit.")
+    if depth > MAX_STRUCTURED_DEPTH:
+        raise ValueError(f"Structured data exceeds the depth limit of {MAX_STRUCTURED_DEPTH}.")
+    if isinstance(value, dict):
+        normalized = {}
+        for key, child in value.items():
+            if not isinstance(key, (str, int, float, bool)) and key is not None:
+                raise ValueError(f"Unsupported mapping key type: {type(key).__name__}.")
+            normalized[str(key)] = _normalized_data(child, depth + 1, counter)
+        return normalized
+    if isinstance(value, (list, tuple, set)):
+        return [_normalized_data(child, depth + 1, counter) for child in value]
+    if isinstance(value, (date, datetime, datetime_time)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        raise ValueError("Binary values inside structured data are not supported.")
+    return value
+
+
+def _page_text(text: str, start_line: int, max_lines: int) -> dict:
+    """Return one bounded line page and a continuation line when data remains."""
+    lines = text.splitlines()
+    if text.endswith(("\n", "\r")):
+        lines.append("")
+    page = []
+    size = 0
+    for index in range(start_line - 1, min(len(lines), start_line - 1 + max_lines)):
+        line = lines[index]
+        separator_size = 1 if page else 0
+        if size + separator_size + len(line) > MAX_OUTPUT_CHARS:
+            if not page:
+                return tool_error(f"Rendered line {index + 1} exceeds the output limit.")
+            break
+        page.append(line)
+        size += separator_size + len(line)
+    next_line = start_line + len(page)
+    truncated = next_line <= len(lines)
+    content = "\n".join(page)
+    if page and truncated:
+        content += "\n"
+    return {
+        "content": content,
+        "start_line": start_line,
+        "lines_read": len(page),
+        "total_lines": len(lines),
+        "next_line": next_line if truncated else None,
+        "truncated": truncated,
+    }
+
+
+def _parse_structured_data(data: bytes, data_format: str) -> object | dict:
+    """Parse one structured format without executing file content."""
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        return tool_error(
+            f"{data_format.upper()} is not valid UTF-8 at byte {error.start}.",
+            format=data_format,
+            byte_offset=error.start,
+        )
+    try:
+        if data_format == "json":
+            return json.loads(text)
+        if data_format == "toml":
+            return tomllib.loads(text)
+        return yaml.load(text, Loader=_NoAliasSafeLoader)
+    except json.JSONDecodeError as error:
+        return tool_error(
+            f"Invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}",
+            format=data_format,
+            line=error.lineno,
+            column=error.colno,
+        )
+    except tomllib.TOMLDecodeError as error:
+        position = getattr(error, "pos", None)
+        line = text.count("\n", 0, position) + 1 if isinstance(position, int) else None
+        column = position - text.rfind("\n", 0, position) if isinstance(position, int) else None
+        if line is None:
+            location = re.search(r"at line (\d+), column (\d+)", str(error))
+            if location is not None:
+                line, column = (int(value) for value in location.groups())
+        return tool_error(
+            f"Invalid TOML: {error}", format=data_format, line=line, column=column,
+        )
+    except yaml.MarkedYAMLError as error:
+        mark = error.problem_mark
+        line = mark.line + 1 if mark is not None else None
+        column = mark.column + 1 if mark is not None else None
+        problem = error.problem or str(error).splitlines()[0]
+        location = f" at line {line}, column {column}" if line is not None else ""
+        return tool_error(
+            f"Invalid YAML{location}: {problem}",
+            format=data_format,
+            line=line,
+            column=column,
+        )
+    except RecursionError:
+        return tool_error(
+            f"{data_format.upper()} nesting exceeds the supported depth.",
+            format=data_format,
+        )
+
+
+def _inspect_structured(path: Path, data_format: str, start_line: int, max_lines: int) -> dict:
+    """Parse and render a bounded page from JSON, TOML, or YAML."""
+    data = _bounded_file_bytes(path, MAX_STRUCTURED_FILE_BYTES, data_format.upper())
+    if isinstance(data, dict):
+        return data
+    parsed = _parse_structured_data(data, data_format)
+    if isinstance(parsed, dict) and parsed.get("ok") is False:
+        return parsed
+    try:
+        normalized = _normalized_data(parsed)
+        rendered = json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True)
+    except (TypeError, ValueError) as error:
+        return tool_error(str(error), format=data_format)
+    page = _page_text(rendered, start_line, max_lines)
+    if page.get("ok") is False:
+        return page
+    return tool_success(
+        complete=not page["truncated"],
+        path=str(path),
+        format=data_format,
+        revision=_file_revision(data),
+        **page,
+    )
+
+
+def _inspect_pdf(path: Path, start_line: int, max_lines: int) -> dict:
+    """Extract bounded text from a PDF without executing embedded actions."""
+    data = _bounded_file_bytes(path, MAX_DOCUMENT_FILE_BYTES, "PDF")
+    if isinstance(data, dict):
+        return data
+    try:
+        reader = PdfReader(path, strict=False)
+        if reader.is_encrypted and reader.decrypt("") == 0:
+            return tool_error("Encrypted PDF requires a password and cannot be inspected.", format="pdf")
+        if len(reader.pages) > MAX_DOCUMENT_PAGES:
+            return tool_error(f"PDF exceeds the {MAX_DOCUMENT_PAGES}-page limit.", format="pdf")
+        sections = []
+        extracted_size = 0
+        for page_number, page in enumerate(reader.pages, start=1):
+            page_text = (page.extract_text() or "").replace("\r\n", "\n").replace("\r", "\n")
+            extracted_size += len(page_text)
+            if extracted_size > MAX_DOCUMENT_TEXT_CHARS:
+                return tool_error(
+                    f"Extracted PDF text exceeds the {MAX_DOCUMENT_TEXT_CHARS:,}-character limit.",
+                    format="pdf",
+                )
+            sections.append(f"--- Page {page_number} ---\n{page_text}")
+    except (OSError, ValueError) as error:
+        return tool_error(f"Could not parse PDF: {error}", format="pdf")
+    page = _page_text("\n".join(sections), start_line, max_lines)
+    if page.get("ok") is False:
+        return page
+    return tool_success(
+        complete=not page["truncated"], path=str(path), format="pdf",
+        revision=_file_revision(data), page_count=len(reader.pages), **page,
+    )
+
+
+def _validate_docx_archive(path: Path) -> str | None:
+    """Reject oversized or malformed DOCX zip containers before XML parsing."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_ARCHIVE_ENTRIES:
+                return f"DOCX exceeds the {MAX_ARCHIVE_ENTRIES:,}-entry archive limit."
+            expanded = sum(entry.file_size for entry in entries)
+            if expanded > MAX_ARCHIVE_EXPANDED_BYTES:
+                return "DOCX expanded content exceeds the 50 MB limit."
+            if "word/document.xml" not in {entry.filename for entry in entries}:
+                return "DOCX package does not contain word/document.xml."
+    except (OSError, zipfile.BadZipFile) as error:
+        return f"Could not parse DOCX package: {error}"
+    return None
+
+
+def _inspect_docx(path: Path, start_line: int, max_lines: int) -> dict:
+    """Extract paragraphs and table cells from a bounded DOCX package."""
+    data = _bounded_file_bytes(path, MAX_DOCUMENT_FILE_BYTES, "DOCX")
+    if isinstance(data, dict):
+        return data
+    archive_error = _validate_docx_archive(path)
+    if archive_error is not None:
+        return tool_error(archive_error, format="docx")
+    try:
+        document = Document(path)
+        lines = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+        table_count = len(document.tables)
+        for table_number, table in enumerate(document.tables, start=1):
+            lines.append(f"--- Table {table_number} ---")
+            for row in table.rows:
+                lines.append(" | ".join(cell.text for cell in row.cells))
+    except (OSError, ValueError, zipfile.BadZipFile) as error:
+        return tool_error(f"Could not parse DOCX: {error}", format="docx")
+    rendered = "\n".join(lines)
+    if len(rendered) > MAX_DOCUMENT_TEXT_CHARS:
+        return tool_error(
+            f"Extracted DOCX text exceeds the {MAX_DOCUMENT_TEXT_CHARS:,}-character limit.",
+            format="docx",
+        )
+    page = _page_text(rendered, start_line, max_lines)
+    if page.get("ok") is False:
+        return page
+    return tool_success(
+        complete=not page["truncated"], path=str(path), format="docx",
+        revision=_file_revision(data), paragraph_count=len(document.paragraphs),
+        table_count=table_count, **page,
+    )
+
+
+def _inspect_image(path: Path) -> dict:
+    """Validate a bounded raster image and expose it to a vision-capable model."""
+    data = _bounded_file_bytes(path, MAX_IMAGE_FILE_BYTES, "Image")
+    if isinstance(data, dict):
+        return data
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                image_format = (image.format or "").upper()
+                if image_format not in IMAGE_FORMATS:
+                    return tool_error(
+                        f"Unsupported image format: {image_format or 'unknown'}.",
+                        format="image",
+                    )
+                width, height = image.size
+                if width * height > MAX_IMAGE_PIXELS:
+                    return tool_error(
+                        f"Image exceeds the {MAX_IMAGE_PIXELS:,}-pixel limit.", format="image",
+                    )
+                frame_count = getattr(image, "n_frames", 1)
+                mode = image.mode
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        return tool_error(f"Could not validate image: {error}", format="image")
+    return tool_success(
+        path=str(path), format="image", image_format=image_format,
+        width=width, height=height, mode=mode, frame_count=frame_count,
+        bytes=len(data), revision=_file_revision(data), image_for_model=True,
+        note=(
+            "The image is attached to this tool result for a vision-capable model. "
+            "Animated images may be interpreted from only one frame."
+        ),
+    )
+
+
+def inspect_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:
+    """Safely inspect a structured document or image with bounded output.
+
+    Args:
+        path: JSON, TOML, YAML, PDF, DOCX, or supported raster-image path.
+        start_line: First normalized or extracted output line, starting at 1.
+        max_lines: Maximum output lines to return, between 1 and 200.
+
+    Structured data is parsed without executing content and rendered as normalized
+    JSON. PDF and DOCX text is extracted without macros or embedded objects.
+    Images are validated and attached for a vision-capable Ollama model. Continue
+    text-based formats with ``next_line`` when ``truncated`` is true.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return tool_error("path must be a nonempty file path.")
+    if type(start_line) is not int or start_line < 1:
+        return tool_error("start_line must be a positive integer.")
+    if type(max_lines) is not int or not 1 <= max_lines <= 200:
+        return tool_error("max_lines must be an integer between 1 and 200.")
+    try:
+        file_path = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        return tool_error(str(error))
+    extension = file_path.suffix.casefold()
+    if extension in STRUCTURED_EXTENSIONS:
+        return _inspect_structured(
+            file_path, STRUCTURED_EXTENSIONS[extension], start_line, max_lines,
+        )
+    if extension == ".pdf":
+        return _inspect_pdf(file_path, start_line, max_lines)
+    if extension == ".docx":
+        return _inspect_docx(file_path, start_line, max_lines)
+    if extension in {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}:
+        return _inspect_image(file_path)
+    return tool_error(
+        "Unsupported inspection format. Supported extensions: .json, .toml, .yaml, "
+        ".yml, .pdf, .docx, .bmp, .gif, .jpeg, .jpg, .png, .tif, .tiff, .webp."
     )

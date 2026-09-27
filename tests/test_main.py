@@ -10,6 +10,7 @@ from harness_prototype.agent_loop import ContextBudgetError, new_conversation
 from harness_prototype.access import AccessChoice
 from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.main import (
+    MODEL_DESCRIPTIONS,
     TerminalUI,
     main,
     recover_turn,
@@ -29,9 +30,20 @@ class MainTests(unittest.TestCase):
         with patch.object(ui, "_read_key", side_effect=["down", "confirm"]), patch(
             "builtins.print"
         ):
-            self.assertEqual(select_model(models, "slow", ui), "fast")
-        with patch.object(ui, "_read_key", return_value="confirm"), patch("builtins.print"):
-            self.assertEqual(select_model(models, "fast", ui), "fast")
+            self.assertEqual(select_model(models, ui), "fast")
+        with patch.object(ui, "_read_key", return_value="confirm"), patch(
+            "builtins.print"
+        ) as output:
+            self.assertEqual(select_model(models, ui), "slow")
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertNotIn("(default)", rendered)
+
+    def test_qwen_vision_model_has_capability_description(self) -> None:
+        """Describe the vision model's multimodal and agentic strengths."""
+        description = MODEL_DESCRIPTIONS["qwen3-vl:8b"]
+        self.assertIn("vision", description)
+        self.assertIn("images", description)
+        self.assertIn("tool use", description)
 
     def test_streamed_response_cannot_overwrite_prior_output(self) -> None:
         """Convert carriage returns from model output into ordinary newlines."""
@@ -75,7 +87,7 @@ class MainTests(unittest.TestCase):
         with patch.object(ui, "_read_key", side_effect=["other", "confirm"]), patch(
             "builtins.print"
         ):
-            self.assertEqual(select_model(("first", "second"), "first", ui), "first")
+            self.assertEqual(select_model(("first", "second"), ui), "first")
 
     def test_enter_confirms_the_selected_dialogue_option(self) -> None:
         """Treat Enter as an equivalent confirmation key to Space."""
