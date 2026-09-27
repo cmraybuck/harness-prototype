@@ -13,6 +13,7 @@ from .approval import ApprovalPromptResult, ApprovalRequest
 from .agent_loop import (
     ContextBudgetError,
     EmptyModelResponseError,
+    estimate_context_usage,
     new_conversation,
     run_turn,
 )
@@ -798,15 +799,18 @@ def main() -> None:
                 ui.show_notice("Tools", f"Tool activity display set to {mode}.", "32")
                 continue
             if normalized_input == "/status":
+                context_used = estimate_context_usage(messages)
+                context_percent = context_used / CONTEXT_LENGTH
                 ui.show_notice(
                     "Status",
-                    "\n".join([
-                        f"Model          {selected_model}",
-                        f"Server         {HOST}",
-                        f"Workspace      {Path.cwd()}",
-                        f"Messages       {max(0, len(messages) - 1)} retained",
-                        f"Context limit  {CONTEXT_LENGTH} tokens (heuristic guard)",
-                        f"Tool activity  {ui.tool_activity_mode}",
+                    "\n" + "\n".join([
+                        f"  Model          {selected_model}",
+                        f"  Server         {HOST}",
+                        f"  Workspace      {Path.cwd()}",
+                        f"  Messages       {max(0, len(messages) - 1)} retained",
+                        f"  Context used   ~{context_used} tokens ({context_percent:.0%})",
+                        f"  Context limit  {CONTEXT_LENGTH} tokens (heuristic guard)",
+                        f"  Tool activity  {ui.tool_activity_mode}",
                     ]),
                     "36",
                 )

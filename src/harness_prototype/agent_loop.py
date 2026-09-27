@@ -923,6 +923,15 @@ def deny_permission_by_default(path: Path) -> AccessChoice:
     return AccessChoice.DENY
 
 
+def estimate_context_usage(messages: list) -> int:
+    """Estimate tokens used by retained messages and registered tool schemas."""
+    descriptions = "".join(
+        json.dumps(tool, ensure_ascii=False) for tool in MODEL_TOOLS
+    )
+    characters = len(json.dumps(messages, ensure_ascii=False)) + len(descriptions)
+    return (characters + 2) // 3 + 128 * len(AVAILABLE_TOOLS)
+
+
 def check_context_budget(
     messages: list,
     context_length: int | None = None,
@@ -934,11 +943,7 @@ def check_context_budget(
     a tokenizer or a guarantee for every model, language, and chat template.
     """
     active_context_length = CONTEXT_LENGTH if context_length is None else context_length
-    descriptions = "".join(
-        json.dumps(tool, ensure_ascii=False) for tool in MODEL_TOOLS
-    )
-    characters = len(json.dumps(messages, ensure_ascii=False)) + len(descriptions)
-    estimate = (characters + 2) // 3 + 128 * len(AVAILABLE_TOOLS)
+    estimate = estimate_context_usage(messages)
     if estimate + 512 > active_context_length:
         raise ContextBudgetError(
             "Estimated context budget reached. History is retained. Use 'clear' "
