@@ -93,6 +93,27 @@ class MainTests(unittest.TestCase):
         ), patch("builtins.print"):
             self.assertEqual(ui.prompt(), "/home/micah")
 
+    def test_long_typed_prompt_wraps_without_leaving_previous_rows(self) -> None:
+        """Clear every prior input row and align wrapped continuation text."""
+        ui = TerminalUI()
+        prompt_text = ui.style("You  > ", "1;32")
+        with patch(
+            "harness_prototype.main.shutil.get_terminal_size",
+            return_value=Mock(columns=20),
+        ), patch("builtins.print") as output:
+            ui._render_prompt_input(prompt_text, "abcdefghijklmnop", 16, [], 0)
+            output.reset_mock()
+            ui._render_prompt_input(prompt_text, "abcdefghijklmnopq", 17, [], 0)
+
+        calls = output.call_args_list
+        self.assertEqual(calls[0].args[0], "\033[1A")
+        self.assertEqual(calls[1].args[0], "\r\033[J")
+        rendered = calls[2].args[0]
+        self.assertEqual(rendered.count("You  > "), 1)
+        self.assertIn("\n       ", rendered)
+        visible_lines = rendered.splitlines()
+        self.assertTrue(all(len(line) < 20 for line in visible_lines))
+
     def test_hidden_tool_activity_keeps_permission_receipts_visible(self) -> None:
         """Hide routine tool dialogue without hiding safety decisions."""
         ui = TerminalUI()
@@ -494,10 +515,12 @@ class MainTests(unittest.TestCase):
     def test_slash_clear_resets_conversation_without_calling_model(self) -> None:
         """Handle slash commands locally and submit only later conversation turns."""
         snapshots = []
+        capability_states = []
 
         def turn(**kwargs) -> None:
             """Capture the history submitted after the reset."""
             snapshots.append(list(kwargs["messages"]))
+            capability_states.append(kwargs["capability_state"])
 
         with patch(
             "builtins.input", side_effect=["before", "/clear", "after", "/exit"]
@@ -513,6 +536,8 @@ class MainTests(unittest.TestCase):
             message["content"] for message in snapshots[1] if message["role"] == "user"
         ]
         self.assertNotIn("before", retained_user_messages)
+        self.assertIsNot(capability_states[0], capability_states[1])
+        self.assertEqual(capability_states[1].active_groups, set())
 
     def test_status_shows_estimated_context_usage(self) -> None:
         """Show the session context estimate alongside the configured limit."""

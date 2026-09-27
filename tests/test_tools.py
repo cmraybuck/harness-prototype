@@ -1,6 +1,5 @@
 """Registration and dispatch checks for model-facing tools."""
 
-import json
 import os
 import subprocess
 import tempfile
@@ -11,13 +10,16 @@ from unittest.mock import patch
 
 from harness_prototype.approval import ToolCategory
 from harness_prototype.tools import (
+    ACTIVATE_CAPABILITIES_SCHEMA,
     AVAILABLE_TOOLS,
+    CAPABILITY_GROUPS,
     MODEL_TOOLS,
     TOOL_CATEGORIES,
     TOOL_SPECS,
     TOOL_TARGET_RESOLVERS,
     describe_tool_activity,
     execute_tool,
+    model_tools_for,
 )
 
 
@@ -134,34 +136,16 @@ class ToolDispatchTests(unittest.TestCase):
         for name, spec in TOOL_SPECS.items():
             with self.subTest(tool=name):
                 self.assertTrue(spec.material_limits)
+                self.assertTrue(spec.capability_groups)
+                self.assertLessEqual(set(spec.capability_groups), set(CAPABILITY_GROUPS))
                 model_tool = model_tools[name]
                 description = model_tool["function"]["description"]
                 parameters = model_tool["function"]["parameters"]
                 required_names = list(parameters.get("required", ()))
-                required_text = ", ".join(required_names) or "none"
-                self.assertIn(
-                    f"Required parameters (report exactly): {required_text}.",
-                    description,
-                )
-                optional_parameters = []
-                for parameter_name, property_schema in parameters[
-                    "properties"
-                ].items():
-                    if parameter_name in required_names:
-                        continue
-                    default = json.dumps(
-                        property_schema.get("default"), ensure_ascii=False,
-                    )
-                    optional_parameters.append(
-                        f"{parameter_name} (default {default})"
-                        if "default" in property_schema
-                        else f"{parameter_name} (no default declared)"
-                    )
-                optional_text = ", ".join(optional_parameters) or "none"
-                self.assertIn(
-                    f"Optional parameters (report exactly): {optional_text}.",
-                    description,
-                )
+                self.assertTrue(description)
+                self.assertNotIn("Required parameters", description)
+                self.assertNotIn("Safety category", description)
+                self.assertNotIn("Material limits", description)
                 if spec.model_schema is not None:
                     self.assertEqual(
                         parameters,
@@ -190,12 +174,28 @@ class ToolDispatchTests(unittest.TestCase):
                                 parameters["properties"][parameter_name]["default"],
                                 parameter.default,
                             )
-                self.assertIn(
-                    f"Safety category: {spec.category.value}.", description,
-                )
-                self.assertIn("Material limits (report all verbatim):", description)
-                for limit in spec.material_limits:
-                    self.assertIn(limit, description)
+
+    def test_active_model_tools_are_derived_from_registry_groups(self) -> None:
+        """Expose the activator always and only schemas in selected groups."""
+        bootstrap = model_tools_for(set())
+        inspection = model_tools_for({"workspace_inspection"})
+        self.assertEqual(bootstrap, [ACTIVATE_CAPABILITIES_SCHEMA])
+        names = {tool["function"]["name"] for tool in inspection}
+        expected = {
+            name for name, spec in TOOL_SPECS.items()
+            if "workspace_inspection" in spec.capability_groups
+        }
+        self.assertEqual(names, {"activate_capabilities", *expected})
+        combined = model_tools_for({"filesystem_navigation", "workspace_inspection"})
+        combined_names = [tool["function"]["name"] for tool in combined]
+        self.assertEqual(len(combined_names), len(set(combined_names)))
+
+    def test_composed_tool_schemas_do_not_mutate_the_precomputed_cache(self) -> None:
+        """Reuse generated schemas safely without rebuilding them each round."""
+        first = model_tools_for({"documentation"})
+        first[-1]["function"]["description"] = "changed"
+        second = model_tools_for({"documentation"})
+        self.assertNotEqual(second[-1]["function"]["description"], "changed")
 
     def test_rejects_unknown_tool_and_invalid_argument_shape(self) -> None:
         """Return structured errors for invalid dispatch requests."""

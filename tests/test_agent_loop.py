@@ -10,9 +10,11 @@ from ollama import ChatResponse
 from harness_prototype.access import AccessChoice, WorkspaceAccess
 from harness_prototype.approval import ApprovalPolicy, ToolCategory
 from harness_prototype.agent_loop import (
+    CapabilityState,
     ContextBudgetError,
     EmptyModelResponseError,
     check_context_budget,
+    compose_request,
     grounding_instruction,
     inspection_requirements,
     inspection_retry_instruction,
@@ -22,7 +24,7 @@ from harness_prototype.agent_loop import (
     remember_role_candidates,
     requested_answer_checklist,
     requested_evidence_targets,
-    run_turn,
+    run_turn as _run_turn,
     supplementary_citation_reads,
     validate_grounded_answer,
     validate_requested_answer_coverage,
@@ -30,20 +32,29 @@ from harness_prototype.agent_loop import (
 from harness_prototype.interaction_log import TurnLog
 
 
+def run_turn(*args: object, **kwargs: object) -> str:
+    """Run legacy inspection fixtures with their required capability available."""
+    kwargs.setdefault(
+        "capability_state",
+        CapabilityState({"filesystem_navigation", "workspace_inspection"}),
+    )
+    return _run_turn(*args, **kwargs)
+
+
 class AgentLoopTests(unittest.TestCase):
     """Cover successful, exhausted, interrupted, and empty model turns."""
 
     def test_system_prompt_explains_structured_file_changes(self) -> None:
-        """Tell the model how to select safe structured file actions."""
-        system_prompt = new_conversation()[0]["content"]
-        self.assertIn("never redirect that request into the workspace", system_prompt)
-        self.assertIn("structured create, overwrite, append, and replace", system_prompt)
-        self.assertIn("pass its revision as expected_revision", system_prompt)
-        self.assertIn("Never repeat a failed write unchanged", system_prompt)
-        self.assertIn("pass only test selectors", system_prompt)
-        self.assertIn("status=failed", system_prompt)
-        self.assertIn("Use inspect_file for JSON, TOML, YAML, PDF, DOCX", system_prompt)
-        self.assertIn("selected model to support vision", system_prompt)
+        """Load write and verification guidance only with their capabilities."""
+        messages = new_conversation()
+        bootstrap = compose_request(messages, CapabilityState())
+        active = compose_request(
+            messages,
+            CapabilityState({"file_modification", "verification"}),
+        )
+        self.assertNotIn("Read existing files first", bootstrap.messages[0]["content"])
+        self.assertIn("Read existing files first", active.messages[0]["content"])
+        self.assertIn("Run tests only when authorized", active.messages[0]["content"])
 
     def test_explicit_tool_request_bypasses_repository_evidence_gate(self) -> None:
         """Let a named inspection tool answer directly instead of forcing searches."""
@@ -91,28 +102,112 @@ class AgentLoopTests(unittest.TestCase):
         }]))
 
     def test_system_prompt_requires_evidence_before_diagnosis(self) -> None:
-        """Require implementation evidence, causal tracing, and honest confidence."""
-        system_prompt = new_conversation()[0]["content"]
-        self.assertIn("Search excerpts are navigation aids", system_prompt)
-        self.assertIn("read its implementation", system_prompt)
-        self.assertIn("inspect focused tests", system_prompt)
-        self.assertIn("inspect the relevant git_diff", system_prompt)
-        self.assertIn("exact observed expression or branch", system_prompt)
-        self.assertIn("explain the causal chain", system_prompt)
-        self.assertIn("strongly supported but unverified", system_prompt)
-        self.assertIn("do not change files", system_prompt)
+        """Keep inspection guidance out of the invariant bootstrap policy."""
+        bootstrap = compose_request(new_conversation(), CapabilityState())
+        active = compose_request(
+            new_conversation(), CapabilityState({"workspace_inspection"})
+        )
+        self.assertNotIn("inspect relevant implementation", bootstrap.messages[0]["content"])
+        self.assertIn("inspect relevant implementation", active.messages[0]["content"])
 
     def test_system_prompt_teaches_search_recovery_and_coding_workflow(self) -> None:
-        """Give weaker models concrete fallbacks for brittle literal searches."""
-        system_prompt = new_conversation()[0]["content"]
-        self.assertIn("automatically leads with exact matches", system_prompt)
-        self.assertIn("fallback_used and match_counts", system_prompt)
-        self.assertIn("suggested_queries anchor", system_prompt)
-        self.assertIn("Change the query rather than repeating an empty search", system_prompt)
-        self.assertIn("Multiple search_project content matches are normal", system_prompt)
-        self.assertIn("locate its implementation", system_prompt)
-        self.assertIn("inspect focused tests and documentation", system_prompt)
-        self.assertIn("review every changed file", system_prompt)
+        """Expose only the activator before a capability is selected."""
+        composition = compose_request(new_conversation(), CapabilityState())
+        self.assertEqual(composition.tool_names, ("activate_capabilities",))
+        self.assertLess(composition.estimated_tokens + 512, 4096)
+
+    def test_activation_expands_only_the_requested_group_on_the_next_round(self) -> None:
+        """Persist activation while keeping the triggering request bootstrap-only."""
+        activation = ChatResponse(message={"role": "assistant", "tool_calls": [{
+            "function": {
+                "name": "activate_capabilities",
+                "arguments": {"groups": ["documentation"]},
+            },
+        }]})
+        answer = ChatResponse(message={"role": "assistant", "content": "Ready."})
+        client = Mock()
+        client.chat.side_effect = [[activation], [answer]]
+        state = CapabilityState()
+        messages = new_conversation() + [{"role": "user", "content": "Find docs."}]
+
+        outcome = _run_turn(
+            client, "test", messages, lambda text: None, lambda name: None,
+            capability_state=state,
+        )
+
+        first_names = {
+            tool["function"]["name"] for tool in client.chat.call_args_list[0].kwargs["tools"]
+        }
+        second_names = {
+            tool["function"]["name"] for tool in client.chat.call_args_list[1].kwargs["tools"]
+        }
+        self.assertEqual(outcome, "success")
+        self.assertEqual(first_names, {"activate_capabilities"})
+        self.assertEqual(second_names, {"activate_capabilities", "fetch_documentation"})
+        self.assertEqual(state.active_groups, {"documentation"})
+
+    def test_activation_validates_group_lists_and_repeated_requests(self) -> None:
+        """Reject malformed activation and make an active group an explicit no-op."""
+        state = CapabilityState()
+        self.assertEqual(state.activate([])["status"], "invalid_capability_activation")
+        self.assertEqual(
+            state.activate(["documentation", "documentation"])["status"],
+            "invalid_capability_activation",
+        )
+        self.assertEqual(
+            state.activate(["unknown"])["status"], "invalid_capability_activation"
+        )
+        self.assertEqual(
+            state.activate(["documentation"])["status"], "capabilities_activated"
+        )
+        repeated = state.activate(["documentation"])
+        self.assertEqual(repeated["status"], "already_active")
+        self.assertEqual(repeated["newly_activated"], [])
+
+    def test_tool_batched_after_activation_waits_for_the_next_round(self) -> None:
+        """Do not execute a schema that was inactive at request composition time."""
+        batch = ChatResponse(message={"role": "assistant", "tool_calls": [
+            {"function": {
+                "name": "activate_capabilities",
+                "arguments": {"groups": ["filesystem_navigation"]},
+            }},
+            {"function": {"name": "list_files", "arguments": {}}},
+        ]})
+        answer = ChatResponse(message={"role": "assistant", "content": "Ready."})
+        client = Mock()
+        client.chat.side_effect = [[batch], [answer]]
+        messages = new_conversation() + [{"role": "user", "content": "Hello."}]
+
+        with patch("harness_prototype.agent_loop.execute_tool") as execute:
+            _run_turn(client, "test", messages, lambda text: None, lambda name: None)
+
+        results = [
+            json.loads(message["content"])
+            for message in messages if message["role"] == "tool"
+        ]
+        execute.assert_not_called()
+        self.assertEqual(results[0]["status"], "capabilities_activated")
+        self.assertEqual(results[1]["status"], "not_executed")
+
+    def test_registered_inactive_tool_is_rejected_without_dispatch(self) -> None:
+        """Keep guessed registered tool names behind the capability boundary."""
+        guessed = ChatResponse(message={"role": "assistant", "tool_calls": [{
+            "function": {"name": "list_files", "arguments": {}},
+        }]})
+        answer = ChatResponse(message={"role": "assistant", "content": "Stopped."})
+        client = Mock()
+        client.chat.side_effect = [[guessed], [answer]]
+        messages = new_conversation() + [{"role": "user", "content": "Hello."}]
+
+        with patch("harness_prototype.agent_loop.execute_tool") as execute:
+            _run_turn(client, "test", messages, lambda text: None, lambda name: None)
+
+        result = json.loads(next(
+            message["content"] for message in messages if message["role"] == "tool"
+        ))
+        execute.assert_not_called()
+        self.assertEqual(result["status"], "capability_not_active")
+        self.assertEqual(result["required_groups"], ["filesystem_navigation"])
 
     def test_repository_request_retries_an_unsupported_answer_with_tools(self) -> None:
         """Withhold speculation and require an inspection attempt before answering."""
@@ -185,7 +280,7 @@ class AgentLoopTests(unittest.TestCase):
         first_request = client.chat.call_args_list[0].kwargs["messages"]
         self.assertIn("Call search_project", first_request[-1]["content"])
         read_retry = client.chat.call_args_list[3].kwargs["messages"][-1]["content"]
-        self.assertIn("Call read_file now", read_retry)
+        self.assertIn("read_file(path=", read_retry)
 
     def test_repository_request_fails_closed_after_bounded_unsupported_answers(self) -> None:
         """Return an honest notice when a model repeatedly refuses inspection."""
@@ -449,12 +544,13 @@ class AgentLoopTests(unittest.TestCase):
         final = ChatResponse(message={
             "role": "assistant",
             "content": (
-                "Confirmed configuration sets the threshold [CONFIG:200]. Identical "
-                "means the tool name and arguments match [IDENTITY:50]. Enforcement "
-                "uses the stop branch [ENFORCEMENT:67] and returns a user-visible "
-                "notice [NOTICE:30]. Conversation history is retained by the turn "
-                "flow [TURN_HISTORY:780]. The focused test proves the behavior "
-                "[TEST:480]. Inference: none."
+                "Confirmed: config.py sets the threshold [CONFIG:200]. In "
+                "loop_guard.py, ToolLoopGuard.before_call defines identical as the "
+                "tool name and arguments [IDENTITY:50], enforces the stop branch "
+                "[ENFORCEMENT:67], and its notice method returns the user-visible "
+                "notice [NOTICE:30]. agent_loop.py retains conversation history "
+                "[TURN_HISTORY:780]. test_agent_loop.py has the focused test proving "
+                "the behavior [TEST:480]. Inference: none."
             ),
         })
         role_locations = [
@@ -507,6 +603,7 @@ class AgentLoopTests(unittest.TestCase):
                 messages,
                 lambda text: None,
                 lambda name: None,
+                access=WorkspaceAccess(Path("C:/project"), full_access=True),
             )
 
         self.assertEqual(outcome, "success")
@@ -583,6 +680,7 @@ class AgentLoopTests(unittest.TestCase):
                 messages,
                 lambda text: None,
                 lambda name: None,
+                access=WorkspaceAccess(Path("C:/project"), full_access=True),
             )
 
         self.assertEqual(outcome, "success")
@@ -756,17 +854,14 @@ class AgentLoopTests(unittest.TestCase):
             self.assertEqual(messages, before)
 
     def test_context_guard_counts_generated_model_tool_metadata(self) -> None:
-        """Include generated capability descriptions in the request estimate."""
+        """Include only active generated capability descriptions in the estimate."""
         messages = new_conversation()
-        generated_tool = {"function": {"description": "x" * 300}}
-        with patch("harness_prototype.agent_loop.MODEL_TOOLS", []):
-            without_capabilities = check_context_budget(
-                messages, context_length=100_000,
-            )
-        with patch("harness_prototype.agent_loop.MODEL_TOOLS", [generated_tool]):
-            with_capabilities = check_context_budget(
-                messages, context_length=100_000,
-            )
+        without_capabilities = check_context_budget(messages, context_length=100_000)
+        with_capabilities = check_context_budget(
+            messages,
+            context_length=100_000,
+            capability_state=CapabilityState({"workspace_inspection"}),
+        )
         self.assertGreater(with_capabilities, without_capabilities)
 
     def test_repository_research_uses_its_larger_context_profile(self) -> None:
@@ -782,7 +877,7 @@ class AgentLoopTests(unittest.TestCase):
                     "harness_prototype.agent_loop.RESEARCH_CONTEXT_LENGTH",
                     32768,
                 ), self.assertRaisesRegex(RuntimeError, "request capture"):
-                    run_turn(
+                    _run_turn(
                         client,
                         "test",
                         messages,

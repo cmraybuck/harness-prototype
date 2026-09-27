@@ -150,7 +150,8 @@ and permission menus initially select the least-broad allow option. When interac
 input starts with `/`, matching command suggestions appear beneath the `You  >`
 prompt and filter as the command name is typed. Up/Down changes the suggestion and
 Enter selects it; Esc hides the suggestions. The input remains ordinary editable
-text: a slash elsewhere in a message, an absolute path, or an unrecognized slash
+text and wraps beneath the prompt without repeating its label when it reaches the
+terminal width. A slash elsewhere in a message, an absolute path, or an unrecognized slash
 prefix is submitted to the model normally. The initial commands are:
 
 | Command | Behavior |
@@ -159,7 +160,7 @@ prefix is submitted to the model normally. The initial commands are:
 | `/model` | Selects a configured model, warns that context will reset, and starts a new conversation after confirmation. |
 | `/tools` | Lists the registered model tools and concise descriptions. |
 | `/tool-activity` | Selects full, compact, or hidden routine tool dialogue. Permissions and errors remain visible in every mode. |
-| `/status` | Shows the model, server, workspace, retained message count, estimated context usage, context limit, and tool display mode. |
+| `/status` | Shows the model, server, workspace, retained message count, active capability groups, effective model tools, context-cost breakdown, context limit, and tool display mode. |
 | `/help` | Shows command descriptions and palette controls. |
 | `/exit` | Ends the session. |
 
@@ -278,6 +279,21 @@ Representative result shapes (payload fields are abbreviated) are:
 {"ok": true, "error": null, "complete": false, "truncated": false, "matches": [], "skipped_links": 1, "errors": []}
 {"ok": false, "error": "Not a regular file: C:\\work\\missing.txt", "complete": false, "truncated": false}
 ```
+
+Every new conversation initially exposes only `activate_capabilities`. Its compact
+catalog lets the model activate the smallest relevant group: `filesystem_navigation`,
+`workspace_inspection`, `file_modification`, `verification`, `command_execution`,
+`services`, or `documentation`. Navigation is separate from content and Git
+inspection so common list/find requests do not load the larger inspection schemas.
+Activation is additive for that conversation, takes effect on the
+next model round, and resets on `/clear` or a model change. It changes schema and
+instruction visibility only; normal validation, workspace access, and approval
+policies still govern every operation. Registered inactive tools return
+`capability_not_active`; an operational call batched behind its activation is
+explicitly `not_executed` and must be retried on the following round.
+Against the issue's approximately 9,456-token eager baseline, the rollout target is
+at least a 60% reduction in fixed first-request overhead and a bootstrap request
+that leaves the 512-token response reserve inside the default 4,096-token context.
 
 | Tool | Interface and result |
 | --- | --- |
@@ -401,8 +417,14 @@ results is removed while earlier history remains. If Ollama ends a response with
 neither text nor tool calls, the loop retries once. If the retry is also empty,
 the CLI reports a model failure instead of silently returning to the prompt.
 
-Before each model request, a heuristic estimates history and tool-description
-size, including schema overhead, and reserves 512 tokens for a reply. Ordinary
+Before each model request, one composer builds the base policy, active-group
+instructions, retained or temporary messages, activator schema, and active tool
+schemas. The same payload drives Ollama, context estimation, logs, and status.
+Tool descriptions state routing-relevant purpose only; required fields, defaults,
+types, enums, and bounds remain in JSON Schema, while authorization and material
+limits remain authoritative in application code. Schemas are generated once and
+copied into composed requests instead of being rebuilt every round. The heuristic
+estimates that exact payload and reserves 512 tokens for a reply. Ordinary
 conversation uses `HARNESS_CONTEXT_LENGTH` (default `4096`). Evidence-gated
 repository research uses `HARNESS_RESEARCH_CONTEXT_LENGTH` (default `32768`) as
 the guard and maximum Ollama context. Each research request selects the smallest
@@ -432,7 +454,10 @@ Every line is a complete schema-version-1 JSON object with stable UUID
 `duration_ms`, `outcome`, an optional `error`, the user prompt, and an ordered
 `events` array. Events have a one-based `sequence`, timestamp, and type.
 `model_request` events contain the model, generation settings, complete prompts,
-and registered tool signatures/descriptions; `model_response` events contain
+active groups, effective tool names, per-component character counts, estimated
+tokens, and the exact tool signatures/descriptions sent; `capability_activation`
+events record successful, repeated, and invalid activation outcomes, while
+`capability_recovery` records guessed inactive tools; `model_response` events contain
 text, calls, and duration; `tool_approval` events contain the configured policy,
 decision source, category, and exact requested operation; paired `tool_call` and
 `tool_result` events contain arguments, results, and duration. A
@@ -518,7 +543,7 @@ Existing result files are never overwritten. Successful requests start as
 are recorded as failures. The temporary sample project is removed after the run.
 
 To add a tool, implement a reusable function, register one `ToolSpec` with its risk
-category, useful activity formatter, and any access-target resolver, update relevant
+category, capability group, useful activity formatter, and any access-target resolver, update relevant
 model instructions, and add tests for meaningful success, denial, and failure paths.
 Agents must obtain
 test authorization before running tests.
