@@ -126,7 +126,7 @@ def fetch_documentation(url: str) -> dict:
     try:
         request = Request(url, headers={
             "Accept": "text/html, text/plain;q=0.9",
-            "User-Agent": "harness-prototype/0.1 documentation-fetcher",
+            "User-Agent": "FLUX/0.1 documentation-fetcher",
         })
         with build_opener(_SafeRedirectHandler()).open(
             request, timeout=DOCUMENTATION_TIMEOUT_SECONDS,

@@ -1,20 +1,20 @@
-# Connect the Harness to the Team Ollama Host
+# Connect FLUX to the Team Ollama Host
 
-This guide explains how to run the harness on a teammate's computer while using
+This guide explains how to run FLUX on a teammate's computer while using
 Devstral Small 2 through Ollama on a Windows host. Tailscale carries the connection
 over the team's private network; do not expose Ollama through a router or the
 public internet.
 
-## Understand where the harness runs
+## Understand where FLUX runs
 
-Each teammate runs the harness locally. Only model inference runs on the host PC.
+Each teammate runs FLUX locally. Only model inference runs on the host PC.
 
-- The harness's file tools read files available to the teammate's local Python
+- FLUX's file tools read files available to the teammate's local Python
   process, not files on the Ollama host.
-- Prompts and file excerpts selected by the harness are sent to the host for model
+- Prompts and file excerpts selected by FLUX are sent to the host for model
   inference.
 - The current tools can only list, find, and read files, but their read access is
-  not restricted to the repository. Run the harness under an account that has
+  not restricted to the repository. Run FLUX under an account that has
   access only to data the teammate is comfortable sending to the model host.
 - Ollama does not add per-user authorization to this connection. Tailscale identity
   and access rules are the security boundary, so only trusted teammates should be
@@ -43,8 +43,8 @@ the team, while the account selection belongs to the individual computer:
 
 | Setting | Scope | Used by | Purpose |
 | --- | --- | --- | --- |
-| `HARNESS_OLLAMA_HOST` | Same for all teammates | Teammate script and harness | Reachable base URL printed by the host script |
-| `HARNESS_MODELS` | Same for host and teammates | Both scripts and harness | Comma-separated models to install, verify, and offer at startup |
+| `HARNESS_OLLAMA_HOST` | Same for all teammates | Teammate script and FLUX | Reachable base URL printed by the host script |
+| `HARNESS_MODELS` | Same for host and teammates | Both scripts and FLUX | Comma-separated models to install, verify, and offer at startup |
 | `HARNESS_TAILSCALE_PROFILE` | Per computer | Both scripts | Optional entry from `tailscale switch --list` that can reach the Ollama host. An empty value keeps the active profile. |
 | `HARNESS_OLLAMA_LOCAL_HOST` | Host only | Host script | Loopback-only Ollama API forwarded by Tailscale |
 | `HARNESS_TAILSCALE_SERVE_PORT` | Host only; reflected in the shared host URL | Host script | Private tailnet TCP port exposed by Tailscale Serve |
@@ -66,7 +66,7 @@ ollama --version
 curl.exe http://127.0.0.1:11434
 ```
 
-Install the default models used by the harness:
+Install the default models used by FLUX:
 
 ```powershell
 ollama pull devstral-small-2:latest
@@ -165,7 +165,7 @@ predictable performance on consumer hardware.
 
 ## Teammate setup
 
-### 1. Install Git and clone the harness
+### 1. Install Git and clone FLUX
 
 Install Git, then clone the repository using the URL provided by the repository
 owner:
@@ -205,7 +205,7 @@ Tailscale manually before running it. Approve any Windows installer prompt and
 sign in with the identity the host owner authorized if Tailscale opens a browser.
 If prompted to select a tailnet, choose the team's tailnet.
 
-Add `-Launch` to start the harness immediately. The `-OllamaHost`, `-Models`,
+Add `-Launch` to start FLUX immediately. The `-OllamaHost`, `-Models`,
 and `-TailscaleProfile` parameters override `.env` for that run and
 save the selected values back to it. `-Models` accepts a comma-separated string.
 For example:
@@ -250,9 +250,9 @@ curl.exe --max-time 15 http://HOST_TAILSCALE_IP:11434/api/tags
 The response should contain every model listed in `HARNESS_MODELS`. Do not use
 `127.0.0.1` on a teammate's computer; that address refers to the teammate's computer.
 
-### 4. Launch the harness
+### 4. Launch FLUX
 
-Unless `-Launch` was used, start the harness from the checkout:
+Unless `-Launch` was used, start FLUX from the checkout:
 
 ```powershell
 uv run python -m harness_prototype
@@ -289,11 +289,11 @@ curl.exe --verbose --max-time 15 http://HOST_TAILSCALE_IP:11434/api/tags
 ```
 
 If the local Ollama request works but the remote request fails, review both the
-Serve rule and the Tailscale Grant. If the API works but the harness does not,
+Serve rule and the Tailscale Grant. If the API works but FLUX does not,
 check `HARNESS_OLLAMA_HOST` for an API path, credentials, whitespace, or the wrong
-port, and restart the harness after editing `.env`.
+port, and restart FLUX after editing `.env`.
 
-### The harness reports that the model is missing
+### FLUX reports that the model is missing
 
 Run `ollama list` on the host and copy each model identifier exactly, including its
 tag, into the teammate's `HARNESS_MODELS` setting. The selector starts on the

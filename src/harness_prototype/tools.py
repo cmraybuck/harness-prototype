@@ -541,7 +541,7 @@ TOOL_SPECS = {
         ToolCategory.EXECUTION,
         _stop_service_activity,
         model_schema=STOP_SERVICE_SCHEMA,
-        material_limits=("handles created by this harness session only", "bounded final logs"),
+        material_limits=("handles created by this FLUX session only", "bounded final logs"),
     ),
     "apply_file_changes": ToolSpec(
         apply_file_changes,

@@ -1,6 +1,7 @@
 [project]
 name = "harness-prototype"
 version = "0.1.0"
+description = "FLUX — a local-first software engineering agent powered by Ollama"
 readme = "README.md"
 
 requires-python = ">=3.12"
