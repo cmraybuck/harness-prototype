@@ -58,6 +58,67 @@ class FileListingTests(unittest.TestCase):
         self.assertFalse(list_files(offset=-1)["ok"])
         self.assertFalse(list_files(max_entries=True)["ok"])
 
+    def test_filters_exclusions_and_hidden_entries(self) -> None:
+        """Apply filename, extension, exclusion, and hidden controls before paging."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in [".env", "alpha.py", "beta.PY", "notes.txt", "skip.py"]:
+                (root / name).write_text(name, encoding="utf-8")
+            (root / ".git").mkdir()
+            (root / "build").mkdir()
+
+            result = list_files(
+                path=temporary,
+                name_pattern="*.py",
+                extensions=["py"],
+                exclude_patterns=["skip.*"],
+                include_hidden=False,
+            )
+
+        self.assertEqual(result["entries"], ["alpha.py", "beta.PY"])
+        self.assertEqual(result["extensions"], ["py"])
+        self.assertEqual(result["exclusions_applied"], ["skip.*"])
+        self.assertFalse(result["include_hidden"])
+
+    def test_default_exclusions_can_be_disabled(self) -> None:
+        """Use repository-noise defaults only when exclusions are not overridden."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".git").mkdir()
+            (root / "build").mkdir()
+            (root / "source").mkdir()
+
+            defaults = list_files(path=temporary)
+            unfiltered = list_files(path=temporary, exclude_patterns=[])
+
+        self.assertEqual(defaults["entries"], ["source/"])
+        self.assertIn(".git", defaults["exclusions_applied"])
+        self.assertEqual(unfiltered["entries"], [".git/", "build/", "source/"])
+        self.assertEqual(unfiltered["exclusions_applied"], [])
+
+    def test_filtered_paging_and_invalid_patterns(self) -> None:
+        """Page the filtered sequence and reject malformed filter values."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ["a.py", "b.txt", "c.py", "d.py"]:
+                (root / name).write_text(name, encoding="utf-8")
+
+            first = list_files(path=temporary, extensions=[".py"], max_entries=2)
+            second = list_files(
+                path=temporary,
+                extensions=[".py"],
+                max_entries=2,
+                offset=first["next_offset"],
+            )
+
+        self.assertEqual(first["entries"], ["a.py", "c.py"])
+        self.assertEqual(second["entries"], ["d.py"])
+        self.assertFalse(list_files(name_pattern="[broken")["ok"])
+        self.assertFalse(list_files(exclude_patterns="*.py")["ok"])
+        self.assertFalse(list_files(exclude_patterns=["bad["])["ok"])
+        self.assertFalse(list_files(extensions=["*.py"])["ok"])
+        self.assertFalse(list_files(include_hidden=1)["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
