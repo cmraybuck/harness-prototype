@@ -730,6 +730,20 @@ class AgentLoopTests(unittest.TestCase):
             client.chat.assert_not_called()
             self.assertEqual(messages, before)
 
+    def test_context_guard_counts_generated_model_tool_metadata(self) -> None:
+        """Include generated capability descriptions in the request estimate."""
+        messages = new_conversation()
+        generated_tool = {"function": {"description": "x" * 300}}
+        with patch("harness_prototype.agent_loop.MODEL_TOOLS", []):
+            without_capabilities = check_context_budget(
+                messages, context_length=100_000,
+            )
+        with patch("harness_prototype.agent_loop.MODEL_TOOLS", [generated_tool]):
+            with_capabilities = check_context_budget(
+                messages, context_length=100_000,
+            )
+        self.assertGreater(with_capabilities, without_capabilities)
+
     def test_repository_research_uses_its_larger_context_profile(self) -> None:
         """Use an adaptive research window without changing ordinary chat capacity."""
         cases = ["Hello there.", "Identify the exact file and function in this repository."]

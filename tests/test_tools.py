@@ -1,9 +1,11 @@
 """Registration and dispatch checks for model-facing tools."""
 
+import json
 import os
 import subprocess
 import tempfile
 import unittest
+from inspect import Parameter, signature
 from pathlib import Path
 from unittest.mock import patch
 
@@ -69,6 +71,79 @@ class ToolDispatchTests(unittest.TestCase):
         search_parameters = search_schema["function"]["parameters"]
         self.assertEqual(search_parameters["required"], ["text"])
         self.assertNotIn("max_results", search_parameters["properties"])
+
+    def test_model_tools_track_registry_and_capability_metadata(self) -> None:
+        """Generate model definitions from their executable specifications."""
+        model_tools = {
+            tool["function"]["name"]: tool
+            for tool in MODEL_TOOLS
+        }
+        self.assertEqual(set(model_tools), set(TOOL_SPECS))
+        for name, spec in TOOL_SPECS.items():
+            with self.subTest(tool=name):
+                self.assertTrue(spec.material_limits)
+                model_tool = model_tools[name]
+                description = model_tool["function"]["description"]
+                parameters = model_tool["function"]["parameters"]
+                required_names = list(parameters.get("required", ()))
+                required_text = ", ".join(required_names) or "none"
+                self.assertIn(
+                    f"Required parameters (report exactly): {required_text}.",
+                    description,
+                )
+                optional_parameters = []
+                for parameter_name, property_schema in parameters[
+                    "properties"
+                ].items():
+                    if parameter_name in required_names:
+                        continue
+                    default = json.dumps(
+                        property_schema.get("default"), ensure_ascii=False,
+                    )
+                    optional_parameters.append(
+                        f"{parameter_name} (default {default})"
+                        if "default" in property_schema
+                        else f"{parameter_name} (no default declared)"
+                    )
+                optional_text = ", ".join(optional_parameters) or "none"
+                self.assertIn(
+                    f"Optional parameters (report exactly): {optional_text}.",
+                    description,
+                )
+                if spec.model_schema is not None:
+                    self.assertEqual(
+                        parameters,
+                        spec.model_schema["function"]["parameters"],
+                    )
+                else:
+                    function_signature = signature(spec.function)
+                    self.assertEqual(
+                        set(parameters["properties"]),
+                        set(function_signature.parameters),
+                    )
+                    expected_required = [
+                        parameter_name
+                        for parameter_name, parameter
+                        in function_signature.parameters.items()
+                        if parameter.default is Parameter.empty
+                    ]
+                    self.assertEqual(
+                        parameters.get("required", []), expected_required,
+                    )
+                    for parameter_name, parameter in (
+                        function_signature.parameters.items()
+                    ):
+                        if parameter.default is not Parameter.empty:
+                            self.assertEqual(
+                                parameters["properties"][parameter_name]["default"],
+                                parameter.default,
+                            )
+                self.assertIn(
+                    f"Safety category: {spec.category.value}.", description,
+                )
+                self.assertIn("Material limits (report all verbatim):", description)
+                for limit in spec.material_limits:
+                    self.assertIn(limit, description)
 
     def test_rejects_unknown_tool_and_invalid_argument_shape(self) -> None:
         """Return structured errors for invalid dispatch requests."""
