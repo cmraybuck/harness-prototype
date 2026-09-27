@@ -390,7 +390,13 @@ before sharing them.
 
 Tool functions are reusable independently of the terminal and Ollama client.
 `TOOL_SPECS` is the single registration source for model functions, risk
-categories, and optional access-target resolvers. Derived registry views supply
+categories, material limits, and optional access-target resolvers. The application
+generates the model's tool definitions from that registry, preserving each purpose
+and parameter schema while adding an explicit required-parameter list, optional
+parameter defaults, safety category, and material limits. It does not duplicate
+capability documentation in the system prompt, and additions or removals
+automatically match the executable tool set. The context guard measures the same
+generated definitions sent to Ollama. Derived registry views supply
 schemas, policy lookup, and dispatch; `execute_tool` is internal code, not an
 additional model tool. The application uses Ollama directly; LangGraph, IDE
 integration, and training are future work.

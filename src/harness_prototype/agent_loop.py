@@ -1,7 +1,6 @@
 """Ollama conversation and tool execution, independent of the terminal UI."""
 
 from collections.abc import Callable
-from inspect import signature
 import json
 from pathlib import Path
 import re
@@ -919,10 +918,7 @@ def check_context_budget(
     """
     active_context_length = CONTEXT_LENGTH if context_length is None else context_length
     descriptions = "".join(
-        json.dumps(spec.model_schema, ensure_ascii=False)
-        if spec.model_schema is not None
-        else name + str(signature(spec.function)) + (spec.function.__doc__ or "")
-        for name, spec in TOOL_SPECS.items()
+        json.dumps(tool, ensure_ascii=False) for tool in MODEL_TOOLS
     )
     characters = len(json.dumps(messages, ensure_ascii=False)) + len(descriptions)
     estimate = (characters + 2) // 3 + 128 * len(AVAILABLE_TOOLS)
@@ -1164,14 +1160,8 @@ def run_turn(
                 },
                 prompts=request_messages,
                 tool_schemas=[
-                    {"name": name, "schema": spec.model_schema}
-                    if spec.model_schema is not None
-                    else {
-                        "name": name,
-                        "signature": str(signature(spec.function)),
-                        "description": spec.function.__doc__ or "",
-                    }
-                    for name, spec in TOOL_SPECS.items()
+                    {"name": tool["function"]["name"], "schema": tool}
+                    for tool in MODEL_TOOLS
                 ],
             )
         request_started = monotonic()
