@@ -16,6 +16,7 @@ from harness_prototype.tools import (
     TOOL_CATEGORIES,
     TOOL_SPECS,
     TOOL_TARGET_RESOLVERS,
+    describe_tool_activity,
     execute_tool,
 )
 
@@ -55,6 +56,7 @@ class ToolDispatchTests(unittest.TestCase):
             {ToolCategory.READ_ONLY},
         )
         self.assertEqual(set(TOOL_SPECS), set(AVAILABLE_TOOLS))
+        self.assertTrue(all(spec.activity_formatter for spec in TOOL_SPECS.values()))
         self.assertEqual(set(TOOL_TARGET_RESOLVERS), {"apply_file_changes"})
         file_change_schema = next(
             tool for tool in MODEL_TOOLS
@@ -95,6 +97,27 @@ class ToolDispatchTests(unittest.TestCase):
         search_parameters = search_schema["function"]["parameters"]
         self.assertEqual(search_parameters["required"], ["text"])
         self.assertNotIn("max_results", search_parameters["properties"])
+
+    def test_tool_activity_describes_work_without_sensitive_payloads(self) -> None:
+        """Give every tool useful dialogue while omitting write and command payloads."""
+        self.assertEqual(
+            describe_tool_activity("read_file", {"path": "AGENTS.md"}),
+            "Reading AGENTS.md",
+        )
+        self.assertEqual(
+            describe_tool_activity("find_files", {"pattern": "README*", "root": "src"}),
+            "Looking for README* under src",
+        )
+        changes = describe_tool_activity("apply_file_changes", {
+            "changes": [{"action": "replace", "path": "main.py", "content": "secret"}],
+        })
+        self.assertIn("replace main.py", changes)
+        self.assertNotIn("secret", changes)
+        command = describe_tool_activity(
+            "run_command", {"command": ["git", "show", "secret-revision"]},
+        )
+        self.assertEqual(command, "Running git with 2 arguments")
+        self.assertNotIn("secret-revision", command)
 
     def test_model_tools_track_registry_and_capability_metadata(self) -> None:
         """Generate model definitions from their executable specifications."""

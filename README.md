@@ -120,7 +120,9 @@ and read it.” In an interactive terminal, startup clears prior terminal output
 shows a temporary model-selection screen. After selection, that screen and the
 existing scrollback are cleared so the **Coding Agent** conversation starts at the
 top of its own view. The interface labels each side of the conversation and shows
-tool activity as a subdued `Working` status. Permission requests use the terminal's
+each tool's purpose and safe scope as a subdued `Working` status, such as
+`Reading AGENTS.md` or `Looking for README* under src`. Permission requests use
+the terminal's
 alternate screen as a temporary review view; after a decision, the conversation is
 restored with only a short, subdued permission receipt beside tool activity. All
 selection views use Up/Down to move and Space or Enter to confirm; typing a number
@@ -427,7 +429,9 @@ before sharing them.
 
 Tool functions are reusable independently of the terminal and Ollama client.
 `TOOL_SPECS` is the single registration source for model functions, risk
-categories, material limits, and optional access-target resolvers. The application
+categories, human-readable activity formatters, material limits, and optional
+access-target resolvers. Activity formatters summarize safe arguments without
+dumping raw objects, file contents, revisions, or command arguments. The application
 generates the model's tool definitions from that registry, preserving each purpose
 and parameter schema while adding an explicit required-parameter list, optional
 parameter defaults, safety category, and material limits. It does not duplicate
@@ -466,8 +470,9 @@ Existing result files are never overwritten. Successful requests start as
 are recorded as failures. The temporary sample project is removed after the run.
 
 To add a tool, implement a reusable function, register one `ToolSpec` with its risk
-category and any access-target resolver, update relevant model instructions, and
-add tests for meaningful success, denial, and failure paths. Agents must obtain
+category, useful activity formatter, and any access-target resolver, update relevant
+model instructions, and add tests for meaningful success, denial, and failure paths.
+Agents must obtain
 test authorization before running tests.
 Update this README when the interface or limits change. Before adding writes or
 commands, define allowed targets, validation, timeouts, output limits, and recovery

@@ -107,11 +107,11 @@ class TerminalUI:
         print()
         self.response_open = False
 
-    def show_tool_call(self, name: str) -> None:
-        """Show model tool activity on its own line."""
+    def show_tool_call(self, activity: str) -> None:
+        """Show bounded, human-readable model tool activity on its own line."""
         if self.response_open:
             print()
-        print(self.style(f"  Working    {name}", "2;36"), flush=True)
+        print(self.style(f"  Working    {_terminal_text(activity)}", "2;36"), flush=True)
         self.response_open = False
 
     def show_permission_receipt(self, message: str) -> None:

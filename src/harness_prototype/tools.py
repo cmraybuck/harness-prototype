@@ -35,17 +35,112 @@ from .tool_results import tool_error
 
 
 TargetResolver = Callable[[object], list[Path] | dict | None]
+ActivityFormatter = Callable[[dict], str]
 
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Register one function with its safety, schema, access, and limit metadata."""
+    """Register one function with its safety, activity, schema, access, and limits."""
 
     function: Callable[..., dict]
     category: ToolCategory
+    activity_formatter: ActivityFormatter
     target_resolver: TargetResolver | None = None
     model_schema: dict | None = None
     material_limits: tuple[str, ...] = ()
+
+
+def _argument(arguments: dict, name: str, default: object) -> object:
+    """Return one display argument without assuming the request is valid."""
+    return arguments.get(name, default) if isinstance(arguments, dict) else default
+
+
+def _path_activity(
+    action: str,
+    argument: str = "path",
+    default: str = ".",
+) -> ActivityFormatter:
+    """Build an activity formatter for a tool centered on one path."""
+    def format_activity(arguments: dict) -> str:
+        """Describe the path-oriented operation."""
+        return f"{action} {_argument(arguments, argument, default)}"
+
+    return format_activity
+
+
+def _find_activity(arguments: dict) -> str:
+    """Describe a recursive filename search and its root."""
+    return (
+        f"Looking for {_argument(arguments, 'pattern', 'a file')} under "
+        f"{_argument(arguments, 'root', '.')}"
+    )
+
+
+def _location_activity(arguments: dict) -> str:
+    """Describe discovery of a named standard folder."""
+    return f"Locating {_argument(arguments, 'location', 'a standard folder')}"
+
+
+def _search_activity(arguments: dict) -> str:
+    """Describe a source-text search and its scope."""
+    return (
+        f"Searching {_argument(arguments, 'path', '.')} for "
+        f"{_argument(arguments, 'text', 'text')}"
+    )
+
+
+def _git_diff_activity(arguments: dict) -> str:
+    """Describe the selected local Git diff scope."""
+    mode = _argument(arguments, "mode", "combined")
+    path = _argument(arguments, "path", None)
+    return f"Reviewing {mode} changes" + (f" in {path}" if path else "")
+
+
+def _git_status_activity(arguments: dict) -> str:
+    """Describe inspection of the active workspace's Git status."""
+    return "Checking Git status"
+
+
+def _tests_activity(arguments: dict) -> str:
+    """Describe whether a full or targeted test run was requested."""
+    targets = _argument(arguments, "targets", None)
+    if isinstance(targets, list) and targets:
+        noun = "target" if len(targets) == 1 else "targets"
+        return f"Running {len(targets)} test {noun}"
+    return "Running the full test suite"
+
+
+def _check_activity(arguments: dict) -> str:
+    """Describe one configured project check without exposing its command."""
+    name = _argument(arguments, "name", "project")
+    target = _argument(arguments, "target", None)
+    return f"Running the {name} check" + (f" for {target}" if target else "")
+
+
+def _command_activity(arguments: dict) -> str:
+    """Describe an ad hoc command by executable and argument count only."""
+    command = _argument(arguments, "command", [])
+    if not isinstance(command, list) or not command:
+        return "Running an engineering command"
+    count = max(len(command) - 1, 0)
+    noun = "argument" if count == 1 else "arguments"
+    return f"Running {command[0]} with {count} {noun}"
+
+
+def _changes_activity(arguments: dict) -> str:
+    """Describe structured file changes without exposing their contents."""
+    changes = _argument(arguments, "changes", [])
+    if not isinstance(changes, list) or not changes:
+        return "Applying file changes"
+    summaries = []
+    for change in changes[:3]:
+        if isinstance(change, dict):
+            summaries.append(f"{change.get('action', 'change')} {change.get('path', 'a file')}")
+    detail = ", ".join(summaries) or "files"
+    if len(changes) > 3:
+        detail += f", and {len(changes) - 3} more"
+    plural = "s" if len(changes) != 1 else ""
+    return f"Applying {len(changes)} file change{plural}: {detail}"
 
 
 FILE_CHANGES_SCHEMA = {
@@ -247,19 +342,21 @@ SEARCH_PROJECT_SCHEMA = {
 TOOL_SPECS = {
     "get_location": ToolSpec(
         get_location, ToolCategory.READ_ONLY,
+        _location_activity,
         material_limits=("named standard locations only",),
     ),
     "list_files": ToolSpec(
-        list_files, ToolCategory.READ_ONLY,
+        list_files, ToolCategory.READ_ONLY, _path_activity("Listing files in"),
         material_limits=("1-100 results per page", "20,000 directory entries"),
     ),
     "find_files": ToolSpec(
-        find_files, ToolCategory.READ_ONLY,
+        find_files, ToolCategory.READ_ONLY, _find_activity,
         material_limits=("1-100 results", "20,000 entries", "10-second search"),
     ),
     "search_project": ToolSpec(
         search_project,
         ToolCategory.READ_ONLY,
+        _search_activity,
         model_schema=SEARCH_PROJECT_SCHEMA,
         material_limits=(
             "1-100 results (model schema fixes the default of 100)",
@@ -268,15 +365,15 @@ TOOL_SPECS = {
         ),
     ),
     "read_file": ToolSpec(
-        read_file, ToolCategory.READ_ONLY,
+        read_file, ToolCategory.READ_ONLY, _path_activity("Reading"),
         material_limits=("1 MiB UTF-8 files", "1-200 lines", "8,000 output characters"),
     ),
     "git_status": ToolSpec(
-        git_status, ToolCategory.READ_ONLY,
+        git_status, ToolCategory.READ_ONLY, _git_status_activity,
         material_limits=("active workspace only", "1,000 entries", "10-second timeout"),
     ),
     "git_diff": ToolSpec(
-        git_diff, ToolCategory.READ_ONLY,
+        git_diff, ToolCategory.READ_ONLY, _git_diff_activity,
         material_limits=(
             "active workspace only", "200 files", "20,000 patch characters",
             "10-second timeout", "untracked contents excluded",
@@ -285,6 +382,7 @@ TOOL_SPECS = {
     "detect_project_technologies": ToolSpec(
         detect_project_technologies,
         ToolCategory.READ_ONLY,
+        _path_activity("Detecting project technologies under"),
         material_limits=(
             "20,000 entries", "100 manifests", "256 KiB per manifest",
             "50 scripts per project",
@@ -293,6 +391,7 @@ TOOL_SPECS = {
     "run_tests": ToolSpec(
         run_tests,
         ToolCategory.EXECUTION,
+        _tests_activity,
         model_schema=RUN_TESTS_SCHEMA,
         material_limits=(
             "configured command only", "1-50 optional targets",
@@ -302,6 +401,7 @@ TOOL_SPECS = {
     "run_checks": ToolSpec(
         run_checks,
         ToolCategory.EXECUTION,
+        _check_activity,
         model_schema=RUN_CHECKS_SCHEMA,
         material_limits=(
             "configured commands only", "optional configured target only",
@@ -311,6 +411,7 @@ TOOL_SPECS = {
     "run_command": ToolSpec(
         run_command,
         ToolCategory.EXECUTION,
+        _command_activity,
         model_schema=RUN_COMMAND_SCHEMA,
         material_limits=(
             "active workspace working directory", "configured executable allowlist",
@@ -321,6 +422,7 @@ TOOL_SPECS = {
     "install_dependencies": ToolSpec(
         install_dependencies,
         ToolCategory.EXECUTION,
+        _path_activity("Installing dependencies for"),
         model_schema=INSTALL_DEPENDENCIES_SCHEMA,
         material_limits=(
             "one workspace project; supported manifest managers; system pip denied; "
@@ -330,6 +432,7 @@ TOOL_SPECS = {
     "apply_file_changes": ToolSpec(
         apply_file_changes,
         ToolCategory.WRITE,
+        _changes_activity,
         file_change_target_directories,
         FILE_CHANGES_SCHEMA,
         material_limits=(
@@ -347,6 +450,14 @@ TOOL_TARGET_RESOLVERS = {
     for name, spec in TOOL_SPECS.items()
     if spec.target_resolver is not None
 }
+
+
+def describe_tool_activity(name: str, arguments: dict) -> str:
+    """Return the registered human-readable description of one tool call."""
+    spec = TOOL_SPECS.get(name)
+    if spec is None:
+        return f"Using {name}"
+    return spec.activity_formatter(arguments)
 
 
 def _parameter_details(parameters: dict) -> str:
