@@ -146,10 +146,26 @@ alternate screen as a temporary review view; after a decision, the conversation 
 restored with only a short, subdued permission receipt beside tool activity. All
 selection views use Up/Down to move and Space or Enter to confirm; typing a number
 or yes/no is not required. Menus use the conversation's cyan and green palette,
-and permission menus initially select the least-broad allow option. Type `clear`
-to reset the conversation, `quit` to exit, or Ctrl+C during a response to cancel
-the turn. ANSI color is used only in an interactive terminal; set `NO_COLOR` to
-disable color styling.
+and permission menus initially select the least-broad allow option. When interactive
+input starts with `/`, matching command suggestions appear beneath the `You  >`
+prompt and filter as the command name is typed. Up/Down changes the suggestion and
+Enter selects it; Esc hides the suggestions. The input remains ordinary editable
+text: a slash elsewhere in a message, an absolute path, or an unrecognized slash
+prefix is submitted to the model normally. The initial commands are:
+
+| Command | Behavior |
+| --- | --- |
+| `/clear` | Starts a fresh conversation with the current model. |
+| `/model` | Selects a configured model, warns that context will reset, and starts a new conversation after confirmation. |
+| `/tools` | Lists the registered model tools and concise descriptions. |
+| `/tool-activity` | Selects full, compact, or hidden routine tool dialogue. Permissions and errors remain visible in every mode. |
+| `/status` | Shows the model, server, workspace, retained message count, context limit, and tool display mode. |
+| `/help` | Shows command descriptions and palette controls. |
+| `/exit` | Ends the session. |
+
+The legacy `clear`, `quit`, and `exit` inputs remain supported. Ctrl+C during a
+response cancels the turn. ANSI color is used only in an interactive terminal; set
+`NO_COLOR` to disable color styling.
 
 For diagnosis requests, the agent is instructed to trace the reported operation
 through its implementation, helpers or callers, focused tests, and relevant local

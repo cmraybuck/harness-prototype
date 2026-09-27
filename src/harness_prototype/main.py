@@ -17,6 +17,7 @@ from .agent_loop import (
     run_turn,
 )
 from .config import (
+    CONTEXT_LENGTH,
     HOST,
     LOG_DIRECTORY,
     LOG_REDACT_VALUES,
@@ -24,9 +25,10 @@ from .config import (
     TEST_TIMEOUT_SECONDS,
 )
 from .documentation import DOCUMENTATION_TIMEOUT_SECONDS
-from .services import stop_all_services
 from .files import file_change_target_paths
 from .interaction_log import InteractionLogger
+from .services import stop_all_services
+from .tools import TOOL_SPECS
 
 
 MODEL_DESCRIPTIONS = {
@@ -37,6 +39,18 @@ MODEL_DESCRIPTIONS = {
 
 APP_DISPLAY_NAME = "FLUX"
 APP_DESCRIPTION = "A local-first software engineering agent powered by Ollama."
+
+COMMAND_DESCRIPTIONS = {
+    "/clear": "Start a fresh conversation with the current model",
+    "/model": "Switch models and start a fresh conversation",
+    "/tools": "Show the tools available to the agent",
+    "/tool-activity": "Choose how tool activity appears",
+    "/status": "Show the current session settings",
+    "/help": "Show slash commands and keyboard controls",
+    "/exit": "End the session",
+}
+
+TOOL_ACTIVITY_MODES = ("full", "compact", "hidden")
 
 
 def _terminal_text(value: object, max_chars: int = 160) -> str:
@@ -58,6 +72,7 @@ class TerminalUI:
         self.approved_edit_files: set[Path] = set()
         self.approved_command_executables: set[str] = set()
         self.documentation_access_approved = False
+        self.tool_activity_mode = "full"
 
     def style(self, text: str, code: str) -> str:
         """Apply an ANSI style when terminal color support is available."""
@@ -85,13 +100,97 @@ class TerminalUI:
         print(f"  Model      {model}")
         print(f"  Server     {host}")
         print(f"  Workspace  {workspace}")
-        print(self.style("  Commands   clear  reset conversation    quit  exit", "2"))
+        print(self.style("  Commands   /  browse commands    /help  show help", "2"))
         print(self.style(self.rule(), "2"))
         print()
 
     def prompt(self) -> str:
-        """Read one user message with a distinct conversation label."""
-        return input(self.style("You  > ", "1;32")).strip()
+        """Read one user message with inline slash-command suggestions."""
+        prompt_text = self.style("You  > ", "1;32")
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            return input(prompt_text).strip()
+
+        buffer = ""
+        cursor = 0
+        selected = 0
+        suggestions_suppressed = False
+        while True:
+            matches = [] if suggestions_suppressed else self._command_matches(buffer)
+            if matches:
+                selected = min(selected, len(matches) - 1)
+            else:
+                selected = 0
+            self._render_prompt_input(prompt_text, buffer, cursor, matches, selected)
+            key = self._read_key()
+            if key == "up" and matches:
+                selected = (selected - 1) % len(matches)
+            elif key == "down" and matches:
+                selected = (selected + 1) % len(matches)
+            elif key == "left":
+                cursor = max(0, cursor - 1)
+            elif key == "right":
+                cursor = min(len(buffer), cursor + 1)
+            elif key == "confirm":
+                submitted = matches[selected] if matches else buffer
+                self._render_prompt_input(
+                    prompt_text, submitted, len(submitted), [], 0, finish=True
+                )
+                return submitted.strip()
+            elif key == "backspace":
+                if cursor:
+                    buffer = buffer[: cursor - 1] + buffer[cursor:]
+                    cursor -= 1
+                selected = 0
+                suggestions_suppressed = False
+            elif key == "cancel" and matches:
+                suggestions_suppressed = True
+            elif key == "space":
+                buffer = buffer[:cursor] + " " + buffer[cursor:]
+                cursor += 1
+                selected = 0
+                suggestions_suppressed = False
+            elif len(key) == 1 and key.isprintable():
+                buffer = buffer[:cursor] + key + buffer[cursor:]
+                cursor += 1
+                selected = 0
+                suggestions_suppressed = False
+
+    def _command_matches(self, buffer: str) -> list[str]:
+        """Return command-name prefix matches for the current prompt text."""
+        if not buffer.startswith("/") or any(character.isspace() for character in buffer):
+            return []
+        normalized = buffer.casefold()
+        return [command for command in COMMAND_DESCRIPTIONS if command.startswith(normalized)]
+
+    def _render_prompt_input(
+        self,
+        prompt_text: str,
+        buffer: str,
+        cursor: int,
+        matches: list[str],
+        selected: int,
+        *,
+        finish: bool = False,
+    ) -> None:
+        """Redraw editable input and command suggestions beneath it."""
+        print("\r\033[J", end="")
+        print(f"{prompt_text}{buffer}", end="")
+        if finish:
+            print(flush=True)
+            return
+        for index, command in enumerate(matches):
+            marker = ">" if index == selected else " "
+            style_code = "1;32" if index == selected else "2;36"
+            description = COMMAND_DESCRIPTIONS[command]
+            print()
+            print(
+                self.style(f"  {marker} {command:<16} {description}", style_code),
+                end="",
+            )
+        if matches:
+            print(f"\033[{len(matches)}A", end="")
+        print(f"\r\033[{7 + cursor}C", end="")
+        print(end="", flush=True)
 
     def begin_response(self) -> None:
         """Open an assistant response section if one is not already active."""
@@ -116,9 +215,18 @@ class TerminalUI:
 
     def show_tool_call(self, activity: str) -> None:
         """Show bounded, human-readable model tool activity on its own line."""
+        if self.tool_activity_mode == "hidden":
+            if self.response_open:
+                print()
+                self.response_open = False
+            return
         if self.response_open:
             print()
-        print(self.style(f"  Working    {_terminal_text(activity)}", "2;36"), flush=True)
+        max_chars = 80 if self.tool_activity_mode == "compact" else 160
+        print(
+            self.style(f"  Working    {_terminal_text(activity, max_chars)}", "2;36"),
+            flush=True,
+        )
         self.response_open = False
 
     def show_permission_receipt(self, message: str) -> None:
@@ -135,6 +243,46 @@ class TerminalUI:
         print(f"{self.style(f'{label:<11}', style_code)}{message}\n")
         self.response_open = False
 
+    def show_command_help(self) -> None:
+        """Display slash commands and their keyboard controls."""
+        lines = [
+            f"{command:<16} {description}"
+            for command, description in COMMAND_DESCRIPTIONS.items()
+        ]
+        lines.append("")
+        lines.append("Start with / to see suggestions; keep typing to filter by command name.")
+        lines.append("Use Up/Down and Enter to choose; Esc hides suggestions.")
+        self.show_notice("Commands", "\n".join(lines), "36")
+
+    def show_tools(self) -> None:
+        """Display registered model tools with concise descriptions."""
+        lines = []
+        for name, spec in TOOL_SPECS.items():
+            docstring = spec.function.__doc__ or "No description available."
+            description = " ".join(docstring.strip().split()).split(". ", 1)[0]
+            lines.append(f"{name:<30} {description}")
+        self.show_notice("Tools", "\n".join(lines), "36")
+
+    def choose_tool_activity_mode(self) -> str | None:
+        """Ask how routine tool calls should appear in the conversation."""
+        descriptions = {
+            "full": "Show complete one-line activity descriptions",
+            "compact": "Show shorter activity descriptions",
+            "hidden": "Hide routine activity; permissions and errors remain visible",
+        }
+        options = [f"{mode:<8} {descriptions[mode]}" for mode in TOOL_ACTIVITY_MODES]
+        try:
+            initial = TOOL_ACTIVITY_MODES.index(self.tool_activity_mode)
+            selected = self.choose_option(
+                "Tool activity",
+                ["This changes display only; tools remain available to the agent."],
+                options,
+                initial=initial,
+            )
+        except (KeyboardInterrupt, EOFError):
+            return None
+        return TOOL_ACTIVITY_MODES[selected]
+
     def _read_key(self) -> str:
         """Read one navigation key without requiring Enter."""
         if os.name == "nt":
@@ -142,8 +290,11 @@ class TerminalUI:
 
             key = msvcrt.getwch()
             if key in {"\x00", "\xe0"}:
-                return {"H": "up", "P": "down"}.get(msvcrt.getwch(), "other")
+                return {
+                    "H": "up", "P": "down", "K": "left", "M": "right",
+                }.get(msvcrt.getwch(), "other")
         else:
+            import select
             import termios
             import tty
 
@@ -151,27 +302,46 @@ class TerminalUI:
                 key = sys.stdin.read(1)
                 if key == "\x1b":
                     sequence = sys.stdin.read(2)
-                    return {"[A": "up", "[B": "down"}.get(sequence, "other")
+                    return {
+                        "[A": "up", "[B": "down", "[C": "right", "[D": "left",
+                    }.get(sequence, "other")
                 if key == "\x03":
                     raise KeyboardInterrupt
                 if key == "":
                     raise EOFError
-                return "confirm" if key in {" ", "\r", "\n"} else "other"
+                if key in {"\b", "\x7f"}:
+                    return "backspace"
+                if key == "\x1b":
+                    return "cancel"
+                if key == " ":
+                    return "space"
+                return "confirm" if key in {"\r", "\n"} else key
             descriptor = sys.stdin.fileno()
             previous = termios.tcgetattr(descriptor)
             try:
                 tty.setraw(descriptor)
                 key = sys.stdin.read(1)
                 if key == "\x1b":
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+                    if not ready:
+                        return "cancel"
                     sequence = sys.stdin.read(2)
-                    return {"[A": "up", "[B": "down"}.get(sequence, "other")
+                    return {
+                        "[A": "up", "[B": "down", "[C": "right", "[D": "left",
+                    }.get(sequence, "other")
             finally:
                 termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
         if key == "\x03":
             raise KeyboardInterrupt
         if key == "":
             raise EOFError
-        return "confirm" if key in {" ", "\r", "\n"} else "other"
+        if key in {"\b", "\x7f"}:
+            return "backspace"
+        if key == "\x1b":
+            return "cancel"
+        if key == " ":
+            return "space"
+        return "confirm" if key in {"\r", "\n"} else key
 
     def choose_option(
         self,
@@ -193,7 +363,9 @@ class TerminalUI:
                     print("\033[2J\033[H", end="", flush=True)
                 print(self.style(self.rule(), "2"))
                 print(self.style(f"  {title.upper()}", "1;36"))
-                print(self.style("  Use Up/Down to select, then Space or Enter to confirm", "2;36"))
+                print(self.style(
+                    "  Use Up/Down to select, then Space or Enter to confirm", "2;36"
+                ))
                 print(self.style(self.rule(), "2"))
                 for line in lines:
                     print(f"  {line}")
@@ -209,7 +381,7 @@ class TerminalUI:
                     selected = (selected - 1) % len(options)
                 elif key == "down":
                     selected = (selected + 1) % len(options)
-                elif key == "confirm":
+                elif key in {"confirm", "space"}:
                     return selected
         finally:
             if use_alternate_screen:
@@ -357,6 +529,27 @@ def select_model(
         transient=False,
     )
     return models[selected]
+
+
+def confirm_model_switch(model: str, ui: TerminalUI) -> bool:
+    """Confirm that changing models resets retained conversation context."""
+    options = [
+        "Switch model and start a new conversation",
+        "Keep the current model and conversation",
+    ]
+    try:
+        selected = ui.choose_option(
+            "Start a new conversation?",
+            [
+                f"Selected model: {_terminal_text(model)}",
+                "Switching models clears the current conversation context.",
+            ],
+            options,
+            initial=1,
+        )
+    except (KeyboardInterrupt, EOFError):
+        return False
+    return selected == 0
 
 
 def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
@@ -565,14 +758,62 @@ def main() -> None:
                 break
             if not user_input:
                 continue
-            if user_input.lower() in {"quit", "exit"}:
+            normalized_input = user_input.casefold()
+            if normalized_input in {"quit", "exit", "/exit"}:
                 ui.show_goodbye()
                 break
-            if user_input.lower() == "clear":
+            if normalized_input in {"clear", "/clear"}:
                 messages = new_conversation()
                 ui.show_notice("Reset", "Conversation cleared.", "32")
                 continue
-
+            if normalized_input == "/model":
+                try:
+                    requested_model = select_model(MODELS, ui)
+                except (KeyboardInterrupt, EOFError):
+                    ui.show_notice("Model", "Model selection cancelled.")
+                    continue
+                if requested_model == selected_model:
+                    ui.show_notice("Model", f"{selected_model} is already active.", "36")
+                    continue
+                if not confirm_model_switch(requested_model, ui):
+                    ui.show_notice("Model", "Model switch cancelled.")
+                    continue
+                selected_model = requested_model
+                messages = new_conversation()
+                ui.show_notice(
+                    "Model",
+                    f"Switched to {selected_model}. Started a new conversation.",
+                    "32",
+                )
+                continue
+            if normalized_input == "/tools":
+                ui.show_tools()
+                continue
+            if normalized_input == "/tool-activity":
+                mode = ui.choose_tool_activity_mode()
+                if mode is None:
+                    ui.show_notice("Tools", "Tool activity display unchanged.")
+                    continue
+                ui.tool_activity_mode = mode
+                ui.show_notice("Tools", f"Tool activity display set to {mode}.", "32")
+                continue
+            if normalized_input == "/status":
+                ui.show_notice(
+                    "Status",
+                    "\n".join([
+                        f"Model          {selected_model}",
+                        f"Server         {HOST}",
+                        f"Workspace      {Path.cwd()}",
+                        f"Messages       {max(0, len(messages) - 1)} retained",
+                        f"Context limit  {CONTEXT_LENGTH} tokens (heuristic guard)",
+                        f"Tool activity  {ui.tool_activity_mode}",
+                    ]),
+                    "36",
+                )
+                continue
+            if normalized_input == "/help":
+                ui.show_command_help()
+                continue
             turn_start = len(messages)
             messages.append({"role": "user", "content": user_input})
             turn_log = interaction_logger.start_turn(user_input)
