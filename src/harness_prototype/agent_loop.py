@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 from threading import Event
 from time import monotonic
+from uuid import uuid4
 
 from ollama import Client, ResponseError
 
@@ -1677,6 +1678,7 @@ class AgentRuntime:
         self.access = access or WorkspaceAccess(self.workspace)
         self.interaction_logger = interaction_logger
         self.turn_runner = turn_runner
+        self.conversation_id = str(uuid4())
         self.messages: list = []
         self.capability_state = CapabilityState()
         self.skill_catalog = discover_skills(self.workspace)
@@ -1698,6 +1700,16 @@ class AgentRuntime:
     def change_model(self, model: str) -> None:
         """Select a model and start a fresh conversation for it."""
         self.model = model
+        self.start_conversation()
+
+    def change_workspace(self, workspace: Path) -> None:
+        """Select a workspace and reset conversation-scoped state and access."""
+        resolved = workspace.expanduser().resolve()
+        if not resolved.is_dir():
+            raise ValueError("Workspace must be an existing directory.")
+        self.workspace = resolved
+        self.access = WorkspaceAccess(resolved)
+        self.skill_catalog = discover_skills(resolved)
         self.start_conversation()
 
     def list_skills(self) -> dict:
@@ -1746,15 +1758,18 @@ class AgentRuntime:
         on_tool: Callable[[str], None] | None = None,
         on_permission: PermissionPrompt | None = None,
         on_approval: ApprovalPrompt | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ) -> RuntimeTurnResult:
         """Run one user turn and return its presentation-independent outcome."""
         self._interrupt_requested.clear()
         turn_start = len(self.messages)
         self.messages.append({"role": "user", "content": user_input})
-        turn_log = (
-            self.interaction_logger.start_turn(user_input)
-            if self.interaction_logger else None
-        )
+        turn_log = self.interaction_logger.start_turn(user_input) if self.interaction_logger else None
+        if on_event:
+            if turn_log:
+                turn_log.observer = on_event
+            else:
+                turn_log = TurnLog(self.conversation_id, user_input, on_event)
         outcome = "failed"
         error_detail = None
         try:
