@@ -8,9 +8,16 @@ from inspect import Parameter, getdoc, signature
 from pathlib import Path
 from types import UnionType
 from typing import get_args, get_origin
+from urllib.parse import urlsplit
 
 from .approval import ToolCategory
 from .config import CHECKS, SERVICES
+from .documentation import (
+    DOCUMENTATION_TIMEOUT_SECONDS,
+    MAX_DOCUMENTATION_BYTES,
+    MAX_DOCUMENTATION_CHARACTERS,
+    fetch_documentation,
+)
 from .execution import (
     MAX_COMMAND_ARGUMENTS,
     MAX_TEST_TARGETS,
@@ -88,6 +95,15 @@ def _search_activity(arguments: dict) -> str:
         f"Searching {_argument(arguments, 'path', '.')} for "
         f"{_argument(arguments, 'text', 'text')}"
     )
+
+
+def _documentation_activity(arguments: dict) -> str:
+    """Describe a documentation request without displaying query parameters."""
+    raw_url = _argument(arguments, "url", "an HTTPS page")
+    if not isinstance(raw_url, str):
+        return "Fetching documentation"
+    hostname = urlsplit(raw_url).hostname
+    return f"Fetching documentation from {hostname or 'an HTTPS host'}"
 
 
 def _git_diff_activity(arguments: dict) -> str:
@@ -425,6 +441,18 @@ TOOL_SPECS = {
     "read_file": ToolSpec(
         read_file, ToolCategory.READ_ONLY, _path_activity("Reading"),
         material_limits=("1 MiB UTF-8 files", "1-200 lines", "8,000 output characters"),
+    ),
+    "fetch_documentation": ToolSpec(
+        fetch_documentation,
+        ToolCategory.NETWORK,
+        _documentation_activity,
+        material_limits=(
+            "public HTTPS URLs only",
+            f"{DOCUMENTATION_TIMEOUT_SECONDS}-second timeout",
+            f"{MAX_DOCUMENTATION_BYTES // 1024} KiB response",
+            f"{MAX_DOCUMENTATION_CHARACTERS:,} readable characters",
+            "HTML and plain text only",
+        ),
     ),
     "git_status": ToolSpec(
         git_status, ToolCategory.READ_ONLY, _git_status_activity,
