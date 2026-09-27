@@ -11,8 +11,10 @@ from ollama import Client, ResponseError
 from .access import AccessChoice, WorkspaceAccess
 from .approval import ApprovalPromptResult, ApprovalRequest
 from .agent_loop import (
+    CapabilityState,
     ContextBudgetError,
     EmptyModelResponseError,
+    compose_request,
     estimate_context_usage,
     new_conversation,
     run_turn,
@@ -74,6 +76,8 @@ class TerminalUI:
         self.approved_command_executables: set[str] = set()
         self.documentation_access_approved = False
         self.tool_activity_mode = "full"
+        self._prompt_render_rows = 0
+        self._prompt_cursor_row = 0
 
     def style(self, text: str, code: str) -> str:
         """Apply an ANSI style when terminal color support is available."""
@@ -174,24 +178,61 @@ class TerminalUI:
         finish: bool = False,
     ) -> None:
         """Redraw editable input and command suggestions beneath it."""
-        print("\r\033[J", end="")
-        print(f"{prompt_text}{buffer}", end="")
-        if finish:
-            print(flush=True)
-            return
+        if self._prompt_render_rows:
+            if self._prompt_cursor_row:
+                print(f"\033[{self._prompt_cursor_row}A", end="")
+            print("\r\033[J", end="")
+        width = max(12, shutil.get_terminal_size(fallback=(80, 24)).columns)
+        input_lines, cursor_row, cursor_column = self._prompt_input_layout(
+            prompt_text, buffer, cursor, width,
+        )
+        rendered_lines = list(input_lines)
         for index, command in enumerate(matches):
             marker = ">" if index == selected else " "
             style_code = "1;32" if index == selected else "2;36"
             description = COMMAND_DESCRIPTIONS[command]
-            print()
-            print(
-                self.style(f"  {marker} {command:<16} {description}", style_code),
-                end="",
+            suggestion = _terminal_text(
+                f"  {marker} {command:<16} {description}", width - 1,
             )
-        if matches:
-            print(f"\033[{len(matches)}A", end="")
-        print(f"\r\033[{7 + cursor}C", end="")
+            rendered_lines.append(self.style(suggestion, style_code))
+        print("\n".join(rendered_lines), end="")
+        current_row = len(rendered_lines) - 1
+        rows_up = current_row - cursor_row
+        if rows_up:
+            print(f"\033[{rows_up}A", end="")
+        print("\r", end="")
+        if cursor_column:
+            print(f"\033[{cursor_column}C", end="")
+        self._prompt_render_rows = len(rendered_lines)
+        self._prompt_cursor_row = cursor_row
+        if finish:
+            print("\033[J", flush=True)
+            self._prompt_render_rows = 0
+            self._prompt_cursor_row = 0
+            return
         print(end="", flush=True)
+
+    @staticmethod
+    def _prompt_input_layout(
+        prompt_text: str,
+        buffer: str,
+        cursor: int,
+        terminal_width: int,
+    ) -> tuple[list[str], int, int]:
+        """Wrap editable input and locate its cursor without terminal auto-wrap."""
+        prefix_width = len("You  > ")
+        content_width = max(1, terminal_width - prefix_width - 1)
+        chunks = [
+            buffer[index:index + content_width]
+            for index in range(0, len(buffer), content_width)
+        ]
+        if not chunks or len(buffer) % content_width == 0:
+            chunks.append("")
+        continuation = " " * prefix_width
+        lines = [prompt_text + chunks[0]]
+        lines.extend(continuation + chunk for chunk in chunks[1:])
+        cursor_row, cursor_offset = divmod(cursor, content_width)
+        return lines, cursor_row, prefix_width + cursor_offset
 
     def begin_response(self) -> None:
         """Open an assistant response section if one is not already active."""
@@ -746,6 +787,7 @@ def main() -> None:
     client = Client(host=HOST)
     access = WorkspaceAccess(Path.cwd())
     messages = new_conversation()
+    capability_state = CapabilityState()
     interaction_logger = InteractionLogger(LOG_DIRECTORY, LOG_REDACT_VALUES)
     ui.show_header(selected_model, HOST, Path.cwd())
 
@@ -765,6 +807,7 @@ def main() -> None:
                 break
             if normalized_input in {"clear", "/clear"}:
                 messages = new_conversation()
+                capability_state = CapabilityState()
                 ui.show_notice("Reset", "Conversation cleared.", "32")
                 continue
             if normalized_input == "/model":
@@ -781,6 +824,7 @@ def main() -> None:
                     continue
                 selected_model = requested_model
                 messages = new_conversation()
+                capability_state = CapabilityState()
                 ui.show_notice(
                     "Model",
                     f"Switched to {selected_model}. Started a new conversation.",
@@ -799,7 +843,8 @@ def main() -> None:
                 ui.show_notice("Tools", f"Tool activity display set to {mode}.", "32")
                 continue
             if normalized_input == "/status":
-                context_used = estimate_context_usage(messages)
+                composition = compose_request(messages, capability_state)
+                context_used = estimate_context_usage(messages, capability_state)
                 context_percent = context_used / CONTEXT_LENGTH
                 ui.show_notice(
                     "Status",
@@ -810,6 +855,14 @@ def main() -> None:
                         f"  Messages       {max(0, len(messages) - 1)} retained",
                         f"  Context used   ~{context_used} tokens ({context_percent:.0%})",
                         f"  Context limit  {CONTEXT_LENGTH} tokens (heuristic guard)",
+                        "  Capabilities   " + (
+                            ", ".join(composition.active_groups) or "none active"
+                        ),
+                        f"  Model tools    {', '.join(composition.tool_names)}",
+                        "  Context chars  " + ", ".join(
+                            f"{name}={count}"
+                            for name, count in composition.character_counts.items()
+                        ),
                         f"  Tool activity  {ui.tool_activity_mode}",
                     ]),
                     "36",
@@ -834,6 +887,7 @@ def main() -> None:
                 on_permission=ui.request_directory_access,
                 turn_log=turn_log,
                 on_approval=ui.request_tool_approval,
+                capability_state=capability_state,
             ) or "success"
                 ui.finish_response()
             except ContextBudgetError as error:
