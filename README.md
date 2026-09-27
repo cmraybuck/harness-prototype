@@ -159,7 +159,7 @@ prefix is submitted to the model normally. The initial commands are:
 | `/model` | Selects a configured model, warns that context will reset, and starts a new conversation after confirmation. |
 | `/tools` | Lists the registered model tools and concise descriptions. |
 | `/tool-activity` | Selects full, compact, or hidden routine tool dialogue. Permissions and errors remain visible in every mode. |
-| `/status` | Shows the model, server, workspace, retained message count, context limit, and tool display mode. |
+| `/status` | Shows the model, server, workspace, retained message count, estimated context usage, context limit, and tool display mode. |
 | `/help` | Shows command descriptions and palette controls. |
 | `/exit` | Ends the session. |
 

@@ -514,6 +514,23 @@ class MainTests(unittest.TestCase):
         ]
         self.assertNotIn("before", retained_user_messages)
 
+    def test_status_shows_estimated_context_usage(self) -> None:
+        """Show the session context estimate alongside the configured limit."""
+        with patch("builtins.input", side_effect=["/status", "/exit"]), patch(
+            "builtins.print"
+        ) as output, patch(
+            "harness_prototype.main.select_model", return_value="test-model"
+        ), patch("harness_prototype.main.Client"), patch(
+            "harness_prototype.main.estimate_context_usage", return_value=1024
+        ), patch(
+            "harness_prototype.main.CONTEXT_LENGTH", 4096
+        ):
+            main()
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Status     \n  Model", rendered)
+        self.assertIn("Context used   ~1024 tokens (25%)", rendered)
+        self.assertIn("Context limit  4096 tokens", rendered)
+
     def test_unrecognized_slash_input_is_sent_to_the_model(self) -> None:
         """Keep paths and prose beginning with a slash available as normal prompts."""
         snapshots = []
