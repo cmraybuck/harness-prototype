@@ -44,6 +44,7 @@ class Settings:
     checks: dict[str, CheckConfig]
     test_timeout_seconds: int
     test_output_limit: int
+    command_allowed_executables: tuple[str, ...]
     log_directory: Path
     log_redact_values: tuple[str, ...]
     approval_policies: dict[ToolCategory, ApprovalPolicy]
@@ -122,6 +123,29 @@ def load_settings(
         ):
             raise ValueError(f"{setting} commands must be nonempty JSON arrays of strings.")
         return tuple(arguments)
+
+    def executable_allowlist() -> tuple[str, ...]:
+        """Parse unique bare executable names allowed for ad hoc commands."""
+        setting = "HARNESS_COMMAND_ALLOWED_EXECUTABLES"
+        names = tuple(dict.fromkeys(
+            name.strip().casefold() for name in value(
+                setting,
+                "git,uv,python,python3,pytest,ruff,mypy,node,npm,npx,cargo,go,dotnet",
+            ).split(",") if name.strip()
+        ))
+        if not names or any(
+            Path(name).name != name
+            or "/" in name
+            or "\\" in name
+            or name in {".", ".."}
+            or any(character.isspace() for character in name)
+            or any(not character.isprintable() for character in name)
+            for name in names
+        ):
+            raise ValueError(
+                f"{setting} must contain comma-separated bare executable names."
+            )
+        return names
 
     def configured_checks() -> dict[str, CheckConfig]:
         """Parse exact check and target names into shell-free command arrays."""
@@ -287,6 +311,7 @@ def load_settings(
         checks=configured_checks(),
         test_timeout_seconds=positive_integer("HARNESS_TEST_TIMEOUT_SECONDS", "120"),
         test_output_limit=positive_integer("HARNESS_TEST_OUTPUT_LIMIT", "12000"),
+        command_allowed_executables=executable_allowlist(),
         log_directory=log_directory.resolve(),
         log_redact_values=tuple(str(values[name]) for name in redact_names),
         approval_policies=approval_policies,
@@ -312,3 +337,4 @@ TARGETED_TEST_COMMAND = _settings.targeted_test_command
 CHECKS = _settings.checks
 TEST_TIMEOUT_SECONDS = _settings.test_timeout_seconds
 TEST_OUTPUT_LIMIT = _settings.test_output_limit
+COMMAND_ALLOWED_EXECUTABLES = _settings.command_allowed_executables

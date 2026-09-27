@@ -11,7 +11,7 @@ from typing import get_args, get_origin
 
 from .approval import ToolCategory
 from .config import CHECKS
-from .execution import MAX_TEST_TARGETS, run_checks, run_tests
+from .execution import MAX_COMMAND_ARGUMENTS, MAX_TEST_TARGETS, run_checks, run_command, run_tests
 from .files import (
     MAX_FILE_CHANGES,
     apply_file_changes,
@@ -156,6 +156,31 @@ RUN_CHECKS_SCHEMA = {
     },
 }
 
+RUN_COMMAND_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_command",
+        "description": (
+            "Run one shell-free engineering command in the active workspace. The "
+            "executable must be configured as allowed; shells are always denied. "
+            "This broad capability executes project code and requires execution approval."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["command"],
+            "properties": {
+                "command": {
+                    "type": "array", "minItems": 1,
+                    "maxItems": MAX_COMMAND_ARGUMENTS,
+                    "items": {"type": "string"},
+                    "description": "Bare executable name followed by separate arguments; no shell syntax.",
+                },
+            },
+        },
+    },
+}
+
 SEARCH_PROJECT_SCHEMA = {
     "type": "function",
     "function": {
@@ -251,6 +276,16 @@ TOOL_SPECS = {
         model_schema=RUN_CHECKS_SCHEMA,
         material_limits=(
             "configured commands only", "optional configured target only",
+            "configured timeout and output bounds",
+        ),
+    ),
+    "run_command": ToolSpec(
+        run_command,
+        ToolCategory.EXECUTION,
+        model_schema=RUN_COMMAND_SCHEMA,
+        material_limits=(
+            "active workspace working directory", "configured executable allowlist",
+            "shell executables always denied", "1-100 arguments",
             "configured timeout and output bounds",
         ),
     ),

@@ -50,6 +50,7 @@ class TerminalUI:
         self.use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
         self.response_open = False
         self.approved_edit_files: set[Path] = set()
+        self.approved_command_executables: set[str] = set()
 
     def style(self, text: str, code: str) -> str:
         """Apply an ANSI style when terminal color support is available."""
@@ -243,15 +244,27 @@ class TerminalUI:
     def request_tool_approval(self, request: ApprovalRequest) -> ApprovalPromptResult:
         """Ask whether one summarized ask-first operation may execute."""
         edit_targets = _file_edit_targets(request)
+        command_executable = _command_executable(request)
         if edit_targets and set(edit_targets).issubset(self.approved_edit_files):
             self.show_permission_receipt(_tool_approval_receipt(request, True, reused=True))
             return ApprovalPromptResult(True, "session_file_grant")
+        if command_executable in self.approved_command_executables:
+            self.show_permission_receipt(_tool_approval_receipt(request, True, reused=True))
+            return ApprovalPromptResult(True, "session_command_grant")
 
-        options = ["Allow once"]
+        options = [
+            "Allow this command once"
+            if command_executable is not None
+            else "Allow once"
+        ]
         if edit_targets:
             noun = "this file" if len(edit_targets) == 1 else "these files"
             options.append(f"Allow all edits to {noun} for this session")
-        options.append("Deny")
+        if command_executable is not None:
+            options.append(
+                f"Allow all {_terminal_text(command_executable, 80)} commands for this session"
+            )
+        options.append("Deny this command" if command_executable is not None else "Deny")
         try:
             selected = self.choose_option(
                 "Tool permission",
@@ -262,13 +275,24 @@ class TerminalUI:
         except (KeyboardInterrupt, EOFError):
             selected = len(options) - 1
         allowed = selected < len(options) - 1
-        session_grant = bool(edit_targets) and selected == 1
-        if session_grant:
+        file_session_grant = bool(edit_targets) and selected == 1
+        command_session_grant = command_executable is not None and selected == 1
+        if file_session_grant:
             self.approved_edit_files.update(edit_targets)
+        if command_session_grant:
+            self.approved_command_executables.add(command_executable)
         self.show_permission_receipt(
-            _tool_approval_receipt(request, allowed, session_grant=session_grant)
+            _tool_approval_receipt(
+                request,
+                allowed,
+                session_grant=file_session_grant or command_session_grant,
+            )
         )
-        source = "user_session_grant" if session_grant else "user"
+        source = (
+            "user_session_grant"
+            if file_session_grant or command_session_grant
+            else "user"
+        )
         return ApprovalPromptResult(allowed, source)
 
     def show_goodbye(self) -> None:
@@ -332,6 +356,14 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
             lines.append(f"Target     {_terminal_text(target)}")
         lines.append(f"Timeout    {TEST_TIMEOUT_SECONDS} seconds")
         return lines
+    if request.tool_name == "run_command" and isinstance(request.arguments, dict):
+        command = request.arguments.get("command")
+        if isinstance(command, list) and command:
+            lines.append(f"Executable  {_terminal_text(command[0])}")
+            lines.append(f"Arguments   {max(0, len(command) - 1)}")
+        lines.append(f"Directory   {_terminal_text(Path.cwd())}")
+        lines.append(f"Timeout     {TEST_TIMEOUT_SECONDS} seconds")
+        return lines
     if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
         return lines
 
@@ -361,6 +393,19 @@ def _file_edit_targets(request: ApprovalRequest) -> list[Path] | None:
     return targets if isinstance(targets, list) else None
 
 
+def _command_executable(request: ApprovalRequest) -> str | None:
+    """Return the exact normalized executable eligible for a session grant."""
+    if request.tool_name != "run_command" or not isinstance(request.arguments, dict):
+        return None
+    command = request.arguments.get("command")
+    if not isinstance(command, list) or not command or not isinstance(command[0], str):
+        return None
+    executable = command[0]
+    if not executable or any(not character.isprintable() for character in executable):
+        return None
+    return executable.casefold()
+
+
 def _tool_approval_receipt(
     request: ApprovalRequest,
     allowed: bool,
@@ -386,6 +431,16 @@ def _tool_approval_receipt(
         if isinstance(target, str):
             scope += f" target {_terminal_text(target)}"
         return f"{decision} {scope}."
+    if request.tool_name == "run_command" and isinstance(request.arguments, dict):
+        command = request.arguments.get("command")
+        executable = command[0] if isinstance(command, list) and command else "command"
+        if reused:
+            return f"Used existing command access for {_terminal_text(executable)}."
+        if session_grant:
+            return (
+                f"Allowed all {_terminal_text(executable)} commands for this session."
+            )
+        return f"{decision} command {_terminal_text(executable)} in the active workspace."
     if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
         changes = request.arguments.get("changes")
         if isinstance(changes, list):

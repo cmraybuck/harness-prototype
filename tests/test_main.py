@@ -171,6 +171,61 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("ruff", rendered)
         self.assertIn("Allowed check lint target source", rendered)
 
+    def test_command_approval_summarizes_scope_without_dumping_arguments(self) -> None:
+        """Show command identity and bounds while keeping argument payload concise."""
+        request = ApprovalRequest(
+            "run_command",
+            {"command": ["git", "show", "secret-looking-revision"]},
+            ToolCategory.EXECUTION,
+        )
+        with patch.object(
+            TerminalUI, "_read_key", return_value="confirm"
+        ), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(request))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("git", rendered)
+        self.assertIn("Arguments", rendered)
+        self.assertIn("Directory", rendered)
+        self.assertIn("Timeout", rendered)
+        self.assertNotIn("secret-looking-revision", rendered)
+        self.assertIn("Allowed command git in the active workspace", rendered)
+
+    def test_command_session_grant_is_reused_for_the_same_executable(self) -> None:
+        """Reuse an executable grant while continuing to prompt for other commands."""
+        ui = TerminalUI()
+        git_request = ApprovalRequest(
+            "run_command", {"command": ["git", "status"]}, ToolCategory.EXECUTION,
+        )
+        with patch.object(ui, "_read_key", side_effect=["down", "confirm"]), patch(
+            "builtins.print"
+        ) as output:
+            decision = ui.request_tool_approval(git_request)
+        self.assertTrue(decision)
+        self.assertEqual(decision.source, "user_session_grant")
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Allow all git commands for this session", rendered)
+        self.assertIn("Allowed all git commands for this session", rendered)
+
+        with patch.object(
+            ui, "_read_key", side_effect=AssertionError("unexpected prompt")
+        ), patch("builtins.print") as output:
+            reused = ui.request_tool_approval(ApprovalRequest(
+                "run_command", {"command": ["GIT", "diff"]}, ToolCategory.EXECUTION,
+            ))
+        self.assertTrue(reused)
+        self.assertEqual(reused.source, "session_command_grant")
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Used existing command access for GIT", rendered)
+
+        other_request = ApprovalRequest(
+            "run_command", {"command": ["python", "--version"]},
+            ToolCategory.EXECUTION,
+        )
+        with patch.object(ui, "_read_key", side_effect=["down", "down", "confirm"]), patch(
+            "builtins.print"
+        ):
+            self.assertFalse(ui.request_tool_approval(other_request))
+
     def test_interactive_permission_uses_and_restores_alternate_screen(self) -> None:
         """Keep an interactive permission screen out of conversation scrollback."""
         ui = TerminalUI()

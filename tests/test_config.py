@@ -35,6 +35,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.targeted_test_command[-1], "{targets}")
         self.assertEqual(settings.checks, {})
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (120, 12000))
+        self.assertIn("git", settings.command_allowed_executables)
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
         self.assertEqual(settings.log_redact_values, ())
         self.assertEqual(settings.approval_policies[ToolCategory.READ_ONLY], ApprovalPolicy.ALWAYS_ALLOW)
@@ -58,6 +59,7 @@ class ConfigTests(unittest.TestCase):
                 'HARNESS_TARGETED_TEST_COMMAND=["python","-m","pytest","{targets}"]\n'
                 'HARNESS_CHECKS={"lint":{"command":["ruff","check","."],"targets":{"source":["ruff","check","src"]}}}\n'
                 'HARNESS_TEST_TIMEOUT_SECONDS=45\nHARNESS_TEST_OUTPUT_LIMIT=9000\n'
+                'HARNESS_COMMAND_ALLOWED_EXECUTABLES=git,custom-tool\n'
                 'HARNESS_TEMPERATURE=0.3\nHARNESS_OLLAMA_HOST=http://localhost:1234\n',
                 encoding="utf-8",
             )
@@ -78,6 +80,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.checks["lint"].command, ("ruff", "check", "."))
         self.assertEqual(settings.checks["lint"].targets["source"], ("ruff", "check", "src"))
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (45, 9000))
+        self.assertEqual(settings.command_allowed_executables, ("git", "custom-tool"))
         self.assertEqual(settings.temperature, 0.3)
         self.assertEqual(settings.host, "http://localhost:1234")
 
@@ -97,6 +100,9 @@ class ConfigTests(unittest.TestCase):
             "HARNESS_CONSECUTIVE_TOOL_FAILURE_LIMIT": ["-1", "1.5"],
             "HARNESS_TEST_TIMEOUT_SECONDS": ["0", "1.5"],
             "HARNESS_TEST_OUTPUT_LIMIT": ["-1", "false"],
+            "HARNESS_COMMAND_ALLOWED_EXECUTABLES": [
+                "", " , ", "../tool", "tools/runner", "tools\\runner", "bad tool",
+            ],
             "HARNESS_TEMPERATURE": ["nan", "inf", "-0.1", "3"],
             "HARNESS_MODEL": ["", " "],
             "HARNESS_MODELS": ["", " ", ", ,"],
