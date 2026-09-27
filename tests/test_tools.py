@@ -31,6 +31,7 @@ class ToolDispatchTests(unittest.TestCase):
                 "get_location", "list_files", "find_files", "search_project",
                 "read_file", "git_status", "git_diff", "apply_file_changes",
                 "run_tests", "run_checks", "run_command",
+                "install_dependencies",
                 "detect_project_technologies",
             },
         )
@@ -42,8 +43,12 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(TOOL_CATEGORIES["run_tests"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["run_checks"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["run_command"], ToolCategory.EXECUTION)
+        self.assertEqual(
+            TOOL_CATEGORIES["install_dependencies"], ToolCategory.EXECUTION
+        )
         read_only_tools = set(AVAILABLE_TOOLS) - {
             "apply_file_changes", "run_tests", "run_checks", "run_command",
+            "install_dependencies",
         }
         self.assertEqual(
             {TOOL_CATEGORIES[name] for name in read_only_tools},
@@ -221,6 +226,7 @@ class ToolDispatchTests(unittest.TestCase):
                 successful_arguments["run_tests"] = {}
                 successful_arguments["run_checks"] = {"name": "lint"}
                 successful_arguments["run_command"] = {"command": ["git", "status"]}
+                successful_arguments["install_dependencies"] = {}
                 def fake_run_tests(targets=None):
                     """Return a deterministic successful execution result."""
                     return {
@@ -243,10 +249,17 @@ class ToolDispatchTests(unittest.TestCase):
                         "ok": True, "error": None, "complete": True,
                         "truncated": False,
                     }
+                def fake_install_dependencies(path="."):
+                    """Return a deterministic successful dependency result."""
+                    return {
+                        "ok": True, "error": None, "complete": True,
+                        "truncated": False,
+                    }
                 with patch.dict(AVAILABLE_TOOLS, {
                     "run_tests": fake_run_tests,
                     "run_checks": fake_run_checks,
                     "run_command": fake_run_command,
+                    "install_dependencies": fake_install_dependencies,
                 }):
                     for name in AVAILABLE_TOOLS:
                         with self.subTest(name=name, outcome="success"):

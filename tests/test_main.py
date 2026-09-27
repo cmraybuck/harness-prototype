@@ -190,6 +190,23 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("secret-looking-revision", rendered)
         self.assertIn("Allowed command git in the active workspace", rendered)
 
+    def test_dependency_approval_shows_project_scope_and_timeout(self) -> None:
+        """Summarize dependency changes without claiming a manager before detection."""
+        request = ApprovalRequest(
+            "install_dependencies", {"path": "client"}, ToolCategory.EXECUTION,
+        )
+        with patch.object(
+            TerminalUI, "_read_key", return_value="confirm"
+        ), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(request))
+        rendered = " ".join(
+            str(call.args[0]) for call in output.call_args_list if call.args
+        )
+        self.assertIn("client", rendered)
+        self.assertIn("Directory", rendered)
+        self.assertIn("Timeout", rendered)
+        self.assertIn("Allowed dependency installation for client", rendered)
+
     def test_command_session_grant_is_reused_for_the_same_executable(self) -> None:
         """Reuse an executable grant while continuing to prompt for other commands."""
         ui = TerminalUI()
@@ -249,9 +266,13 @@ class MainTests(unittest.TestCase):
             {"changes": [{"action": "create", "path": unsafe_path, "content": "safe"}]},
             ToolCategory.WRITE,
         )
-        with patch.object(TerminalUI, "_read_key", side_effect=["down", "confirm"]), patch(
-            "builtins.print"
-        ) as output:
+        with patch(
+            "harness_prototype.main.sys.stdin", isatty=Mock(return_value=False)
+        ), patch(
+            "harness_prototype.main.sys.stdout", isatty=Mock(return_value=False)
+        ), patch.object(
+            TerminalUI, "_read_key", side_effect=["down", "confirm"]
+        ), patch("builtins.print") as output:
             self.assertFalse(request_tool_approval(request))
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertNotIn("\033[2J", rendered)

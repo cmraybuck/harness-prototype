@@ -364,6 +364,11 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
         lines.append(f"Directory   {_terminal_text(Path.cwd())}")
         lines.append(f"Timeout     {TEST_TIMEOUT_SECONDS} seconds")
         return lines
+    if request.tool_name == "install_dependencies" and isinstance(request.arguments, dict):
+        lines.append(f"Project     {_terminal_text(request.arguments.get('path', '.'))}")
+        lines.append(f"Directory   {_terminal_text(Path.cwd())}")
+        lines.append(f"Timeout     {TEST_TIMEOUT_SECONDS} seconds")
+        return lines
     if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
         return lines
 
@@ -441,6 +446,9 @@ def _tool_approval_receipt(
                 f"Allowed all {_terminal_text(executable)} commands for this session."
             )
         return f"{decision} command {_terminal_text(executable)} in the active workspace."
+    if request.tool_name == "install_dependencies" and isinstance(request.arguments, dict):
+        path = _terminal_text(request.arguments.get("path", "."))
+        return f"{decision} dependency installation for {path}."
     if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
         changes = request.arguments.get("changes")
         if isinstance(changes, list):
