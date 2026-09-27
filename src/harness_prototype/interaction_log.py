@@ -1,5 +1,6 @@
 """Append-only JSONL interaction logging with configurable redaction."""
 
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -17,7 +18,12 @@ def utc_timestamp() -> str:
 class TurnLog:
     """Accumulate ordered events for one user turn before persistence."""
 
-    def __init__(self, session_id: str, user_prompt: str) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        user_prompt: str,
+        observer: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         """Create stable identifiers and timing state for a new turn."""
         self.session_id = session_id
         self.turn_id = str(uuid4())
@@ -25,15 +31,19 @@ class TurnLog:
         self.started_monotonic = monotonic()
         self.user_prompt = user_prompt
         self.events: list[dict[str, Any]] = []
+        self.observer = observer
 
     def add_event(self, event_type: str, **fields: Any) -> None:
         """Append a timestamped event while preserving observation order."""
-        self.events.append({
+        event = {
             "sequence": len(self.events) + 1,
             "timestamp": utc_timestamp(),
             "type": event_type,
             **deepcopy(fields),
-        })
+        }
+        self.events.append(event)
+        if self.observer:
+            self.observer(deepcopy(event))
 
     def record(self, outcome: str, error: str | None = None) -> dict[str, Any]:
         """Build the complete versioned JSON object for this turn."""

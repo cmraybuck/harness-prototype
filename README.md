@@ -537,6 +537,7 @@ before sharing them.
 | `src/harness_prototype/main.py` | Terminal input/output adapter and application entry point |
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
 | `src/harness_prototype/agent_loop.py` | Reusable conversation runtime, model streaming, context checks, tool exchanges, and recovery |
+| `src/harness_prototype/application_service.py` | Versioned loopback API, streamed turn events, permission coordination, and desktop-host lifecycle seam |
 | `src/harness_prototype/documentation.py` | HTTPS documentation retrieval, URL policy, bounds, and text extraction |
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
@@ -578,6 +579,41 @@ generated definitions sent to Ollama. Derived registry views supply
 schemas, policy lookup, and dispatch; `execute_tool` is internal code, not an
 additional model tool. The application uses Ollama directly; LangGraph, IDE
 integration, and training are future work.
+
+### Local application service
+
+`DesktopServiceHost` exposes `AgentRuntime` to an installed desktop client without
+moving Ollama or tool execution into that client. It binds to `127.0.0.1` on an
+OS-assigned port by default; a non-loopback bind is rejected unless the embedding
+host explicitly passes `allow_remote=True`. The desktop host owns `start()`,
+`is_ready()`, `address`, and `stop()` so normal users do not browse to or manually
+configure the service. Runtime construction is injectable, allowing a later
+platform host to retain the contract with a different lifecycle or local transport.
+
+The version-one HTTP operations are:
+
+| Operation | Purpose |
+| --- | --- |
+| `GET /v1/health` | Report listener readiness. |
+| `GET /v1/capabilities` | List configured models, backend tools, operations, events, and request limits. |
+| `POST /v1/conversations` | Create an in-memory conversation with optional `model` and `workspace` strings. |
+| `GET /v1/conversations/{id}` | Read the selected model and workspace. |
+| `PATCH /v1/conversations/{id}` | Select one configured `model` or existing `workspace`; either resets conversation context. |
+| `POST /v1/conversations/{id}/turns` | Submit one nonempty `message` and receive an NDJSON event stream. Concurrent turns return `conversation_busy`. |
+| `POST /v1/conversations/{id}/turns/cancel` | Cooperatively cancel the active turn. |
+| `POST /v1/permissions/{id}` | Resolve a pending request with one of the choices advertised in its event. |
+
+Every event carries `api_version`, stable `conversation_id` and `turn_id`, and a
+monotonic per-turn `sequence`. Event types are `turn_started`, `assistant_text`,
+`tool_call`, `tool_result`, `permission_request`, `failure`, `interruption`, and
+`completion`. Tool calls and results share a stable `tool_call_id`; permission
+requests have a stable `permission_request_id` and omit raw tool arguments. A
+disconnected stream requests cooperative cancellation, while completed tool
+outcomes retain the runtime's recovery behavior. Bodies are UTF-8 JSON objects
+capped at 64 KiB. Unanswered permissions deny after five minutes. Protocol failures use
+`{"error":{"code","message","recoverable"}}`; malformed requests leave the
+conversation usable, and backend failures stream `failure` then `completion` so a
+client can reconnect and continue.
 
 ## Verify and extend
 
