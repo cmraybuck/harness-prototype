@@ -1,4 +1,4 @@
-"""Constrained test execution with bounded output and hard time limits."""
+"""Constrained command execution with bounded output and hard time limits."""
 
 import os
 from pathlib import Path
@@ -10,6 +10,7 @@ from typing import BinaryIO
 
 from .config import (
     CHECKS,
+    COMMAND_ALLOWED_EXECUTABLES,
     TARGETED_TEST_COMMAND,
     TEST_COMMAND,
     TEST_OUTPUT_LIMIT,
@@ -19,6 +20,12 @@ from .tool_results import tool_error, tool_success
 
 MAX_TEST_TARGETS = 50
 MAX_TEST_TARGET_LENGTH = 500
+MAX_COMMAND_ARGUMENTS = 100
+MAX_COMMAND_ARGUMENT_LENGTH = 1_000
+DENIED_EXECUTABLES = frozenset({
+    "bash", "cmd", "cmd.exe", "fish", "pwsh", "pwsh.exe", "powershell",
+    "powershell.exe", "sh", "wsl", "wsl.exe", "zsh",
+})
 _TRUNCATION_MARKER = b"\n... output truncated ...\n"
 
 
@@ -150,7 +157,9 @@ def _drain_output(stream: BinaryIO, capture: _BoundedOutput) -> None:
         stream.close()
 
 
-def _run_configured_command(command: list[str], operation: str) -> dict:
+def _run_configured_command(
+    command: list[str], operation: str, *, success_status: str = "passed"
+) -> dict:
     """Execute one validated argument array with shared capture and timeout behavior."""
     workspace = Path.cwd().resolve()
     started = monotonic()
@@ -211,9 +220,65 @@ def _run_configured_command(command: list[str], operation: str) -> dict:
             f"Configured {operation} exceeded the {TEST_TIMEOUT_SECONDS}-second timeout.",
             status="timed_out", **payload,
         )
-    status = "passed" if process.returncode == 0 else "failed"
+    status = success_status if process.returncode == 0 else "failed"
     return tool_success(
         complete=not output_truncated, truncated=output_truncated, status=status, **payload,
+    )
+
+
+def run_command(command: list[str]) -> dict:
+    """Run an allowed shell-free engineering command in the active workspace.
+
+    Args:
+        command: Executable name followed by separate arguments. The executable
+            must be a bare name in ``HARNESS_COMMAND_ALLOWED_EXECUTABLES``.
+
+    Shells and shell interpreters are always denied, even if configured in the
+    allowlist. Arguments are bounded printable strings. The process inherits the
+    harness's OS permissions, but its working directory is fixed to the active
+    workspace and standard input is disabled.
+    """
+    if (
+        not isinstance(command, list)
+        or not command
+        or len(command) > MAX_COMMAND_ARGUMENTS
+        or any(
+            not isinstance(argument, str)
+            or not argument
+            or len(argument) > MAX_COMMAND_ARGUMENT_LENGTH
+            or any(not character.isprintable() for character in argument)
+            for argument in command
+        )
+    ):
+        return tool_error(
+            f"command must contain 1-{MAX_COMMAND_ARGUMENTS} nonempty printable "
+            f"strings of at most {MAX_COMMAND_ARGUMENT_LENGTH} characters.",
+            status="invalid_command",
+        )
+    executable = command[0].casefold()
+    if (
+        Path(executable).name != executable
+        or "/" in executable
+        or "\\" in executable
+        or executable in {".", ".."}
+        or any(character.isspace() for character in executable)
+    ):
+        return tool_error(
+            "The command executable must be a bare name, not a path.",
+            status="disallowed_command",
+        )
+    if executable in DENIED_EXECUTABLES:
+        return tool_error(
+            f"Shell executable '{command[0]}' is always denied.",
+            status="disallowed_command",
+        )
+    if executable not in COMMAND_ALLOWED_EXECUTABLES:
+        return tool_error(
+            f"Executable '{command[0]}' is not in HARNESS_COMMAND_ALLOWED_EXECUTABLES.",
+            status="disallowed_command",
+        )
+    return _run_configured_command(
+        command, f"command '{command[0]}'", success_status="succeeded"
     )
 
 

@@ -30,7 +30,7 @@ class ToolDispatchTests(unittest.TestCase):
             {
                 "get_location", "list_files", "find_files", "search_project",
                 "read_file", "git_status", "git_diff", "apply_file_changes",
-                "run_tests", "run_checks",
+                "run_tests", "run_checks", "run_command",
                 "detect_project_technologies",
             },
         )
@@ -41,8 +41,9 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(TOOL_CATEGORIES["apply_file_changes"], ToolCategory.WRITE)
         self.assertEqual(TOOL_CATEGORIES["run_tests"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["run_checks"], ToolCategory.EXECUTION)
+        self.assertEqual(TOOL_CATEGORIES["run_command"], ToolCategory.EXECUTION)
         read_only_tools = set(AVAILABLE_TOOLS) - {
-            "apply_file_changes", "run_tests", "run_checks",
+            "apply_file_changes", "run_tests", "run_checks", "run_command",
         }
         self.assertEqual(
             {TOOL_CATEGORIES[name] for name in read_only_tools},
@@ -74,6 +75,13 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(
             run_checks_schema["function"]["parameters"]["required"],
             ["name"],
+        )
+        run_command_schema = next(
+            tool for tool in MODEL_TOOLS
+            if isinstance(tool, dict) and tool["function"]["name"] == "run_command"
+        )
+        self.assertEqual(
+            run_command_schema["function"]["parameters"]["required"], ["command"]
         )
         search_schema = next(
             tool for tool in MODEL_TOOLS
@@ -212,6 +220,7 @@ class ToolDispatchTests(unittest.TestCase):
                 }
                 successful_arguments["run_tests"] = {}
                 successful_arguments["run_checks"] = {"name": "lint"}
+                successful_arguments["run_command"] = {"command": ["git", "status"]}
                 def fake_run_tests(targets=None):
                     """Return a deterministic successful execution result."""
                     return {
@@ -228,9 +237,16 @@ class ToolDispatchTests(unittest.TestCase):
                         "complete": True,
                         "truncated": False,
                     }
+                def fake_run_command(command):
+                    """Return a deterministic successful ad hoc command result."""
+                    return {
+                        "ok": True, "error": None, "complete": True,
+                        "truncated": False,
+                    }
                 with patch.dict(AVAILABLE_TOOLS, {
                     "run_tests": fake_run_tests,
                     "run_checks": fake_run_checks,
+                    "run_command": fake_run_command,
                 }):
                     for name in AVAILABLE_TOOLS:
                         with self.subTest(name=name, outcome="success"):

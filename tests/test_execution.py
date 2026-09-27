@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from harness_prototype.config import CheckConfig
-from harness_prototype.execution import run_checks, run_tests
+from harness_prototype.execution import run_checks, run_command, run_tests
 
 
 class TestExecutionTests(unittest.TestCase):
@@ -183,6 +183,68 @@ class TestExecutionTests(unittest.TestCase):
             timed_out = run_checks("lint")
         self.assertFalse(timed_out["ok"])
         self.assertEqual(timed_out["status"], "timed_out")
+
+    def test_allowed_command_runs_in_workspace_without_a_shell(self) -> None:
+        """Execute an allowed argument array with shared process bounds."""
+        process, launch = self._process_factory(0, stdout=b"status output\n")
+        with patch(
+            "harness_prototype.execution.COMMAND_ALLOWED_EXECUTABLES", ("git",)
+        ), patch("harness_prototype.execution.subprocess.Popen", side_effect=launch):
+            result = run_command(["git", "status", "--short"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(process.command, ["git", "status", "--short"])
+        self.assertEqual(process.options["cwd"], self.workspace.resolve())
+        self.assertFalse(process.options["shell"])
+        self.assertEqual(process.options["stdin"], subprocess.DEVNULL)
+
+    def test_disallowed_commands_never_launch(self) -> None:
+        """Reject paths, shells, unknown executables, and malformed arguments."""
+        commands = [
+            ["../runner"], ["powershell", "-Command", "Write-Output hi"],
+            ["unknown-tool"], [], ["git", True],
+        ]
+        with patch(
+            "harness_prototype.execution.COMMAND_ALLOWED_EXECUTABLES",
+            ("git", "powershell"),
+        ), patch("harness_prototype.execution.subprocess.Popen") as launch:
+            for command in commands:
+                with self.subTest(command=command):
+                    result = run_command(command)
+                    self.assertFalse(result["ok"])
+                    self.assertIn(
+                        result["status"], {"invalid_command", "disallowed_command"}
+                    )
+        launch.assert_not_called()
+
+    def test_command_failure_timeout_and_truncation_are_explicit(self) -> None:
+        """Reuse accurate failure, timeout, and bounded-output result fields."""
+        process, launch = self._process_factory(3, stderr=b"failure\n")
+        with patch(
+            "harness_prototype.execution.COMMAND_ALLOWED_EXECUTABLES", ("git",)
+        ), patch("harness_prototype.execution.subprocess.Popen", side_effect=launch):
+            failed = run_command(["git", "status"])
+        self.assertTrue(failed["ok"])
+        self.assertEqual((failed["status"], failed["exit_code"]), ("failed", 3))
+
+        process.wait.side_effect = subprocess.TimeoutExpired("git", 1)
+        with patch(
+            "harness_prototype.execution.COMMAND_ALLOWED_EXECUTABLES", ("git",)
+        ), patch("harness_prototype.execution.TEST_TIMEOUT_SECONDS", 1), patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=launch
+        ), patch("harness_prototype.execution._terminate_process"):
+            timed_out = run_command(["git", "status"])
+        self.assertFalse(timed_out["ok"])
+        self.assertEqual(timed_out["status"], "timed_out")
+
+        _, verbose_launch = self._process_factory(0, stdout=b"x" * 100)
+        with patch(
+            "harness_prototype.execution.COMMAND_ALLOWED_EXECUTABLES", ("git",)
+        ), patch("harness_prototype.execution.TEST_OUTPUT_LIMIT", 40), patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=verbose_launch
+        ):
+            truncated = run_command(["git", "status"])
+        self.assertTrue(truncated["output_truncated"])
+        self.assertFalse(truncated["complete"])
 
 
 if __name__ == "__main__":
