@@ -34,6 +34,7 @@ class ToolDispatchTests(unittest.TestCase):
                 "run_tests", "run_checks", "run_command",
                 "install_dependencies", "start_service", "stop_service",
                 "detect_project_technologies",
+                "fetch_documentation",
             },
         )
 
@@ -49,9 +50,11 @@ class ToolDispatchTests(unittest.TestCase):
         )
         self.assertEqual(TOOL_CATEGORIES["start_service"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["stop_service"], ToolCategory.EXECUTION)
+        self.assertEqual(TOOL_CATEGORIES["fetch_documentation"], ToolCategory.NETWORK)
         read_only_tools = set(AVAILABLE_TOOLS) - {
             "apply_file_changes", "run_tests", "run_checks", "run_command",
             "install_dependencies", "start_service", "stop_service",
+            "fetch_documentation",
         }
         self.assertEqual(
             {TOOL_CATEGORIES[name] for name in read_only_tools},
@@ -254,6 +257,7 @@ class ToolDispatchTests(unittest.TestCase):
                 successful_arguments["install_dependencies"] = {}
                 successful_arguments["start_service"] = {"name": "web"}
                 successful_arguments["stop_service"] = {"handle": "service-handle"}
+                successful_arguments["fetch_documentation"] = {"url": "https://docs.example.com"}
                 def fake_run_tests(targets=None):
                     """Return a deterministic successful execution result."""
                     return {
@@ -294,6 +298,12 @@ class ToolDispatchTests(unittest.TestCase):
                         "ok": True, "error": None, "complete": True,
                         "truncated": False,
                     }
+                def fake_fetch_documentation(url):
+                    """Return a deterministic successful documentation result."""
+                    return {
+                        "ok": True, "error": None, "complete": True,
+                        "truncated": False,
+                    }
                 with patch.dict(AVAILABLE_TOOLS, {
                     "run_tests": fake_run_tests,
                     "run_checks": fake_run_checks,
@@ -301,6 +311,7 @@ class ToolDispatchTests(unittest.TestCase):
                     "install_dependencies": fake_install_dependencies,
                     "start_service": fake_start_service,
                     "stop_service": fake_stop_service,
+                    "fetch_documentation": fake_fetch_documentation,
                 }):
                     for name in AVAILABLE_TOOLS:
                         with self.subTest(name=name, outcome="success"):

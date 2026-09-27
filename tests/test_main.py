@@ -155,6 +155,63 @@ class MainTests(unittest.TestCase):
         self.assertNotIn("uv run", rendered)
         self.assertIn("Allowed 1 test target", rendered)
 
+    def test_documentation_approval_hides_url_payload_and_fails_closed(self) -> None:
+        """Show only the network host and deny an interrupted one-time request."""
+        request = ApprovalRequest(
+            "fetch_documentation",
+            {"url": "https://docs.example.com/reference?token=secret"},
+            ToolCategory.NETWORK,
+        )
+        with patch.object(
+            TerminalUI, "_read_key", side_effect=KeyboardInterrupt,
+        ), patch("builtins.print") as output:
+            self.assertFalse(request_tool_approval(request))
+        rendered = " ".join(
+            str(call.args[0]) for call in output.call_args_list if call.args
+        )
+        self.assertIn("network", rendered)
+        self.assertIn("docs.example.com", rendered)
+        self.assertIn("Timeout", rendered)
+        self.assertNotIn("token", rendered)
+        self.assertNotIn("secret", rendered)
+        self.assertIn("Denied one documentation request", rendered)
+
+    def test_documentation_session_grant_is_reused_for_later_hosts(self) -> None:
+        """Offer clear session access and reuse it for later documentation requests."""
+        ui = TerminalUI()
+        first = ApprovalRequest(
+            "fetch_documentation",
+            {"url": "https://docs.python.org/3/"},
+            ToolCategory.NETWORK,
+        )
+        with patch.object(
+            ui, "_read_key", side_effect=["down", "confirm"],
+        ), patch("builtins.print") as output:
+            decision = ui.request_tool_approval(first)
+        self.assertTrue(decision)
+        self.assertEqual(decision.source, "user_session_grant")
+        rendered = " ".join(
+            str(call.args[0]) for call in output.call_args_list if call.args
+        )
+        self.assertIn("Allow documentation access for this session", rendered)
+        self.assertIn("Allowed documentation access for this session", rendered)
+
+        later = ApprovalRequest(
+            "fetch_documentation",
+            {"url": "https://developer.mozilla.org/en-US/"},
+            ToolCategory.NETWORK,
+        )
+        with patch.object(
+            ui, "_read_key", side_effect=AssertionError("unexpected prompt"),
+        ), patch("builtins.print") as output:
+            reused = ui.request_tool_approval(later)
+        self.assertTrue(reused)
+        self.assertEqual(reused.source, "session_documentation_grant")
+        rendered = " ".join(
+            str(call.args[0]) for call in output.call_args_list if call.args
+        )
+        self.assertIn("Used existing documentation access for this session", rendered)
+
     def test_test_approval_interrupt_denies_and_leaves_receipt(self) -> None:
         """Fail closed when targeted test approval is interrupted."""
         request = ApprovalRequest("run_tests", {}, ToolCategory.EXECUTION)

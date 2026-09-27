@@ -1,9 +1,10 @@
 """Interactive terminal entry point."""
 
 import os
-from pathlib import Path
 import shutil
 import sys
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from ollama import Client, ResponseError
 
@@ -23,6 +24,7 @@ from .config import (
     MODELS,
     TEST_TIMEOUT_SECONDS,
 )
+from .documentation import DOCUMENTATION_TIMEOUT_SECONDS
 from .services import stop_all_services
 from .files import file_change_target_paths
 from .interaction_log import InteractionLogger
@@ -52,6 +54,7 @@ class TerminalUI:
         self.response_open = False
         self.approved_edit_files: set[Path] = set()
         self.approved_command_executables: set[str] = set()
+        self.documentation_access_approved = False
 
     def style(self, text: str, code: str) -> str:
         """Apply an ANSI style when terminal color support is available."""
@@ -246,17 +249,25 @@ class TerminalUI:
         """Ask whether one summarized ask-first operation may execute."""
         edit_targets = _file_edit_targets(request)
         command_executable = _command_executable(request)
+        documentation_request = request.tool_name == "fetch_documentation"
         if edit_targets and set(edit_targets).issubset(self.approved_edit_files):
             self.show_permission_receipt(_tool_approval_receipt(request, True, reused=True))
             return ApprovalPromptResult(True, "session_file_grant")
         if command_executable in self.approved_command_executables:
             self.show_permission_receipt(_tool_approval_receipt(request, True, reused=True))
             return ApprovalPromptResult(True, "session_command_grant")
+        if documentation_request and self.documentation_access_approved:
+            self.show_permission_receipt(_tool_approval_receipt(request, True, reused=True))
+            return ApprovalPromptResult(True, "session_documentation_grant")
 
         options = [
             "Allow this command once"
             if command_executable is not None
-            else "Allow once"
+            else (
+                "Allow this documentation request"
+                if documentation_request
+                else "Allow once"
+            )
         ]
         if edit_targets:
             noun = "this file" if len(edit_targets) == 1 else "these files"
@@ -265,7 +276,17 @@ class TerminalUI:
             options.append(
                 f"Allow all {_terminal_text(command_executable, 80)} commands for this session"
             )
-        options.append("Deny this command" if command_executable is not None else "Deny")
+        if documentation_request:
+            options.append("Allow documentation access for this session")
+        options.append(
+            "Deny this command"
+            if command_executable is not None
+            else (
+                "Deny this documentation request"
+                if documentation_request
+                else "Deny"
+            )
+        )
         try:
             selected = self.choose_option(
                 "Tool permission",
@@ -278,20 +299,27 @@ class TerminalUI:
         allowed = selected < len(options) - 1
         file_session_grant = bool(edit_targets) and selected == 1
         command_session_grant = command_executable is not None and selected == 1
+        documentation_session_grant = documentation_request and selected == 1
         if file_session_grant:
             self.approved_edit_files.update(edit_targets)
         if command_session_grant:
             self.approved_command_executables.add(command_executable)
+        if documentation_session_grant:
+            self.documentation_access_approved = True
         self.show_permission_receipt(
             _tool_approval_receipt(
                 request,
                 allowed,
-                session_grant=file_session_grant or command_session_grant,
+                session_grant=(
+                    file_session_grant
+                    or command_session_grant
+                    or documentation_session_grant
+                ),
             )
         )
         source = (
             "user_session_grant"
-            if file_session_grant or command_session_grant
+            if file_session_grant or command_session_grant or documentation_session_grant
             else "user"
         )
         return ApprovalPromptResult(allowed, source)
@@ -337,6 +365,12 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
         f"Risk       {_terminal_text(request.category.value)}",
         f"Operation  {_terminal_text(request.tool_name)}",
     ]
+    if request.tool_name == "fetch_documentation" and isinstance(request.arguments, dict):
+        raw_url = request.arguments.get("url")
+        hostname = urlsplit(raw_url).hostname if isinstance(raw_url, str) else None
+        lines.append(f"Host       {_terminal_text(hostname or 'invalid URL')}")
+        lines.append(f"Timeout    {DOCUMENTATION_TIMEOUT_SECONDS} seconds")
+        return lines
     if request.tool_name == "run_tests" and isinstance(request.arguments, dict):
         targets = request.arguments.get("targets")
         if targets is None:
@@ -428,6 +462,14 @@ def _tool_approval_receipt(
 ) -> str:
     """Return a compact conversation receipt for a tool permission decision."""
     decision = "Allowed" if allowed else "Denied"
+    if request.tool_name == "fetch_documentation" and isinstance(request.arguments, dict):
+        raw_url = request.arguments.get("url")
+        hostname = urlsplit(raw_url).hostname if isinstance(raw_url, str) else None
+        if reused:
+            return "Used existing documentation access for this session."
+        if session_grant:
+            return "Allowed documentation access for this session."
+        return f"{decision} one documentation request to {_terminal_text(hostname or 'invalid host')}."
     if request.tool_name == "run_tests" and isinstance(request.arguments, dict):
         targets = request.arguments.get("targets")
         if targets is None:
