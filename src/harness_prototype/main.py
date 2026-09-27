@@ -44,6 +44,8 @@ COMMAND_DESCRIPTIONS = {
     "/clear": "Start a fresh conversation with the current model",
     "/model": "Switch models and start a fresh conversation",
     "/tools": "Show the tools available to the agent",
+    "/skills": "List discovered local skills",
+    "/skill": "Activate skills: /skill id[,id] (empty clears)",
     "/tool-activity": "Choose how tool activity appears",
     "/status": "Show the current session settings",
     "/help": "Show slash commands and keyboard controls",
@@ -821,6 +823,32 @@ def main() -> None:
             if normalized_input == "/tools":
                 ui.show_tools()
                 continue
+            if normalized_input == "/skills":
+                catalog = runtime.list_skills()
+                lines = [
+                    f"{item['id']:<24} {item['name']} — {item['description']}"
+                    for item in catalog["skills"]
+                ]
+                if not lines:
+                    lines.append("No valid local skills discovered.")
+                lines.extend(
+                    f"Invalid {item['path']}: {item['error']}"
+                    for item in catalog["diagnostics"]
+                )
+                lines.append("Roots: " + ", ".join(catalog["roots"]))
+                ui.show_notice("Skills", "\n".join(lines), "36")
+                continue
+            if normalized_input == "/skill" or normalized_input.startswith("/skill "):
+                argument = user_input[6:].strip()
+                identifiers = [item.strip() for item in argument.split(",") if item.strip()]
+                activation = runtime.activate_skills(identifiers)
+                if activation["ok"]:
+                    active = activation["active_skills"]
+                    message = "Active skills: " + (", ".join(active) if active else "none")
+                    ui.show_notice("Skills", message, "32")
+                else:
+                    ui.show_notice("Skills", activation["error"], "31")
+                continue
             if normalized_input == "/tool-activity":
                 mode = ui.choose_tool_activity_mode()
                 if mode is None:
@@ -830,10 +858,13 @@ def main() -> None:
                 ui.show_notice("Tools", f"Tool activity display set to {mode}.", "32")
                 continue
             if normalized_input == "/status":
-                composition = compose_request(runtime.messages, runtime.capability_state)
+                composition = compose_request(
+                    runtime.messages, runtime.capability_state, runtime.skill_state
+                )
                 context_used = estimate_context_usage(
                     runtime.messages,
                     runtime.capability_state,
+                    runtime.skill_state,
                 )
                 context_percent = context_used / CONTEXT_LENGTH
                 ui.show_notice(
@@ -847,6 +878,9 @@ def main() -> None:
                         f"  Context limit  {CONTEXT_LENGTH} tokens (heuristic guard)",
                         "  Capabilities   " + (
                             ", ".join(composition.active_groups) or "none active"
+                        ),
+                        "  Skills         " + (
+                            ", ".join(composition.active_skills) or "none active"
                         ),
                         f"  Model tools    {', '.join(composition.tool_names)}",
                         "  Context chars  " + ", ".join(

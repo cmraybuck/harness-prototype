@@ -101,3 +101,15 @@ def get_location(location: str) -> dict:
         return tool_success(name=normalized_name, path=str(path))
     except (OSError, ValueError, RuntimeError) as error:
         return tool_error(str(error), name=normalized_name)
+
+
+def application_skill_directory() -> Path:
+    """Return the platform-appropriate per-user FLUX skill directory."""
+    home = Path.home()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        return base / "FLUX" / "skills"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "FLUX" / "skills"
+    base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
+    return base / "flux" / "skills"
