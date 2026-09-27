@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from harness_prototype.execution import run_tests
+from harness_prototype.config import CheckConfig
+from harness_prototype.execution import run_checks, run_tests
 
 
 class TestExecutionTests(unittest.TestCase):
@@ -130,6 +131,58 @@ class TestExecutionTests(unittest.TestCase):
                     self.assertFalse(result["ok"])
                     self.assertEqual(result["status"], "invalid_target")
         launch.assert_not_called()
+
+    def test_configured_check_and_target_run_without_a_shell(self) -> None:
+        """Select only exact configured commands and reuse bounded execution."""
+        process, launch = self._process_factory(0, stdout=b"clean\n")
+        checks = {
+            "lint": CheckConfig(
+                ("runner", "lint", "."),
+                {"source": ("runner", "lint", "src")},
+            )
+        }
+        with patch("harness_prototype.execution.CHECKS", checks), patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=launch
+        ):
+            result = run_checks("lint", "source")
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(process.command, ["runner", "lint", "src"])
+        self.assertFalse(process.options["shell"])
+        self.assertEqual(process.options["cwd"], self.workspace.resolve())
+
+    def test_unknown_check_and_target_never_launch_a_process(self) -> None:
+        """Reject every name absent from the configured allowlist."""
+        checks = {"lint": CheckConfig(("runner", "lint"), {})}
+        with patch("harness_prototype.execution.CHECKS", checks), patch(
+            "harness_prototype.execution.subprocess.Popen"
+        ) as launch:
+            unknown_check = run_checks("build")
+            unknown_target = run_checks("lint", "source")
+        self.assertEqual(unknown_check["status"], "unknown_check")
+        self.assertEqual(unknown_target["status"], "invalid_target")
+        launch.assert_not_called()
+
+    def test_check_failure_and_timeout_are_recoverable(self) -> None:
+        """Preserve check output and distinguish nonzero completion from timeout."""
+        checks = {"lint": CheckConfig(("runner", "lint"), {})}
+        process, launch = self._process_factory(2, stderr=b"lint failed\n")
+        with patch("harness_prototype.execution.CHECKS", checks), patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=launch
+        ):
+            failed = run_checks("lint")
+        self.assertTrue(failed["ok"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("lint failed", failed["stderr"])
+
+        process.wait.side_effect = subprocess.TimeoutExpired("runner", 1)
+        with patch("harness_prototype.execution.CHECKS", checks), patch(
+            "harness_prototype.execution.TEST_TIMEOUT_SECONDS", 1
+        ), patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=launch
+        ), patch("harness_prototype.execution._terminate_process"):
+            timed_out = run_checks("lint")
+        self.assertFalse(timed_out["ok"])
+        self.assertEqual(timed_out["status"], "timed_out")
 
 
 if __name__ == "__main__":

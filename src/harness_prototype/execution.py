@@ -9,6 +9,7 @@ from time import monotonic
 from typing import BinaryIO
 
 from .config import (
+    CHECKS,
     TARGETED_TEST_COMMAND,
     TEST_COMMAND,
     TEST_OUTPUT_LIMIT,
@@ -149,20 +150,9 @@ def _drain_output(stream: BinaryIO, capture: _BoundedOutput) -> None:
         stream.close()
 
 
-def run_tests(targets: list[str] | None = None) -> dict:
-    """Run the configured test suite or selected targets in the active workspace.
-
-    Omit targets for the configured full suite. When provided, targets are inserted
-    at the configured ``{targets}`` argument as separate values; options and paths
-    outside the workspace are rejected. The command never uses a shell. Output,
-    runtime, and target counts are bounded. Results distinguish passed tests,
-    test failures, timeouts, invalid targets, and process launch errors.
-    """
+def _run_configured_command(command: list[str], operation: str) -> dict:
+    """Execute one validated argument array with shared capture and timeout behavior."""
     workspace = Path.cwd().resolve()
-    invalid = _validate_targets(targets, workspace)
-    if invalid is not None:
-        return invalid
-    command = _build_test_command(targets)
     started = monotonic()
     try:
         process = subprocess.Popen(
@@ -180,15 +170,10 @@ def run_tests(targets: list[str] | None = None) -> dict:
     except OSError as error:
         duration_ms = round((monotonic() - started) * 1000, 3)
         return tool_error(
-            f"Could not launch the configured test command: {error}",
-            status="launch_error",
-            stdout="",
-            stderr="",
-            exit_code=None,
-            duration_ms=duration_ms,
-            stdout_truncated=False,
-            stderr_truncated=False,
-            output_truncated=False,
+            f"Could not launch the configured {operation}: {error}",
+            status="launch_error", stdout="", stderr="", exit_code=None,
+            duration_ms=duration_ms, stdout_truncated=False,
+            stderr_truncated=False, output_truncated=False,
         )
 
     stdout_capture = _BoundedOutput(TEST_OUTPUT_LIMIT)
@@ -217,24 +202,62 @@ def run_tests(targets: list[str] | None = None) -> dict:
     stderr, stderr_truncated = stderr_capture.text()
     output_truncated = stdout_truncated or stderr_truncated
     payload = {
-        "stdout": stdout,
-        "stderr": stderr,
-        "exit_code": process.returncode,
-        "duration_ms": duration_ms,
-        "stdout_truncated": stdout_truncated,
-        "stderr_truncated": stderr_truncated,
-        "output_truncated": output_truncated,
+        "stdout": stdout, "stderr": stderr, "exit_code": process.returncode,
+        "duration_ms": duration_ms, "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated, "output_truncated": output_truncated,
     }
     if timed_out:
         return tool_error(
-            f"Test execution exceeded the {TEST_TIMEOUT_SECONDS}-second timeout.",
-            status="timed_out",
-            **payload,
+            f"Configured {operation} exceeded the {TEST_TIMEOUT_SECONDS}-second timeout.",
+            status="timed_out", **payload,
         )
     status = "passed" if process.returncode == 0 else "failed"
     return tool_success(
-        complete=not output_truncated,
-        truncated=output_truncated,
-        status=status,
-        **payload,
+        complete=not output_truncated, truncated=output_truncated, status=status, **payload,
     )
+
+
+def run_tests(targets: list[str] | None = None) -> dict:
+    """Run the configured test suite or selected targets in the active workspace.
+
+    Omit targets for the configured full suite. When provided, targets are inserted
+    at the configured ``{targets}`` argument as separate values; options and paths
+    outside the workspace are rejected. The command never uses a shell. Output,
+    runtime, and target counts are bounded. Results distinguish passed tests,
+    test failures, timeouts, invalid targets, and process launch errors.
+    """
+    workspace = Path.cwd().resolve()
+    invalid = _validate_targets(targets, workspace)
+    if invalid is not None:
+        return invalid
+    command = _build_test_command(targets)
+    return _run_configured_command(command, "test command")
+
+
+def run_checks(name: str, target: str | None = None) -> dict:
+    """Run an exactly configured project check and optional configured target.
+
+    Args:
+        name: Exact check name from ``HARNESS_CHECKS``.
+        target: Optional exact target name configured for that check.
+
+    Unknown check and target names are rejected without launching a process. The
+    selected argument array never uses a shell and runs in the active workspace.
+    """
+    if not isinstance(name, str) or not name:
+        return tool_error(
+            "name must be a nonempty configured check name.",
+            status="unknown_check",
+        )
+    check = CHECKS.get(name)
+    if check is None:
+        return tool_error(f"Unknown configured check: {name}", status="unknown_check")
+    if target is None:
+        command = check.command
+    elif not isinstance(target, str) or target not in check.targets:
+        return tool_error(
+            f"Unknown target for configured check {name}: {target}", status="invalid_target"
+        )
+    else:
+        command = check.targets[target]
+    return _run_configured_command(list(command), f"check '{name}'")

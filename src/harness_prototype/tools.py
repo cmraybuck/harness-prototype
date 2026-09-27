@@ -10,7 +10,8 @@ from types import UnionType
 from typing import get_args, get_origin
 
 from .approval import ToolCategory
-from .execution import MAX_TEST_TARGETS, run_tests
+from .config import CHECKS
+from .execution import MAX_TEST_TARGETS, run_checks, run_tests
 from .files import (
     MAX_FILE_CHANGES,
     apply_file_changes,
@@ -119,6 +120,42 @@ RUN_TESTS_SCHEMA = {
     },
 }
 
+_CHECK_NAMES = list(CHECKS)
+_CHECK_TARGET_SUMMARY = "; ".join(
+    f"{name}: {', '.join(check.targets) if check.targets else 'no targets'}"
+    for name, check in CHECKS.items()
+) or "none configured"
+
+RUN_CHECKS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_checks",
+        "description": (
+            "Run an exactly configured build, lint, formatting, type-check, or other "
+            "project check inside the active workspace. This executes project code "
+            "and requires execution approval. Configured checks and targets: "
+            f"{_CHECK_TARGET_SUMMARY}."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact configured check name.",
+                    **({"enum": _CHECK_NAMES} if _CHECK_NAMES else {}),
+                },
+                "target": {
+                    "type": ["string", "null"],
+                    "description": "Optional exact target name configured for this check.",
+                    "default": None,
+                },
+            },
+        },
+    },
+}
+
 SEARCH_PROJECT_SCHEMA = {
     "type": "function",
     "function": {
@@ -206,6 +243,15 @@ TOOL_SPECS = {
         material_limits=(
             "configured command only", "1-50 optional targets",
             "500 characters per target", "configured timeout and output bounds",
+        ),
+    ),
+    "run_checks": ToolSpec(
+        run_checks,
+        ToolCategory.EXECUTION,
+        model_schema=RUN_CHECKS_SCHEMA,
+        material_limits=(
+            "configured commands only", "optional configured target only",
+            "configured timeout and output bounds",
         ),
     ),
     "apply_file_changes": ToolSpec(

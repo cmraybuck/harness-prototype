@@ -18,6 +18,14 @@ DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
 
 
 @dataclass(frozen=True)
+class CheckConfig:
+    """Store one configured check command and its optional named target commands."""
+
+    command: tuple[str, ...]
+    targets: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
 class Settings:
     """Validated connection and generation settings for one application startup."""
 
@@ -33,6 +41,7 @@ class Settings:
     consecutive_tool_failure_limit: int
     test_command: tuple[str, ...]
     targeted_test_command: tuple[str, ...]
+    checks: dict[str, CheckConfig]
     test_timeout_seconds: int
     test_output_limit: int
     log_directory: Path
@@ -98,6 +107,68 @@ def load_settings(
             requirement = "exactly one" if targets else "no"
             raise ValueError(f"{name} must contain {requirement} {{targets}} argument.")
         return tuple(arguments)
+
+    def command_arguments(arguments: object, setting: str) -> tuple[str, ...]:
+        """Validate one shell-free command array nested inside a setting."""
+        if (
+            not isinstance(arguments, list)
+            or not arguments
+            or any(
+                not isinstance(argument, str)
+                or not argument.strip()
+                or any(not character.isprintable() for character in argument)
+                for argument in arguments
+            )
+        ):
+            raise ValueError(f"{setting} commands must be nonempty JSON arrays of strings.")
+        return tuple(arguments)
+
+    def configured_checks() -> dict[str, CheckConfig]:
+        """Parse exact check and target names into shell-free command arrays."""
+        setting = "HARNESS_CHECKS"
+        try:
+            raw_checks = json.loads(value(setting, "{}"))
+        except json.JSONDecodeError:
+            raise ValueError(f"{setting} must be a JSON object.") from None
+        if not isinstance(raw_checks, dict):
+            raise ValueError(f"{setting} must be a JSON object.")
+        checks: dict[str, CheckConfig] = {}
+        for check_name, definition in raw_checks.items():
+            if (
+                not isinstance(check_name, str)
+                or not check_name.strip()
+                or check_name != check_name.strip()
+                or any(not character.isprintable() for character in check_name)
+            ):
+                raise ValueError(f"{setting} check names must be nonempty trimmed strings.")
+            if not isinstance(definition, dict) or set(definition) - {"command", "targets"}:
+                raise ValueError(
+                    f"{setting}.{check_name} must contain only command and optional targets."
+                )
+            if "command" not in definition:
+                raise ValueError(f"{setting}.{check_name}.command is required.")
+            raw_targets = definition.get("targets", {})
+            if not isinstance(raw_targets, dict):
+                raise ValueError(f"{setting}.{check_name}.targets must be a JSON object.")
+            targets: dict[str, tuple[str, ...]] = {}
+            for target_name, target_command in raw_targets.items():
+                if (
+                    not isinstance(target_name, str)
+                    or not target_name.strip()
+                    or target_name != target_name.strip()
+                    or any(not character.isprintable() for character in target_name)
+                ):
+                    raise ValueError(
+                        f"{setting}.{check_name} target names must be nonempty trimmed strings."
+                    )
+                targets[target_name] = command_arguments(
+                    target_command, f"{setting}.{check_name}.targets.{target_name}"
+                )
+            checks[check_name] = CheckConfig(
+                command_arguments(definition["command"], f"{setting}.{check_name}.command"),
+                targets,
+            )
+        return checks
 
     host = value("HARNESS_OLLAMA_HOST", "http://127.0.0.1:11434")
     try:
@@ -213,6 +284,7 @@ def load_settings(
         ),
         test_command=test_command,
         targeted_test_command=targeted_test_command,
+        checks=configured_checks(),
         test_timeout_seconds=positive_integer("HARNESS_TEST_TIMEOUT_SECONDS", "120"),
         test_output_limit=positive_integer("HARNESS_TEST_OUTPUT_LIMIT", "12000"),
         log_directory=log_directory.resolve(),
@@ -237,5 +309,6 @@ LOG_REDACT_VALUES = _settings.log_redact_values
 APPROVAL_POLICIES = _settings.approval_policies
 TEST_COMMAND = _settings.test_command
 TARGETED_TEST_COMMAND = _settings.targeted_test_command
+CHECKS = _settings.checks
 TEST_TIMEOUT_SECONDS = _settings.test_timeout_seconds
 TEST_OUTPUT_LIMIT = _settings.test_output_limit
