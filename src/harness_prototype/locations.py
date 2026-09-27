@@ -6,6 +6,7 @@ import shlex
 import sys
 from pathlib import Path
 
+from .runtime_context import active_workspace
 from .tool_results import tool_error, tool_success
 
 USER_FOLDER_SETTINGS = {"desktop": "Desktop", "documents": "Personal", "downloads": "{374DE290-123F-4565-9164-39C4925E467B}", "pictures": "My Pictures", "music": "My Music", "videos": "My Video"}
@@ -95,7 +96,7 @@ def get_location(location: str) -> dict:
         )
     try:
         home = Path.home().resolve()
-        path = Path.cwd().resolve() if normalized_name == "working_directory" else home if normalized_name == "home" else _standard_folder_path(normalized_name, home)
+        path = active_workspace() if normalized_name == "working_directory" else home if normalized_name == "home" else _standard_folder_path(normalized_name, home)
         if not path.is_dir():
             raise OSError(f"Directory unavailable: {path}")
         return tool_success(name=normalized_name, path=str(path))

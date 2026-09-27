@@ -541,6 +541,7 @@ before sharing them.
 | `src/harness_prototype/documentation.py` | HTTPS documentation retrieval, URL policy, bounds, and text extraction |
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
+| `src/harness_prototype/runtime_context.py` | Conversation-local workspace and managed-resource ownership for concurrent tool calls |
 | `src/harness_prototype/access.py` | Session workspace grants, denials, and canonical path authorization |
 | `src/harness_prototype/tools.py` | Tool specifications, risk categories, target resolvers, and dispatch |
 | `src/harness_prototype/services.py` | Configured background-service lifecycle, readiness, logs, and cleanup |
@@ -600,7 +601,7 @@ The version-one HTTP operations are:
 | `GET /v1/conversations/{id}` | Read the selected model and workspace. |
 | `PATCH /v1/conversations/{id}` | Select one configured `model` or existing `workspace`; either resets conversation context. |
 | `POST /v1/conversations/{id}/turns` | Submit one nonempty `message` and receive an NDJSON event stream. Concurrent turns return `conversation_busy`. |
-| `POST /v1/conversations/{id}/turns/cancel` | Cooperatively cancel the active turn. |
+| `POST /v1/conversations/{id}/turns/{turn_id}/cancel` | Cooperatively cancel only the matching active turn. |
 | `POST /v1/permissions/{id}` | Resolve a pending request with one of the choices advertised in its event. |
 
 Every event carries `api_version`, stable `conversation_id` and `turn_id`, and a
@@ -613,7 +614,12 @@ outcomes retain the runtime's recovery behavior. Bodies are UTF-8 JSON objects
 capped at 64 KiB. Unanswered permissions deny after five minutes. Protocol failures use
 `{"error":{"code","message","recoverable"}}`; malformed requests leave the
 conversation usable, and backend failures stream `failure` then `completion` so a
-client can reconnect and continue.
+client can reconnect and continue. Conversations own independent runtime history,
+context accounting, capability and skill state, workspace access, and cancellation.
+Different conversations may run concurrently, but a second turn in the same
+conversation returns `conversation_busy`. Cancellation requires both stable IDs,
+so a stale request cannot interrupt a later turn. Service shutdown interrupts and
+boundedly waits for active turns to release their reservations.
 
 ## Verify and extend
 

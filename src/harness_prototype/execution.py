@@ -19,6 +19,7 @@ from .config import (
     TEST_OUTPUT_LIMIT,
     TEST_TIMEOUT_SECONDS,
 )
+from .runtime_context import active_workspace
 from .tool_results import tool_error, tool_success
 
 MAX_TEST_TARGETS = 50
@@ -172,7 +173,7 @@ def _run_configured_command(
     cwd: Path | None = None,
 ) -> dict:
     """Execute one validated argument array with shared capture and timeout behavior."""
-    workspace = cwd or Path.cwd().resolve()
+    workspace = cwd or active_workspace()
     started = monotonic()
     try:
         process = subprocess.Popen(
@@ -385,7 +386,7 @@ def install_dependencies(path: str = ".") -> dict:
     """
     if not isinstance(path, str) or not path.strip():
         return tool_error("path must be a nonempty directory path.", status="invalid_project")
-    workspace = Path.cwd().resolve()
+    workspace = active_workspace()
     try:
         project = (workspace / path).resolve()
     except (OSError, RuntimeError, ValueError):
@@ -496,7 +497,7 @@ def run_tests(targets: list[str] | None = None) -> dict:
     runtime, and target counts are bounded. Results distinguish passed tests,
     test failures, timeouts, invalid targets, and process launch errors.
     """
-    workspace = Path.cwd().resolve()
+    workspace = active_workspace()
     invalid = _validate_targets(targets, workspace)
     if invalid is not None:
         return invalid

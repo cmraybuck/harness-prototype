@@ -30,6 +30,7 @@ from .config import (
 )
 from .interaction_log import InteractionLogger, TurnLog
 from .loop_guard import ToolLoopGuard, ToolLoopStop
+from .runtime_context import conversation_context
 from .skills import SkillState, discover_skills
 from .tools import (
     AVAILABLE_TOOLS,
@@ -1751,6 +1752,10 @@ class AgentRuntime:
         """Request cooperative cancellation of the active conversation turn."""
         self._interrupt_requested.set()
 
+    def prepare_turn(self) -> None:
+        """Clear stale cancellation before a caller publishes a new active turn."""
+        self._interrupt_requested.clear()
+
     def continue_conversation(
         self,
         user_input: str,
@@ -1759,9 +1764,12 @@ class AgentRuntime:
         on_permission: PermissionPrompt | None = None,
         on_approval: ApprovalPrompt | None = None,
         on_event: Callable[[dict], None] | None = None,
+        *,
+        interrupt_prepared: bool = False,
     ) -> RuntimeTurnResult:
         """Run one user turn and return its presentation-independent outcome."""
-        self._interrupt_requested.clear()
+        if not interrupt_prepared:
+            self.prepare_turn()
         turn_start = len(self.messages)
         self.messages.append({"role": "user", "content": user_input})
         turn_log = self.interaction_logger.start_turn(user_input) if self.interaction_logger else None
@@ -1773,20 +1781,21 @@ class AgentRuntime:
         outcome = "failed"
         error_detail = None
         try:
-            outcome = self.turn_runner(
-                client=self.client,
-                model=self.model,
-                messages=self.messages,
-                on_text=on_text or (lambda text: None),
-                on_tool=on_tool or (lambda name: None),
-                access=self.access,
-                on_permission=on_permission,
-                turn_log=turn_log,
-                on_approval=on_approval,
-                capability_state=self.capability_state,
-                skill_state=self.skill_state,
-                is_interrupted=self._interrupt_requested.is_set,
-            ) or "success"
+            with conversation_context(self.workspace, self.conversation_id):
+                outcome = self.turn_runner(
+                    client=self.client,
+                    model=self.model,
+                    messages=self.messages,
+                    on_text=on_text or (lambda text: None),
+                    on_tool=on_tool or (lambda name: None),
+                    access=self.access,
+                    on_permission=on_permission,
+                    turn_log=turn_log,
+                    on_approval=on_approval,
+                    capability_state=self.capability_state,
+                    skill_state=self.skill_state,
+                    is_interrupted=self._interrupt_requested.is_set,
+                ) or "success"
         except ContextBudgetError as error:
             outcome = "context_limit"
             error_detail = str(error)

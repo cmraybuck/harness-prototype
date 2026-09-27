@@ -87,7 +87,12 @@ class WorkspaceAccess:
         if not isinstance(raw_path, str) or not raw_path.strip():
             return None
         try:
-            target = Path(raw_path).expanduser().resolve()
+            candidate = Path(raw_path).expanduser()
+            target = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (self.workspace / candidate).resolve()
+            )
             if name == "read_file" or (name == "search_project" and target.is_file()):
                 return [target.parent]
             return [target]

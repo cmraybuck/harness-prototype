@@ -8,6 +8,7 @@ from collections import deque
 from pathlib import Path
 
 from .files import EXCLUDED_SEARCH_DIRECTORIES
+from .runtime_context import resolve_path
 from .tool_results import tool_error, tool_success
 
 
@@ -286,7 +287,7 @@ def detect_project_technologies(path: str = ".") -> dict:
     if not isinstance(path, str) or not path.strip():
         return tool_error("path must be a nonempty string.")
     try:
-        root = Path(path).expanduser().resolve()
+        root = resolve_path(path)
     except (OSError, RuntimeError, ValueError) as error:
         return tool_error(str(error))
     if not root.is_dir():

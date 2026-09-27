@@ -4,10 +4,12 @@ import http.client
 import json
 from pathlib import Path
 import tempfile
+from threading import Event
 import unittest
 
-from harness_prototype.agent_loop import AgentRuntime
+from harness_prototype.agent_loop import AgentRuntime, RuntimeInterrupted
 from harness_prototype.application_service import DesktopServiceHost, MAX_REQUEST_BYTES
+from harness_prototype.locations import get_location
 
 
 class ApplicationServiceTests(unittest.TestCase):
@@ -17,12 +19,22 @@ class ApplicationServiceTests(unittest.TestCase):
         """Start an isolated loopback service with a simulated runtime."""
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.workspace = Path(self.temporary_directory.name)
+        self.turn_started: dict[str, Event] = {}
+        self.turn_release: dict[str, Event] = {}
+        self.observed_workspaces: dict[str, str] = {}
 
         def simulated_turn(**kwargs: object) -> str:
             """Emit deterministic assistant and tool observations without Ollama."""
             on_text = kwargs["on_text"]
             turn_log = kwargs["turn_log"]
             messages = kwargs["messages"]
+            prompt = messages[-1]["content"]
+            self.observed_workspaces[prompt] = get_location("working_directory")["path"]
+            if prompt in self.turn_started:
+                self.turn_started[prompt].set()
+                while not self.turn_release[prompt].wait(0.01):
+                    if kwargs["is_interrupted"]():
+                        raise RuntimeInterrupted
             on_text("Checking.")
             turn_log.add_event("tool_call", name="list_files", arguments={"path": "."})
             result = {"ok": True, "complete": True, "entries": []}
@@ -68,6 +80,20 @@ class ApplicationServiceTests(unittest.TestCase):
             else json.loads(raw)
         )
         return response.status, decoded
+
+    def open_turn_stream(
+        self, conversation_id: str, message: str,
+    ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse, dict]:
+        """Open a turn stream and return its first identified event."""
+        connection = http.client.HTTPConnection(*self.host.address, timeout=5)
+        payload = json.dumps({"message": message}).encode("utf-8")
+        connection.request(
+            "POST", f"/v1/conversations/{conversation_id}/turns", body=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        first_event = json.loads(response.fp.readline().decode("utf-8"))
+        return connection, response, first_event
 
     def test_health_capabilities_and_loopback_policy(self) -> None:
         """Expose readiness and reject accidental non-loopback listeners."""
@@ -136,6 +162,121 @@ class ApplicationServiceTests(unittest.TestCase):
             "PATCH", f"/v1/conversations/{conversation_id}", {"workspace": str(self.workspace)}
         )
         self.assertEqual((status, Path(changed["workspace"])), (200, self.workspace.resolve()))
+
+    def test_conversations_run_concurrently_without_mixing_history(self) -> None:
+        """Allow independent runtimes to overlap while retaining separate prompts."""
+        first_workspace = self.workspace / "first"
+        second_workspace = self.workspace / "second"
+        first_workspace.mkdir()
+        second_workspace.mkdir()
+        _, first = self.request(
+            "POST", "/v1/conversations", {"workspace": str(first_workspace)}
+        )
+        _, second = self.request(
+            "POST", "/v1/conversations", {"workspace": str(second_workspace)}
+        )
+        self.turn_started = {"first": Event(), "second": Event()}
+        self.turn_release = {"first": Event(), "second": Event()}
+
+        first_connection, first_response, _ = self.open_turn_stream(first["conversation_id"], "first")
+        second_connection, second_response, _ = self.open_turn_stream(second["conversation_id"], "second")
+        self.assertTrue(self.turn_started["first"].wait(1))
+        self.assertTrue(self.turn_started["second"].wait(1))
+        self.turn_release["first"].set()
+        self.turn_release["second"].set()
+        first_response.read()
+        second_response.read()
+        first_connection.close()
+        second_connection.close()
+
+        first_runtime = self.host.server.registry.get(first["conversation_id"])
+        second_runtime = self.host.server.registry.get(second["conversation_id"])
+        self.assertEqual(first_runtime.messages[1]["content"], "first")
+        self.assertEqual(second_runtime.messages[1]["content"], "second")
+        self.assertEqual(Path(self.observed_workspaces["first"]), first_workspace.resolve())
+        self.assertEqual(Path(self.observed_workspaces["second"]), second_workspace.resolve())
+
+    def test_turn_conflicts_and_cancellation_use_stable_turn_identity(self) -> None:
+        """Reject overlap and prevent stale cancellation from reaching another turn."""
+        _, conversation = self.request("POST", "/v1/conversations", {})
+        conversation_id = conversation["conversation_id"]
+        self.turn_started = {"blocked": Event()}
+        self.turn_release = {"blocked": Event()}
+        connection, response, started = self.open_turn_stream(conversation_id, "blocked")
+        self.assertTrue(self.turn_started["blocked"].wait(1))
+
+        status, busy = self.request(
+            "POST", f"/v1/conversations/{conversation_id}/turns", {"message": "overlap"}
+        )
+        self.assertEqual((status, busy["error"]["code"]), (409, "conversation_busy"))
+        status, stale = self.request(
+            "POST", f"/v1/conversations/{conversation_id}/turns/stale/cancel", {}
+        )
+        self.assertEqual((status, stale["error"]["code"]), (404, "turn_not_active"))
+        status, cancelled = self.request(
+            "POST",
+            f"/v1/conversations/{conversation_id}/turns/{started['turn_id']}/cancel",
+            {},
+        )
+        self.assertEqual((status, cancelled["turn_id"]), (202, started["turn_id"]))
+
+        remaining = [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
+        connection.close()
+        self.assertEqual([event["type"] for event in remaining[-2:]], ["interruption", "completion"])
+        runtime = self.host.server.registry.get(conversation_id)
+        self.assertNotIn("blocked", [message.get("content") for message in runtime.messages])
+
+    def test_cancelling_one_conversation_does_not_interrupt_another(self) -> None:
+        """Route cancellation to one identified turn while another completes."""
+        _, first = self.request("POST", "/v1/conversations", {})
+        _, second = self.request("POST", "/v1/conversations", {})
+        self.turn_started = {"cancel me": Event(), "finish me": Event()}
+        self.turn_release = {"cancel me": Event(), "finish me": Event()}
+        first_connection, first_response, first_started = self.open_turn_stream(
+            first["conversation_id"], "cancel me"
+        )
+        second_connection, second_response, _ = self.open_turn_stream(
+            second["conversation_id"], "finish me"
+        )
+        self.assertTrue(self.turn_started["cancel me"].wait(1))
+        self.assertTrue(self.turn_started["finish me"].wait(1))
+
+        status, _ = self.request(
+            "POST",
+            f"/v1/conversations/{first['conversation_id']}/turns/"
+            f"{first_started['turn_id']}/cancel",
+            {},
+        )
+        self.assertEqual(status, 202)
+        self.turn_release["finish me"].set()
+        first_events = [
+            json.loads(line) for line in first_response.read().decode("utf-8").splitlines()
+        ]
+        second_events = [
+            json.loads(line) for line in second_response.read().decode("utf-8").splitlines()
+        ]
+        first_connection.close()
+        second_connection.close()
+        self.assertEqual(first_events[-1]["outcome"], "cancelled")
+        self.assertEqual(second_events[-1]["outcome"], "success")
+
+    def test_shutdown_interrupts_and_releases_an_abandoned_turn(self) -> None:
+        """Recover active history and release its reservation during backend shutdown."""
+        _, conversation = self.request("POST", "/v1/conversations", {})
+        conversation_id = conversation["conversation_id"]
+        self.turn_started = {"abandoned": Event()}
+        self.turn_release = {"abandoned": Event()}
+        connection, response, _ = self.open_turn_stream(conversation_id, "abandoned")
+        self.assertTrue(self.turn_started["abandoned"].wait(1))
+
+        self.host.stop()
+
+        remaining = [json.loads(line) for line in response.read().decode("utf-8").splitlines()]
+        connection.close()
+        self.assertEqual([event["type"] for event in remaining[-2:]], ["interruption", "completion"])
+        runtime = self.host.server.registry.get(conversation_id)
+        self.assertNotIn("abandoned", [message.get("content") for message in runtime.messages])
+        self.assertEqual(self.host.server.registry._active_turns, {})
 
 
 if __name__ == "__main__":

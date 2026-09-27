@@ -7,7 +7,7 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from time import monotonic
 from typing import Any
 from urllib.parse import urlsplit
@@ -19,6 +19,7 @@ from .access import AccessChoice
 from .agent_loop import AgentRuntime
 from .approval import ApprovalPromptResult, ApprovalRequest
 from .config import HOST, MODELS
+from .services import stop_all_services
 from .tools import TOOL_SPECS
 
 API_VERSION = "v1"
@@ -88,8 +89,10 @@ class ConversationRegistry:
         self.models = models
         self.permissions = PermissionBroker()
         self._lock = Lock()
+        self._turns_changed = Condition(self._lock)
         self._runtimes: dict[str, AgentRuntime] = {}
-        self._active_turns: set[str] = set()
+        self._active_turns: dict[str, tuple[str, AgentRuntime]] = {}
+        self._shutting_down = False
 
     def create(self, model: str, workspace: Path) -> AgentRuntime:
         """Create and retain one conversation runtime."""
@@ -115,18 +118,35 @@ class ConversationRegistry:
             )
         return runtime
 
-    def begin_turn(self, conversation_id: str) -> AgentRuntime:
-        """Reserve one conversation for a turn without blocking cancellation."""
+    def begin_turn(self, conversation_id: str, turn_id: str) -> AgentRuntime:
+        """Prepare and reserve one conversation for an identified turn."""
         runtime = self.get(conversation_id)
         with self._lock:
+            if self._shutting_down:
+                raise ProtocolError(
+                    "service_stopping", "The application service is stopping.",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
             if conversation_id in self._active_turns:
                 raise ProtocolError(
                     "conversation_busy",
                     "Conversation already has an active turn.",
                     HTTPStatus.CONFLICT,
                 )
-            self._active_turns.add(conversation_id)
+            runtime.prepare_turn()
+            self._active_turns[conversation_id] = (turn_id, runtime)
         return runtime
+
+    def cancel_turn(self, conversation_id: str, turn_id: str) -> None:
+        """Interrupt only the active turn matching both stable identifiers."""
+        self.get(conversation_id)
+        with self._lock:
+            active = self._active_turns.get(conversation_id)
+            if active is None or active[0] != turn_id:
+                raise ProtocolError(
+                    "turn_not_active", "The identified turn is not active.", HTTPStatus.NOT_FOUND
+                )
+            active[1].interrupt()
 
     def get_idle(self, conversation_id: str) -> AgentRuntime:
         """Return a runtime only when selection changes cannot race a turn."""
@@ -143,7 +163,21 @@ class ConversationRegistry:
     def finish_turn(self, conversation_id: str) -> None:
         """Release an active turn reservation after every outcome."""
         with self._lock:
-            self._active_turns.discard(conversation_id)
+            self._active_turns.pop(conversation_id, None)
+            self._turns_changed.notify_all()
+
+    def stop(self, timeout: float = 5) -> None:
+        """Interrupt active turns and wait boundedly for their cleanup."""
+        deadline = monotonic() + timeout
+        with self._lock:
+            self._shutting_down = True
+            for _, runtime in self._active_turns.values():
+                runtime.interrupt()
+            while self._active_turns:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    break
+                self._turns_changed.wait(remaining)
 
 
 class TurnEventStream:
@@ -236,10 +270,21 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 self._create_conversation(body)
             elif len(parts) == 4 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "turns":
                 self._run_turn(parts[2], body)
-            elif len(parts) == 5 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "turns" and parts[4] == "cancel":
-                runtime = self.server.registry.get(parts[2])
-                runtime.interrupt()
-                self._json(HTTPStatus.ACCEPTED, {"status": "cancellation_requested"})
+            elif (
+                len(parts) == 6
+                and parts[:2] == [API_VERSION, "conversations"]
+                and parts[3] == "turns"
+                and parts[5] == "cancel"
+            ):
+                self.server.registry.cancel_turn(parts[2], parts[4])
+                self._json(
+                    HTTPStatus.ACCEPTED,
+                    {
+                        "status": "cancellation_requested",
+                        "conversation_id": parts[2],
+                        "turn_id": parts[4],
+                    },
+                )
             elif len(parts) == 3 and parts[:2] == [API_VERSION, "permissions"]:
                 self._resolve_permission(parts[2], body)
             else:
@@ -285,8 +330,8 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         """Run one turn and stream its events in observation order."""
         if set(body) != {"message"} or not isinstance(body["message"], str) or not body["message"].strip():
             raise ProtocolError("invalid_request", "Expected one nonempty message string.", HTTPStatus.BAD_REQUEST)
-        runtime = self.server.registry.begin_turn(conversation_id)
         turn_id = str(uuid4())
+        runtime = self.server.registry.begin_turn(conversation_id, turn_id)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -328,6 +373,7 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 on_permission=directory_permission,
                 on_approval=tool_approval,
                 on_event=stream.observe_runtime,
+                interrupt_prepared=True,
             )
         finally:
             self.server.registry.finish_turn(conversation_id)
@@ -463,6 +509,8 @@ class DesktopServiceHost:
 
     def stop(self) -> None:
         """Stop the listener and release its socket deterministically."""
+        self.server.registry.stop()
+        stop_all_services()
         if self._thread and self._thread.is_alive():
             self.server.shutdown()
             self._thread.join(timeout=5)

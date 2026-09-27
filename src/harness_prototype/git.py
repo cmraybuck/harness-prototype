@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 
+from .runtime_context import active_workspace
 from .tool_results import tool_error, tool_success
 
 MAX_STATUS_ENTRIES = 1_000
@@ -185,7 +186,7 @@ def git_status() -> dict:
     in more than one category. At most 1000 status entries are returned. The
     command does not access a remote and disables Git's optional index refresh.
     """
-    workspace = Path.cwd().resolve()
+    workspace = active_workspace()
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     prefix_command = [
@@ -233,7 +234,7 @@ def git_diff(mode: str = "combined", path: str | None = None) -> dict:
     optional path is relative to the active workspace and cannot leave it.
     Untracked file contents are not included in the patch.
     """
-    workspace = Path.cwd().resolve()
+    workspace = active_workspace()
     if mode not in {"unstaged", "staged", "combined"}:
         return _status_error(
             "mode must be 'unstaged', 'staged', or 'combined'.", workspace=workspace,
