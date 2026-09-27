@@ -37,6 +37,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (120, 12000))
         self.assertIn("git", settings.command_allowed_executables)
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
+        self.assertTrue(settings.state_database_path.is_absolute())
+        self.assertEqual(settings.state_database_path.name, "state.sqlite3")
         self.assertEqual(settings.log_redact_values, ())
         self.assertEqual(settings.approval_policies[ToolCategory.READ_ONLY], ApprovalPolicy.ALWAYS_ALLOW)
         for category in set(ToolCategory) - {ToolCategory.READ_ONLY}:
@@ -197,6 +199,14 @@ class ConfigTests(unittest.TestCase):
         """Prevent a misspelled secret name from silently producing unsafe logs."""
         with self.assertRaisesRegex(ValueError, "MISSING_SECRET"):
             load_settings(None, {"HARNESS_LOG_REDACT_VARIABLES": "MISSING_SECRET"})
+
+    def test_state_database_configuration_resolves_relative_path(self) -> None:
+        """Resolve a configured state database relative to the project root."""
+        settings = load_settings(None, {"HARNESS_STATE_DATABASE_PATH": "private/state.db"})
+        self.assertEqual(
+            settings.state_database_path,
+            (Path(__file__).parents[1] / "private/state.db").resolve(),
+        )
 
     def test_approval_policies_are_configurable_by_category(self) -> None:
         """Load independent policy overrides for read-only and future risk categories."""

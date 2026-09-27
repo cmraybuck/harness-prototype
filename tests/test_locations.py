@@ -6,7 +6,7 @@ from inspect import signature
 from pathlib import Path
 from unittest.mock import patch
 
-from harness_prototype.locations import get_location
+from harness_prototype.locations import application_data_directory, get_location
 from harness_prototype.tools import execute_tool
 
 
@@ -65,6 +65,18 @@ class LocationTests(unittest.TestCase):
             with patch("harness_prototype.locations.Path.home", return_value=home):
                 self.assertTrue(get_location("music")["ok"])
                 self.assertFalse(get_location("videos")["ok"])
+
+    def test_application_data_directory_is_platform_specific(self) -> None:
+        """Keep application-data discovery in the platform location adapter."""
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            local = home / "LocalData"
+            with (
+                patch("harness_prototype.locations.Path.home", return_value=home),
+                patch("harness_prototype.locations.os.name", "nt"),
+                patch.dict("harness_prototype.locations.os.environ", {"LOCALAPPDATA": str(local)}),
+            ):
+                self.assertEqual(application_data_directory(), local / "FLUX")
 
 
 if __name__ == "__main__":
