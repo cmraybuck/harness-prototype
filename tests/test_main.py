@@ -555,6 +555,33 @@ class MainTests(unittest.TestCase):
         self.assertIn("Context used   ~1024 tokens (25%)", rendered)
         self.assertIn("Context limit  4096 tokens", rendered)
 
+    def test_skill_commands_list_and_activate_through_runtime(self) -> None:
+        """Expose local skill discovery and explicit activation in the terminal adapter."""
+        catalog = {
+            "skills": [{
+                "id": "focused", "name": "Focused", "description": "Stay scoped."
+            }],
+            "diagnostics": [],
+            "roots": ["C:/skills"],
+            "active_skills": [],
+        }
+        with patch(
+            "builtins.input", side_effect=["/skills", "/skill focused", "/exit"]
+        ), patch("builtins.print") as output, patch(
+            "harness_prototype.main.select_model", return_value="test-model"
+        ), patch("harness_prototype.main.Client"), patch(
+            "harness_prototype.main.AgentRuntime.list_skills", return_value=catalog
+        ), patch(
+            "harness_prototype.main.AgentRuntime.activate_skills",
+            return_value={"ok": True, "active_skills": ["focused"]},
+        ) as activate:
+            main()
+
+        activate.assert_called_once_with(["focused"])
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Focused — Stay scoped.", rendered)
+        self.assertIn("Active skills: focused", rendered)
+
     def test_unrecognized_slash_input_is_sent_to_the_model(self) -> None:
         """Keep paths and prose beginning with a slash available as normal prompts."""
         snapshots = []

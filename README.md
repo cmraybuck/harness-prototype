@@ -159,10 +159,66 @@ prefix is submitted to the model normally. The initial commands are:
 | `/clear` | Starts a fresh conversation with the current model. |
 | `/model` | Selects a configured model, warns that context will reset, and starts a new conversation after confirmation. |
 | `/tools` | Lists the registered model tools and concise descriptions. |
+| `/skills` | Lists valid local skills, discovery roots, and validation errors. |
+| `/skill id[,id]` | Replaces the conversation's active skill set; `/skill` clears it. |
 | `/tool-activity` | Selects full, compact, or hidden routine tool dialogue. Permissions and errors remain visible in every mode. |
 | `/status` | Shows the model, server, workspace, retained message count, active capability groups, effective model tools, context-cost breakdown, context limit, and tool display mode. |
 | `/help` | Shows command descriptions and palette controls. |
 | `/exit` | Ends the session. |
+
+## Local skills
+
+FLUX discovers reusable local skills when a runtime is created. It checks skills
+bundled inside the installed FLUX package first, including the opt-in `pirate`
+example, then the platform application-data directory
+(`%LOCALAPPDATA%\FLUX\skills` on Windows,
+`~/Library/Application Support/FLUX/skills` on macOS, or
+`${XDG_DATA_HOME:-~/.local/share}/flux/skills` elsewhere), then
+`.flux/skills` inside the active workspace. Discovery does not change the process
+working directory. Each immediate child is a skill directory containing
+`skill.json`; results and activation order are sorted by skill identifier.
+Run `/skill pirate` to activate the bundled example for the current conversation;
+run `/skill` to return to the normal voice.
+
+The version-one manifest is UTF-8 JSON:
+
+```json
+{
+  "version": 1,
+  "id": "project.focused-review",
+  "name": "Focused review",
+  "description": "Review only affected code and tests.",
+  "instructions": "instructions.md",
+  "resources": ["references/checklist.md"],
+  "requires": {
+    "capabilities": ["workspace_inspection"],
+    "tools": ["read_file", "git_diff"]
+  }
+}
+```
+
+All fields shown are required except `resources` and `requires`, which default to
+empty collections. Identifiers use lowercase letters and digits separated by
+dots, dashes, or underscores. Instruction and resource paths are relative to the
+skill directory. Absolute paths, traversal, and links resolving outside that
+directory are rejected. Discovery validates UTF-8 encoding, supported versions,
+duplicate identifiers, required capability/tool names, file types, and bounds:
+100 manifests, a 64 KiB manifest, 32 KiB instructions, 16 resources, 64 KiB per
+resource, and 128 KiB of resources per skill. Invalid entries remain visible as
+diagnostics and cannot be activated; duplicate identifiers invalidate both
+definitions rather than applying an implicit override.
+
+Activation is explicit, atomic, and local to one conversation. Concurrent
+runtimes therefore keep independent active sets, and clearing the conversation or
+changing models clears activation. Selected instructions and resources are added
+to the composed system context in identifier order with their manifest and
+resource provenance; their exact characters participate in context estimation.
+If requirements are unavailable or the expanded request exceeds the context
+budget, FLUX reports the failure instead of partially activating or silently
+omitting content. Skill content is untrusted data. It cannot add tools, execute
+code during activation, or bypass system instructions, capability activation,
+tool approval, filesystem access, context limits, or execution policy. FLUX does
+not download skills or synchronize them between devices.
 
 The legacy `clear`, `quit`, and `exit` inputs remain supported. Ctrl+C during a
 response cancels the turn. ANSI color is used only in an interactive terminal; set
@@ -489,6 +545,7 @@ before sharing them.
 | `src/harness_prototype/services.py` | Configured background-service lifecycle, readiness, logs, and cleanup |
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
+| `src/harness_prototype/skills.py` | Local skill discovery, validation, activation, and bounded context |
 | `src/harness_prototype/files.py` | Directory listing, bounded search/read, revisions, and atomic UTF-8 changes |
 | `src/harness_prototype/project_detection.py` | Bounded manifest parsing and project technology detection |
 | `src/harness_prototype/git.py` | Bounded, read-only Git workspace status and diff inspection |

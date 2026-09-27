@@ -31,6 +31,7 @@ from harness_prototype.agent_loop import (
     validate_requested_answer_coverage,
 )
 from harness_prototype.interaction_log import TurnLog
+from harness_prototype.skills import Skill, SkillCatalog, SkillState
 
 
 def run_turn(*args: object, **kwargs: object) -> str:
@@ -110,6 +111,25 @@ class AgentLoopTests(unittest.TestCase):
         self.assertNotIn("Read existing files first", bootstrap.messages[0]["content"])
         self.assertIn("Read existing files first", active.messages[0]["content"])
         self.assertIn("Run tests only when authorized", active.messages[0]["content"])
+
+    def test_active_skill_changes_composition_and_context_estimate(self) -> None:
+        """Include selected skill context with provenance in exact request accounting."""
+        manifest = Path("fixture/skill.json").resolve()
+        skill = Skill(
+            "focused", "Focused", "A fixture", "Follow the focused workflow.",
+            (("guide.md", "Bounded guidance."),), (), (), manifest, "workspace",
+        )
+        state = SkillState(SkillCatalog({"focused": skill}, (), (manifest.parent,)))
+        state.active_ids = ("focused",)
+        messages = new_conversation()
+
+        plain = compose_request(messages, CapabilityState())
+        active = compose_request(messages, CapabilityState(), state)
+
+        self.assertIn("Follow the focused workflow.", active.messages[0]["content"])
+        self.assertIn(str(manifest), active.messages[0]["content"])
+        self.assertGreater(active.estimated_tokens, plain.estimated_tokens)
+        self.assertEqual(active.active_skills, ("focused",))
 
     def test_explicit_tool_request_bypasses_repository_evidence_gate(self) -> None:
         """Let a named inspection tool answer directly instead of forcing searches."""

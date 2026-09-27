@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "pirate",
+  "name": "Pirate voice",
+  "description": "Answer in a playful pirate voice while preserving technical accuracy.",
+  "instructions": "instructions.md",
+  "resources": [],
+  "requires": {
+    "capabilities": [],
+    "tools": []
+  }
+}
