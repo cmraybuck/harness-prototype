@@ -27,6 +27,8 @@ EXCLUDED_SEARCH_DIRECTORIES = {
     "node_modules", "target", "venv",
 }
 EXCLUDED_SEARCH_DIRECTORY_PATHS = {("work", "logs")}
+DEFAULT_LIST_EXCLUSIONS = tuple(sorted(EXCLUDED_SEARCH_DIRECTORIES))
+MAX_LIST_PATTERNS = 100
 
 
 @dataclass(frozen=True)
@@ -332,14 +334,113 @@ def apply_file_changes(base_path: str, changes: list[dict]) -> dict:
     )
 
 
-def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict:
-    """List a bounded sorted page of immediate names in an authorized directory."""
+def _validate_filename_pattern(pattern: object, field: str) -> str | None:
+    """Validate one filename-only glob and return an actionable error."""
+    if not isinstance(pattern, str) or not pattern:
+        return f"{field} must be a nonempty filename pattern."
+    if any(character in pattern for character in "/\\"):
+        return f"{field} must be a filename pattern, not a path."
+    index = 0
+    while index < len(pattern):
+        if pattern[index] != "[":
+            index += 1
+            continue
+        class_start = index
+        index += 1
+        if index < len(pattern) and pattern[index] in "!^":
+            index += 1
+        if index < len(pattern) and pattern[index] == "]":
+            index += 1
+        closing = pattern.find("]", index)
+        if closing < 0:
+            return f"{field} has an unterminated character class at position {class_start}."
+        index = closing + 1
+    return None
+
+
+def _parse_list_exclusions(
+    exclude_patterns: object,
+) -> tuple[list[str] | None, str | None]:
+    """Resolve default or caller-supplied listing exclusion patterns."""
+    if exclude_patterns is None:
+        return list(DEFAULT_LIST_EXCLUSIONS), None
+    if not isinstance(exclude_patterns, list):
+        return None, "exclude_patterns must be an array of filename patterns or null."
+    if len(exclude_patterns) > MAX_LIST_PATTERNS:
+        return None, f"exclude_patterns exceeds the {MAX_LIST_PATTERNS}-pattern limit."
+    for index, pattern in enumerate(exclude_patterns):
+        error = _validate_filename_pattern(pattern, f"exclude_patterns[{index}]")
+        if error is not None:
+            return None, error
+    return list(exclude_patterns), None
+
+
+def _parse_list_extensions(extensions: object) -> tuple[list[str] | None, str | None]:
+    """Normalize optional listing extensions without accepting glob syntax."""
+    if extensions is None:
+        return None, None
+    if not isinstance(extensions, list) or not extensions:
+        return None, "extensions must be a nonempty array of file extensions or null."
+    if len(extensions) > MAX_LIST_PATTERNS:
+        return None, f"extensions exceeds the {MAX_LIST_PATTERNS}-extension limit."
+    normalized = []
+    for index, extension in enumerate(extensions):
+        if not isinstance(extension, str) or not extension.strip():
+            return None, f"extensions[{index}] must be a nonempty file extension."
+        value = extension.strip().removeprefix(".")
+        if (
+            not value
+            or any(character in value for character in "/\\*?[]")
+            or "." in value
+        ):
+            return None, f"extensions[{index}] must be one extension without glob syntax."
+        normalized.append(value.casefold())
+    return list(dict.fromkeys(normalized)), None
+
+
+def list_files(
+    offset: int = 0,
+    max_entries: int = 100,
+    path: str = ".",
+    name_pattern: str | None = None,
+    extensions: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
+    include_hidden: bool = True,
+) -> dict:
+    """List a filtered, bounded page of immediate names in an authorized directory.
+
+    Args:
+        offset: Zero-based offset into the filtered, sorted result.
+        max_entries: Maximum entries to return, between 1 and 100.
+        path: Absolute directory path, or a path relative to the working directory.
+        name_pattern: Optional case-insensitive filename glob such as ``*.py``.
+        extensions: Optional file extensions, with or without a leading dot.
+        exclude_patterns: Case-insensitive filename globs to omit. ``null`` uses
+            the default cache, dependency, VCS, and build exclusions; ``[]``
+            explicitly disables exclusions.
+        include_hidden: Whether to include dot-prefixed entries that are not excluded.
+
+    Name and extension filters are combined when both are supplied. Filtering
+    happens before paging so an unchanged directory has stable continuation offsets.
+    """
     if type(offset) is not int or offset < 0:
         return tool_error("offset must be a nonnegative integer.")
     if type(max_entries) is not int or not 1 <= max_entries <= 100:
         return tool_error("max_entries must be between 1 and 100.")
     if not isinstance(path, str) or not path.strip():
         return tool_error("path must be a nonempty directory path.")
+    if name_pattern is not None:
+        pattern_error = _validate_filename_pattern(name_pattern, "name_pattern")
+        if pattern_error is not None:
+            return tool_error(pattern_error)
+    if type(include_hidden) is not bool:
+        return tool_error("include_hidden must be a boolean.")
+    exclusions, exclusion_error = _parse_list_exclusions(exclude_patterns)
+    if exclusions is None:
+        return tool_error(exclusion_error or "Invalid exclusion patterns.")
+    normalized_extensions, extension_error = _parse_list_extensions(extensions)
+    if extension_error is not None:
+        return tool_error(extension_error)
     try:
         directory = Path(path).expanduser().resolve()
         with os.scandir(directory) as iterator:
@@ -348,9 +449,33 @@ def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict
             return tool_error(
                 "Directory exceeds the 20000-entry listing limit; choose a narrower path."
             )
-        entries.sort(key=lambda entry: (entry.name.casefold(), entry.name))
+        folded_name_pattern = (
+            name_pattern.casefold() if name_pattern is not None else None
+        )
+        folded_exclusions = [pattern.casefold() for pattern in exclusions]
+        filtered_entries = []
+        for entry in entries:
+            folded_name = entry.name.casefold()
+            if not include_hidden and entry.name.startswith("."):
+                continue
+            if any(
+                fnmatch.fnmatchcase(folded_name, pattern)
+                for pattern in folded_exclusions
+            ):
+                continue
+            if (
+                folded_name_pattern is not None
+                and not fnmatch.fnmatchcase(folded_name, folded_name_pattern)
+            ):
+                continue
+            if normalized_extensions is not None:
+                extension = Path(entry.name).suffix.removeprefix(".").casefold()
+                if entry.is_dir() or extension not in normalized_extensions:
+                    continue
+            filtered_entries.append(entry)
+        filtered_entries.sort(key=lambda entry: (entry.name.casefold(), entry.name))
         page, size = [], 0
-        for entry in entries[offset:offset + max_entries]:
+        for entry in filtered_entries[offset:offset + max_entries]:
             name = entry.name + ("/" if entry.is_dir() else "")
             encoded_size = len(json.dumps(name)) + 2
             if size + encoded_size > 4000:
@@ -358,13 +483,17 @@ def list_files(offset: int = 0, max_entries: int = 100, path: str = ".") -> dict
             page.append(name)
             size += encoded_size
         next_offset = offset + len(page)
-        truncated = next_offset < len(entries)
+        truncated = next_offset < len(filtered_entries)
         return tool_success(
             complete=not truncated,
             truncated=truncated,
             directory=str(directory),
             entries=page,
             next_offset=next_offset if truncated else None,
+            name_pattern=name_pattern,
+            extensions=normalized_extensions,
+            exclusions_applied=exclusions,
+            include_hidden=include_hidden,
         )
     except (OSError, ValueError) as error:
         return tool_error(str(error))
