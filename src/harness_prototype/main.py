@@ -23,6 +23,7 @@ from .config import (
     MODELS,
     TEST_TIMEOUT_SECONDS,
 )
+from .services import stop_all_services
 from .files import file_change_target_paths
 from .interaction_log import InteractionLogger
 
@@ -369,6 +370,13 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
         lines.append(f"Directory   {_terminal_text(Path.cwd())}")
         lines.append(f"Timeout     {TEST_TIMEOUT_SECONDS} seconds")
         return lines
+    if request.tool_name == "start_service" and isinstance(request.arguments, dict):
+        lines.append(f"Service     {_terminal_text(request.arguments.get('name', 'unknown'))}")
+        lines.append(f"Directory   {_terminal_text(Path.cwd())}")
+        return lines
+    if request.tool_name == "stop_service" and isinstance(request.arguments, dict):
+        lines.append("Scope       One harness-managed service handle")
+        return lines
     if request.tool_name != "apply_file_changes" or not isinstance(request.arguments, dict):
         return lines
 
@@ -449,6 +457,11 @@ def _tool_approval_receipt(
     if request.tool_name == "install_dependencies" and isinstance(request.arguments, dict):
         path = _terminal_text(request.arguments.get("path", "."))
         return f"{decision} dependency installation for {path}."
+    if request.tool_name == "start_service" and isinstance(request.arguments, dict):
+        name = _terminal_text(request.arguments.get("name", "unknown"))
+        return f"{decision} service start for {name}."
+    if request.tool_name == "stop_service":
+        return f"{decision} stopping one harness-managed service."
     if request.tool_name == "apply_file_changes" and isinstance(request.arguments, dict):
         changes = request.arguments.get("changes")
         if isinstance(changes, list):
@@ -500,30 +513,31 @@ def main() -> None:
     interaction_logger = InteractionLogger(LOG_DIRECTORY, LOG_REDACT_VALUES)
     ui.show_header(selected_model, HOST, Path.cwd())
 
-    while True:
-        try:
-            user_input = ui.prompt()
-        except (KeyboardInterrupt, EOFError):
-            print()
-            ui.show_goodbye()
-            break
-        if not user_input:
-            continue
-        if user_input.lower() in {"quit", "exit"}:
-            ui.show_goodbye()
-            break
-        if user_input.lower() == "clear":
-            messages = new_conversation()
-            ui.show_notice("Reset", "Conversation cleared.", "32")
-            continue
+    try:
+        while True:
+            try:
+                user_input = ui.prompt()
+            except (KeyboardInterrupt, EOFError):
+                print()
+                ui.show_goodbye()
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in {"quit", "exit"}:
+                ui.show_goodbye()
+                break
+            if user_input.lower() == "clear":
+                messages = new_conversation()
+                ui.show_notice("Reset", "Conversation cleared.", "32")
+                continue
 
-        turn_start = len(messages)
-        messages.append({"role": "user", "content": user_input})
-        turn_log = interaction_logger.start_turn(user_input)
-        outcome = "failed"
-        error_detail = None
-        try:
-            outcome = run_turn(
+            turn_start = len(messages)
+            messages.append({"role": "user", "content": user_input})
+            turn_log = interaction_logger.start_turn(user_input)
+            outcome = "failed"
+            error_detail = None
+            try:
+                outcome = run_turn(
                 client=client,
                 model=selected_model,
                 messages=messages,
@@ -534,29 +548,31 @@ def main() -> None:
                 turn_log=turn_log,
                 on_approval=ui.request_tool_approval,
             ) or "success"
-            ui.finish_response()
-        except ContextBudgetError as error:
-            outcome = "context_limit"
-            error_detail = str(error)
-            ui.show_notice("Context", str(error))
-        except EmptyModelResponseError as error:
-            outcome = "model_error"
-            error_detail = str(error)
-            recover_turn(messages, turn_start)
-            ui.show_notice("Model error", f"Model response failed: {error}", "31")
-        except ResponseError as error:
-            outcome = "model_error"
-            error_detail = f"{error.status_code} - {error.error}"
-            recover_turn(messages, turn_start)
-            ui.show_notice("Ollama", f"{error.status_code} - {error.error}", "31")
-        except KeyboardInterrupt:
-            outcome = "cancelled"
-            error_detail = "Request cancelled."
-            recover_turn(messages, turn_start)
-            ui.show_notice("Cancelled", "Request cancelled.")
-        except Exception as error:
-            error_detail = str(error)
-            recover_turn(messages, turn_start)
-            ui.show_notice("Error", f"Request failed: {error}", "31")
-        finally:
-            interaction_logger.finish_turn(turn_log, outcome, error_detail)
+                ui.finish_response()
+            except ContextBudgetError as error:
+                outcome = "context_limit"
+                error_detail = str(error)
+                ui.show_notice("Context", str(error))
+            except EmptyModelResponseError as error:
+                outcome = "model_error"
+                error_detail = str(error)
+                recover_turn(messages, turn_start)
+                ui.show_notice("Model error", f"Model response failed: {error}", "31")
+            except ResponseError as error:
+                outcome = "model_error"
+                error_detail = f"{error.status_code} - {error.error}"
+                recover_turn(messages, turn_start)
+                ui.show_notice("Ollama", f"{error.status_code} - {error.error}", "31")
+            except KeyboardInterrupt:
+                outcome = "cancelled"
+                error_detail = "Request cancelled."
+                recover_turn(messages, turn_start)
+                ui.show_notice("Cancelled", "Request cancelled.")
+            except Exception as error:
+                error_detail = str(error)
+                recover_turn(messages, turn_start)
+                ui.show_notice("Error", f"Request failed: {error}", "31")
+            finally:
+                interaction_logger.finish_turn(turn_log, outcome, error_detail)
+    finally:
+        stop_all_services()

@@ -142,6 +142,10 @@ SYSTEM_PROMPT = (
     "not retry unless the user changes the request or policy. If a tool reports "
     "status=tool_loop_stopped, follow its guidance and do not repeat the same "
     "operation."
+    " Use start_service only for an exact configured service name. Preserve its "
+    "opaque handle for stop_service. A duplicate start returns the existing process, "
+    "and unknown handles must not be replaced with guessed process identifiers. "
+    "Report readiness failures, unexpected exits, and truncated service logs."
 )
 
 INSPECTION_REMINDER = (
