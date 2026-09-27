@@ -114,3 +114,15 @@ def application_skill_directory() -> Path:
         return home / "Library" / "Application Support" / "FLUX" / "skills"
     base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
     return base / "flux" / "skills"
+
+
+def application_data_directory() -> Path:
+    """Return the platform-appropriate per-user FLUX application-data directory."""
+    home = Path.home()
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        return base / "FLUX"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "FLUX"
+    base = Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
+    return base / "flux"

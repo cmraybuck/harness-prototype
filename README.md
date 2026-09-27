@@ -554,6 +554,7 @@ before sharing them.
 | `src/harness_prototype/execution.py` | Shell-free configured and allowlisted command execution, process limits, and bounded output capture |
 | `src/harness_prototype/config.py` | Validated configuration |
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
+| `src/harness_prototype/application_state.py` | Versioned transactional SQLite application-state storage, backup, and recovery |
 | `setup.ps1` | Windows teammate prerequisite checks, remote Ollama validation, and local setup |
 | `setup-host.ps1` | Windows Ollama and Tailscale installation, model installation, and Tailscale Serve setup |
 | `stop-host.ps1` | Stops Ollama and disconnects the Windows host from Tailscale |
@@ -658,6 +659,33 @@ commands, define allowed targets, validation, timeouts, output limits, and recov
 for uncertain effects. See `AGENTS.md` for contributor guidance and
 [`docs/ISSUE_WORKFLOW.md`](docs/ISSUE_WORKFLOW.md) for issue structure,
 dependencies, and roadmap maintenance.
+
+### Application state
+
+`StateStore` provides a versioned SQLite store for bounded JSON application
+values. By default, `HARNESS_STATE_DATABASE_PATH` points to `state.sqlite3` in
+the platform FLUX application-data directory; a relative override starts at the
+project root. The store uses short-lived connections, WAL journaling, full
+synchronous writes, a busy timeout, and explicit transactions so independent
+conversations can use it concurrently. Scope and key strings are portable, and
+each encoded value is limited to 64 KiB. Callers must not store credentials,
+model transcripts, file contents, or other sensitive or large raw payloads.
+
+Opening the store checks SQLite integrity, initializes a fresh schema, applies
+known forward migrations transactionally, and rejects a database whose schema
+version is newer than this application without modifying it. SQLite automatically
+recovers committed WAL records and discards incomplete transactions after an
+interrupted write. A corrupt database raises `CorruptStateStoreError`; preserve
+it for investigation and restore a known-good backup rather than overwriting it.
+
+Use `backup_to(Path(...))` while the application is running to create a consistent,
+atomically replaced backup. Stop application clients, then use
+`restore_from(Path(...))` to validate and restore a compatible backup, after which
+older supported schemas are migrated. Keep an additional copy of the live database
+before restore if rollback may be needed.
+To reset local state intentionally, call `reset()`; this deletes stored values but
+retains the current schema. Backup, restore, and reset paths must be ordinary local
+paths and must differ from the live database path.
 
 ## Disclaimer
 This codebase was created with the assistance of AI-powered coding agents, including OpenAI Codex and Google Gemini.

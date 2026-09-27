@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from dotenv import dotenv_values
 
 from .approval import ApprovalPolicy, ToolCategory
+from .locations import application_data_directory
 
 # Anchor to this checkout, not the directory being searched by the harness.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +57,7 @@ class Settings:
     test_output_limit: int
     command_allowed_executables: tuple[str, ...]
     log_directory: Path
+    state_database_path: Path
     log_redact_values: tuple[str, ...]
     approval_policies: dict[ToolCategory, ApprovalPolicy]
 
@@ -291,6 +293,14 @@ def load_settings(
     log_directory = Path(value("HARNESS_LOG_DIRECTORY", "work/logs")).expanduser()
     if not log_directory.is_absolute():
         log_directory = PROJECT_ROOT / log_directory
+    state_database_path = Path(
+        value(
+            "HARNESS_STATE_DATABASE_PATH",
+            str(application_data_directory() / "state.sqlite3"),
+        )
+    ).expanduser()
+    if not state_database_path.is_absolute():
+        state_database_path = PROJECT_ROOT / state_database_path
     redact_setting = values.get("HARNESS_LOG_REDACT_VARIABLES") or ""
     redact_names = tuple(
         dict.fromkeys(
@@ -372,6 +382,7 @@ def load_settings(
         test_output_limit=positive_integer("HARNESS_TEST_OUTPUT_LIMIT", "12000"),
         command_allowed_executables=executable_allowlist(),
         log_directory=log_directory.resolve(),
+        state_database_path=state_database_path.resolve(),
         log_redact_values=tuple(str(values[name]) for name in redact_names),
         approval_policies=approval_policies,
     )
@@ -388,6 +399,7 @@ INSPECTION_TOOL_ROUND_ALLOWANCE = _settings.inspection_tool_round_allowance
 IDENTICAL_TOOL_CALL_LIMIT = _settings.identical_tool_call_limit
 CONSECUTIVE_TOOL_FAILURE_LIMIT = _settings.consecutive_tool_failure_limit
 LOG_DIRECTORY = _settings.log_directory
+STATE_DATABASE_PATH = _settings.state_database_path
 LOG_REDACT_VALUES = _settings.log_redact_values
 APPROVAL_POLICIES = _settings.approval_policies
 TEST_COMMAND = _settings.test_command
