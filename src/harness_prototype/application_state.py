@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 MAX_VALUE_BYTES = 64 * 1024
 MAX_SCOPE_LENGTH = 100
 MAX_KEY_LENGTH = 200
@@ -162,6 +162,7 @@ class StateStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM conversations")
             connection.execute("DELETE FROM state_entries")
             connection.commit()
         except Exception:
@@ -247,6 +248,55 @@ def _apply_migration(connection: sqlite3.Connection, version: int) -> None:
         connection.execute(
             "ALTER TABLE state_entries ADD COLUMN updated_at_utc TEXT NOT NULL DEFAULT ''"
         )
+    elif version == 3:
+        for statement in (
+            """
+            CREATE TABLE conversations (
+                conversation_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                model TEXT NOT NULL,
+                workspace TEXT NOT NULL,
+                capability_groups_json TEXT NOT NULL DEFAULT '[]'
+                    CHECK(json_valid(capability_groups_json)),
+                active_skills_json TEXT NOT NULL DEFAULT '[]'
+                    CHECK(json_valid(active_skills_json)),
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE conversation_messages (
+                conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id)
+                    ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK(sequence >= 1),
+                message_json TEXT NOT NULL CHECK(json_valid(message_json)),
+                PRIMARY KEY(conversation_id, sequence)
+            ) WITHOUT ROWID
+            """,
+            """
+            CREATE TABLE conversation_turns (
+                conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id)
+                    ON DELETE CASCADE,
+                turn_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence >= 1),
+                status TEXT NOT NULL,
+                user_prompt TEXT NOT NULL,
+                error TEXT,
+                events_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(events_json)),
+                retained_messages_json TEXT NOT NULL DEFAULT '[]'
+                    CHECK(json_valid(retained_messages_json)),
+                started_at_utc TEXT NOT NULL,
+                finished_at_utc TEXT,
+                PRIMARY KEY(conversation_id, turn_id),
+                UNIQUE(conversation_id, sequence)
+            )
+            """,
+            """
+            CREATE INDEX conversations_updated_order
+                ON conversations(updated_at_utc DESC, conversation_id DESC)
+            """,
+        ):
+            connection.execute(statement)
     else:
         raise StateStoreError(f"No migration is defined for schema {version}.")
 
@@ -310,9 +360,14 @@ def _validate_database(path: Path, *, allow_older: bool) -> None:
             table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'state_entries'"
             ).fetchone()
+            conversations = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversations'"
+            ).fetchone()
     except sqlite3.DatabaseError as error:
         raise CorruptStateStoreError(f"Invalid state database: {error}") from error
     if result != ("ok",) or table is None or version < (1 if allow_older else CURRENT_SCHEMA_VERSION):
+        raise CorruptStateStoreError("Invalid or incomplete state database.")
+    if version >= 3 and conversations is None:
         raise CorruptStateStoreError("Invalid or incomplete state database.")
     if version > CURRENT_SCHEMA_VERSION:
         raise UnsupportedSchemaError(
@@ -329,3 +384,310 @@ def _remove_sidecars(path: Path) -> None:
     """Remove stale SQLite sidecars after atomically replacing a closed database."""
     for suffix in ("-wal", "-shm"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+class ConversationStore:
+    """Persist resumable conversations in the shared versioned state database."""
+
+    def __init__(self, state: StateStore) -> None:
+        """Bind conversation operations to an initialized state store."""
+        self.state = state
+        with closing(self.state._connect()) as connection:
+            connection.execute(
+                """
+                UPDATE conversation_turns
+                SET status = 'interrupted',
+                    error = 'Backend stopped before the turn completed.',
+                    finished_at_utc = ?
+                WHERE status = 'running'
+                """,
+                (_utc_timestamp(),),
+            )
+
+    def create(
+        self,
+        conversation_id: str,
+        title: str,
+        model: str,
+        workspace: Path,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Create one conversation and its initial ordered model history."""
+        timestamp = _utc_timestamp()
+        with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO conversations(
+                        conversation_id, title, model, workspace, created_at_utc, updated_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (conversation_id, title, model, str(workspace), timestamp, timestamp),
+                )
+                self._replace_messages(connection, conversation_id, messages)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def load(self, conversation_id: str) -> dict[str, Any] | None:
+        """Load one conversation with model-facing messages in exact sequence."""
+        with closing(self.state._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT conversation_id, title, model, workspace,
+                       capability_groups_json, active_skills_json,
+                       created_at_utc, updated_at_utc
+                FROM conversations WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            messages = [
+                json.loads(item[0])
+                for item in connection.execute(
+                    """
+                    SELECT message_json FROM conversation_messages
+                    WHERE conversation_id = ? ORDER BY sequence
+                    """,
+                    (conversation_id,),
+                )
+            ]
+        return {
+            "conversation_id": row[0], "title": row[1], "model": row[2],
+            "workspace": row[3], "capability_groups": json.loads(row[4]),
+            "active_skills": json.loads(row[5]), "created_at": row[6],
+            "updated_at": row[7], "messages": messages,
+        }
+
+    def list_conversations(
+        self, limit: int, after: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """List conversations by immutable creation order using an ID cursor."""
+        with closing(self.state._connect()) as connection:
+            cursor = None
+            if after is not None:
+                cursor = connection.execute(
+                    "SELECT created_at_utc, conversation_id FROM conversations WHERE conversation_id = ?",
+                    (after,),
+                ).fetchone()
+                if cursor is None:
+                    raise ValueError("Conversation cursor was not found.")
+            where = ""
+            arguments: list[Any] = []
+            if cursor:
+                where = "WHERE (created_at_utc, conversation_id) < (?, ?)"
+                arguments.extend(cursor)
+            arguments.append(limit + 1)
+            rows = connection.execute(
+                f"""
+                SELECT conversation_id, title, model, workspace, created_at_utc, updated_at_utc
+                FROM conversations {where}
+                ORDER BY created_at_utc DESC, conversation_id DESC LIMIT ?
+                """,
+                arguments,
+            ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = [
+            {"conversation_id": row[0], "title": row[1], "model": row[2],
+             "workspace": row[3], "created_at": row[4], "updated_at": row[5]}
+            for row in rows
+        ]
+        return items, items[-1]["conversation_id"] if has_more else None
+
+    def update_metadata(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        model: str | None = None,
+        workspace: Path | None = None,
+    ) -> None:
+        """Update selected persisted metadata without changing unrelated fields."""
+        fields = ["updated_at_utc = ?"]
+        values: list[Any] = [_utc_timestamp()]
+        for column, value in (("title", title), ("model", model), ("workspace", workspace)):
+            if value is not None:
+                fields.append(f"{column} = ?")
+                values.append(str(value))
+        values.append(conversation_id)
+        with closing(self.state._connect()) as connection:
+            connection.execute(
+                f"UPDATE conversations SET {', '.join(fields)} WHERE conversation_id = ?",
+                values,
+            )
+
+    def save_runtime(self, runtime: Any) -> None:
+        """Atomically checkpoint ordered messages and conversation-scoped selections."""
+        with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    UPDATE conversations SET model = ?, workspace = ?,
+                        capability_groups_json = ?, active_skills_json = ?, updated_at_utc = ?
+                    WHERE conversation_id = ?
+                    """,
+                    (runtime.model, str(runtime.workspace),
+                     json.dumps(sorted(runtime.capability_state.active_groups)),
+                     json.dumps(list(runtime.skill_state.active_ids)), _utc_timestamp(),
+                     runtime.conversation_id),
+                )
+                self._replace_messages(connection, runtime.conversation_id, runtime.messages)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def start_turn(self, conversation_id: str, turn_id: str, user_prompt: str) -> None:
+        """Record an active turn before model work begins."""
+        with closing(self.state._connect()) as connection:
+            next_sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM conversation_turns WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT INTO conversation_turns(
+                    conversation_id, turn_id, sequence, status, user_prompt, started_at_utc
+                ) VALUES (?, ?, ?, 'running', ?, ?)
+                """,
+                (conversation_id, turn_id, next_sequence, user_prompt, _utc_timestamp()),
+            )
+
+    def save_turn_event(self, conversation_id: str, turn_id: str, event: dict[str, Any]) -> None:
+        """Append one ordered runtime event to an active persisted turn."""
+        with closing(self.state._connect()) as connection:
+            row = connection.execute(
+                "SELECT events_json FROM conversation_turns WHERE conversation_id = ? AND turn_id = ?",
+                (conversation_id, turn_id),
+            ).fetchone()
+            events = json.loads(row[0]) if row else []
+            events.append(event)
+            connection.execute(
+                "UPDATE conversation_turns SET events_json = ? WHERE conversation_id = ? AND turn_id = ?",
+                (json.dumps(events, ensure_ascii=False, separators=(",", ":")), conversation_id, turn_id),
+            )
+
+    def checkpoint_turn(
+        self, runtime: Any, turn_id: str, event: dict[str, Any],
+    ) -> None:
+        """Atomically retain a completed tool event and its exact model history."""
+        with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT events_json FROM conversation_turns WHERE conversation_id = ? AND turn_id = ?",
+                    (runtime.conversation_id, turn_id),
+                ).fetchone()
+                events = json.loads(row[0]) if row else []
+                events.append(event)
+                encoded_messages = json.dumps(
+                    runtime.messages, ensure_ascii=False, separators=(",", ":")
+                )
+                connection.execute(
+                    """
+                    UPDATE conversation_turns SET events_json = ?, retained_messages_json = ?
+                    WHERE conversation_id = ? AND turn_id = ?
+                    """,
+                    (json.dumps(events, ensure_ascii=False, separators=(",", ":")),
+                     encoded_messages, runtime.conversation_id, turn_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE conversations SET model = ?, workspace = ?,
+                        capability_groups_json = ?, active_skills_json = ?, updated_at_utc = ?
+                    WHERE conversation_id = ?
+                    """,
+                    (runtime.model, str(runtime.workspace),
+                     json.dumps(sorted(runtime.capability_state.active_groups)),
+                     json.dumps(list(runtime.skill_state.active_ids)), _utc_timestamp(),
+                     runtime.conversation_id),
+                )
+                self._replace_messages(connection, runtime.conversation_id, runtime.messages)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def save_turn_messages(
+        self, conversation_id: str, turn_id: str, messages: list[dict[str, Any]],
+    ) -> None:
+        """Checkpoint the exact retained model history associated with a turn."""
+        encoded = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+        with closing(self.state._connect()) as connection:
+            connection.execute(
+                """
+                UPDATE conversation_turns SET retained_messages_json = ?
+                WHERE conversation_id = ? AND turn_id = ?
+                """,
+                (encoded, conversation_id, turn_id),
+            )
+
+    def finish_turn(
+        self, conversation_id: str, turn_id: str, status: str, error: str | None,
+    ) -> None:
+        """Finalize one turn with its explicit terminal status."""
+        with closing(self.state._connect()) as connection:
+            connection.execute(
+                """
+                UPDATE conversation_turns SET status = ?, error = ?, finished_at_utc = ?
+                WHERE conversation_id = ? AND turn_id = ?
+                """,
+                (status, error, _utc_timestamp(), conversation_id, turn_id),
+            )
+
+    def history(
+        self, conversation_id: str, limit: int, after: int = 0,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Return append-stable turn history after a monotonically increasing cursor."""
+        with closing(self.state._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT turn_id, sequence, status, user_prompt, error, events_json,
+                       retained_messages_json, started_at_utc, finished_at_utc
+                FROM conversation_turns
+                WHERE conversation_id = ? AND sequence > ?
+                ORDER BY sequence LIMIT ?
+                """,
+                (conversation_id, after, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = [
+            {"turn_id": row[0], "sequence": row[1], "status": row[2],
+             "user_prompt": row[3], "error": row[4], "events": json.loads(row[5]),
+             "retained_messages": json.loads(row[6]),
+             "started_at": row[7], "finished_at": row[8]}
+            for row in rows
+        ]
+        return items, items[-1]["sequence"] if has_more else None
+
+    def delete(self, conversation_id: str) -> bool:
+        """Delete only database conversation records, never workspace files or logs."""
+        with closing(self.state._connect()) as connection:
+            cursor = connection.execute(
+                "DELETE FROM conversations WHERE conversation_id = ?", (conversation_id,)
+            )
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _replace_messages(
+        connection: sqlite3.Connection,
+        conversation_id: str,
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Replace a conversation snapshot while preserving caller-provided order."""
+        connection.execute(
+            "DELETE FROM conversation_messages WHERE conversation_id = ?", (conversation_id,)
+        )
+        connection.executemany(
+            "INSERT INTO conversation_messages(conversation_id, sequence, message_json) VALUES (?, ?, ?)",
+            [
+                (conversation_id, sequence, json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+                for sequence, message in enumerate(messages, start=1)
+            ],
+        )

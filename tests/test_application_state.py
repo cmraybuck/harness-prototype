@@ -9,6 +9,7 @@ from pathlib import Path
 
 from harness_prototype.application_state import (
     CURRENT_SCHEMA_VERSION,
+    ConversationStore,
     CorruptStateStoreError,
     StateStore,
     UnsupportedSchemaError,
@@ -130,6 +131,43 @@ class ApplicationStateTests(unittest.TestCase):
             for scope in ("", " padded", "line\nbreak"):
                 with self.subTest(scope=scope), self.assertRaises(ValueError):
                     store.set(scope, "key", True)
+
+    def test_conversation_turn_recovery_and_stable_paging(self) -> None:
+        """Persist ordered messages and mark an abandoned turn interrupted on reopen."""
+        with tempfile.TemporaryDirectory() as temporary:
+            state = StateStore(Path(temporary) / "state.sqlite3")
+            conversations = ConversationStore(state)
+            workspace = Path(temporary)
+            conversations.create(
+                "first", "First", "model", workspace,
+                [{"role": "system", "content": "one"}],
+            )
+            conversations.create(
+                "second", "Second", "model", workspace,
+                [{"role": "system", "content": "two"}],
+            )
+            page, cursor = conversations.list_conversations(1)
+            self.assertEqual(len(page), 1)
+            conversations.create(
+                "third", "Third", "model", workspace,
+                [{"role": "system", "content": "three"}],
+            )
+            following, _ = conversations.list_conversations(2, cursor)
+            self.assertEqual([item["conversation_id"] for item in following], ["first"])
+
+            conversations.start_turn("first", "turn", "inspect")
+            conversations.save_turn_event(
+                "first", "turn", {"sequence": 1, "type": "tool_result", "result": {"ok": True}}
+            )
+            reopened = ConversationStore(StateStore(state.path))
+            history, next_cursor = reopened.history("first", 10)
+            self.assertIsNone(next_cursor)
+            self.assertEqual(history[0]["status"], "interrupted")
+            self.assertEqual(history[0]["events"][0]["type"], "tool_result")
+            self.assertEqual(
+                reopened.load("first")["messages"],
+                [{"role": "system", "content": "one"}],
+            )
 
 
 if __name__ == "__main__":

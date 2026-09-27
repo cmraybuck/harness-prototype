@@ -51,6 +51,7 @@ class ApplicationServiceTests(unittest.TestCase):
             workspace=self.workspace,
             models=("test-model", "other-model"),
             runtime_factory=runtime_factory,
+            state_database_path=self.workspace / "state.sqlite3",
         )
         self.host.start()
 
@@ -162,6 +163,62 @@ class ApplicationServiceTests(unittest.TestCase):
             "PATCH", f"/v1/conversations/{conversation_id}", {"workspace": str(self.workspace)}
         )
         self.assertEqual((status, Path(changed["workspace"])), (200, self.workspace.resolve()))
+
+    def test_conversations_persist_list_rename_resume_and_delete(self) -> None:
+        """Manage durable chats and restore exact retained history after restart."""
+        _, first = self.request("POST", "/v1/conversations", {})
+        _, second = self.request("POST", "/v1/conversations", {"model": "other-model"})
+        status, renamed = self.request(
+            "PATCH", f"/v1/conversations/{first['conversation_id']}", {"title": "Repository review"}
+        )
+        self.assertEqual((status, renamed["title"]), (200, "Repository review"))
+        self.request(
+            "POST", f"/v1/conversations/{first['conversation_id']}/turns", {"message": "persist me"}
+        )
+
+        status, page = self.request("GET", "/v1/conversations?limit=1")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(page["next_cursor"])
+        status, following = self.request(
+            "GET", f"/v1/conversations?limit=1&after={page['next_cursor']}"
+        )
+        self.assertEqual(status, 200)
+        self.assertNotEqual(
+            page["conversations"][0]["conversation_id"],
+            following["conversations"][0]["conversation_id"],
+        )
+        status, history = self.request(
+            "GET", f"/v1/conversations/{first['conversation_id']}/history?limit=1"
+        )
+        self.assertEqual((status, history["turns"][0]["status"]), (200, "success"))
+        self.assertEqual(
+            [event["type"] for event in history["turns"][0]["events"]],
+            ["tool_call", "tool_result"],
+        )
+
+        runtime_factory = self.host.server.registry.runtime_factory
+        self.host.stop()
+        self.host = DesktopServiceHost(
+            workspace=self.workspace,
+            models=("test-model", "other-model"),
+            runtime_factory=runtime_factory,
+            state_database_path=self.workspace / "state.sqlite3",
+        )
+        self.host.start()
+        status, restored = self.request(
+            "GET", f"/v1/conversations/{first['conversation_id']}"
+        )
+        self.assertEqual((status, restored["title"]), (200, "Repository review"))
+        runtime = self.host.server.registry.get(first["conversation_id"])
+        self.assertEqual(runtime.messages[-2]["content"], "persist me")
+        self.assertEqual(runtime.messages[-1]["content"], "Checking. Done.")
+
+        status, deleted = self.request(
+            "DELETE", f"/v1/conversations/{second['conversation_id']}"
+        )
+        self.assertEqual((status, deleted["status"]), (200, "deleted"))
+        status, missing = self.request("GET", f"/v1/conversations/{second['conversation_id']}")
+        self.assertEqual((status, missing["error"]["code"]), (404, "conversation_not_found"))
 
     def test_conversations_run_concurrently_without_mixing_history(self) -> None:
         """Allow independent runtimes to overlap while retaining separate prompts."""

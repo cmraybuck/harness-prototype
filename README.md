@@ -598,9 +598,12 @@ The version-one HTTP operations are:
 | --- | --- |
 | `GET /v1/health` | Report listener readiness. |
 | `GET /v1/capabilities` | List configured models, backend tools, operations, events, and request limits. |
-| `POST /v1/conversations` | Create an in-memory conversation with optional `model` and `workspace` strings. |
+| `POST /v1/conversations` | Create a durable conversation with optional `model` and `workspace` strings. |
+| `GET /v1/conversations?limit=50&after={id}` | List conversations newest-first with a stable cursor and a 1–100 item bound. |
 | `GET /v1/conversations/{id}` | Read the selected model and workspace. |
-| `PATCH /v1/conversations/{id}` | Select one configured `model` or existing `workspace`; either resets conversation context. |
+| `GET /v1/conversations/{id}/history?limit=50&after={sequence}` | Read persisted turn outcomes and ordered tool events with stable append-only paging. |
+| `PATCH /v1/conversations/{id}` | Rename with `title`, or select one configured `model` or existing `workspace`; selection changes reset conversation context. |
+| `DELETE /v1/conversations/{id}` | Delete conversation records only; workspace files and interaction logs are retained. |
 | `POST /v1/conversations/{id}/turns` | Submit one nonempty `message` and receive an NDJSON event stream. Concurrent turns return `conversation_busy`. |
 | `POST /v1/conversations/{id}/turns/{turn_id}/cancel` | Cooperatively cancel only the matching active turn. |
 | `POST /v1/permissions/{id}` | Resolve a pending request with one of the choices advertised in its event. |
@@ -620,7 +623,13 @@ context accounting, capability and skill state, workspace access, and cancellati
 Different conversations may run concurrently, but a second turn in the same
 conversation returns `conversation_busy`. Cancellation requires both stable IDs,
 so a stale request cannot interrupt a later turn. Service shutdown interrupts and
-boundedly waits for active turns to release their reservations.
+boundedly waits for active turns to release their reservations. Conversations,
+exact model-facing message order, completed tool exchanges, turn outcomes,
+model/workspace selections, and timestamps are stored in the configured SQLite
+state database. Completed tool results are checkpointed during a turn. On restart,
+unfinished `running` turns are marked `interrupted` and retained conversations load
+lazily. Deleting a conversation cascades only through its database messages and
+turns; it never deletes workspace files or the separate interaction logs.
 
 ## Verify and extend
 
@@ -663,7 +672,8 @@ dependencies, and roadmap maintenance.
 ### Application state
 
 `StateStore` provides a versioned SQLite store for bounded JSON application
-values. By default, `HARNESS_STATE_DATABASE_PATH` points to `state.sqlite3` in
+values, and `ConversationStore` owns relational conversation, message, and turn
+records. By default, `HARNESS_STATE_DATABASE_PATH` points to `state.sqlite3` in
 the platform FLUX application-data directory; a relative override starts at the
 project root. The store uses short-lived connections, WAL journaling, full
 synchronous writes, a busy timeout, and explicit transactions so independent
