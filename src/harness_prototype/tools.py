@@ -11,7 +11,14 @@ from typing import get_args, get_origin
 
 from .approval import ToolCategory
 from .config import CHECKS
-from .execution import MAX_COMMAND_ARGUMENTS, MAX_TEST_TARGETS, run_checks, run_command, run_tests
+from .execution import (
+    MAX_COMMAND_ARGUMENTS,
+    MAX_TEST_TARGETS,
+    install_dependencies,
+    run_checks,
+    run_command,
+    run_tests,
+)
 from .files import (
     MAX_FILE_CHANGES,
     apply_file_changes,
@@ -181,6 +188,28 @@ RUN_COMMAND_SCHEMA = {
     },
 }
 
+INSTALL_DEPENDENCIES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "install_dependencies",
+        "description": (
+            "Install one workspace project's manifest dependencies with its "
+            "detected manager. Ask for clarification after ambiguous or unsupported results."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative project directory.",
+                    "default": ".",
+                },
+            },
+        },
+    },
+}
+
 SEARCH_PROJECT_SCHEMA = {
     "type": "function",
     "function": {
@@ -287,6 +316,15 @@ TOOL_SPECS = {
             "active workspace working directory", "configured executable allowlist",
             "shell executables always denied", "1-100 arguments",
             "configured timeout and output bounds",
+        ),
+    ),
+    "install_dependencies": ToolSpec(
+        install_dependencies,
+        ToolCategory.EXECUTION,
+        model_schema=INSTALL_DEPENDENCIES_SCHEMA,
+        material_limits=(
+            "one workspace project; supported manifest managers; system pip denied; "
+            "locks preferred; configured timeout/output bounds",
         ),
     ),
     "apply_file_changes": ToolSpec(

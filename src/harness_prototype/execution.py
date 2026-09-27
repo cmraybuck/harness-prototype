@@ -1,11 +1,14 @@
 """Constrained command execution with bounded output and hard time limits."""
 
+import json
 import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 from threading import Thread
 from time import monotonic
+import tomllib
 from typing import BinaryIO
 
 from .config import (
@@ -27,6 +30,13 @@ DENIED_EXECUTABLES = frozenset({
     "powershell.exe", "sh", "wsl", "wsl.exe", "zsh",
 })
 _TRUNCATION_MARKER = b"\n... output truncated ...\n"
+
+DEPENDENCY_FILES = frozenset({
+    "Cargo.lock", "Cargo.toml", "Pipfile", "Pipfile.lock", "bun.lock",
+    "bun.lockb", "package-lock.json", "package.json", "packages.lock.json",
+    "pnpm-lock.yaml", "poetry.lock", "pyproject.toml", "requirements.txt",
+    "uv.lock", "yarn.lock",
+})
 
 
 class _BoundedOutput:
@@ -158,10 +168,11 @@ def _drain_output(stream: BinaryIO, capture: _BoundedOutput) -> None:
 
 
 def _run_configured_command(
-    command: list[str], operation: str, *, success_status: str = "passed"
+    command: list[str], operation: str, *, success_status: str = "passed",
+    cwd: Path | None = None,
 ) -> dict:
     """Execute one validated argument array with shared capture and timeout behavior."""
-    workspace = Path.cwd().resolve()
+    workspace = cwd or Path.cwd().resolve()
     started = monotonic()
     try:
         process = subprocess.Popen(
@@ -224,6 +235,200 @@ def _run_configured_command(
     return tool_success(
         complete=not output_truncated, truncated=output_truncated, status=status, **payload,
     )
+
+
+def _dependency_file_state(project: Path) -> dict[str, tuple[int, int]]:
+    """Capture bounded metadata for dependency files an install may modify."""
+    state: dict[str, tuple[int, int]] = {}
+    for path in project.iterdir():
+        if path.is_file() and (
+            path.name in DEPENDENCY_FILES
+            or path.suffix.casefold() in {".csproj", ".fsproj", ".vbproj"}
+        ):
+            stat = path.stat()
+            state[path.name] = (stat.st_size, stat.st_mtime_ns)
+    return state
+
+
+def _python_manager(project: Path) -> tuple[str, list[str]] | None:
+    """Choose an unambiguous manifest-based Python dependency operation."""
+    pyproject = project / "pyproject.toml"
+    if pyproject.is_file():
+        try:
+            parsed = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+            return None
+        tool = parsed.get("tool", {})
+        managers = []
+        if (project / "uv.lock").is_file() or "uv" in tool:
+            locked = ["--locked"] if (project / "uv.lock").is_file() else []
+            managers.append(("uv", ["uv", "sync"] + locked))
+        if "poetry" in tool or (project / "poetry.lock").is_file():
+            managers.append(("poetry", ["poetry", "install", "--no-interaction"]))
+        if len(managers) == 1:
+            return managers[0]
+        if len(managers) > 1:
+            return ("ambiguous", [])
+    if (project / "Pipfile").is_file():
+        command = (
+            ["pipenv", "sync"]
+            if (project / "Pipfile.lock").is_file()
+            else ["pipenv", "install"]
+        )
+        return "pipenv", command
+    if (project / "requirements.txt").is_file():
+        if sys.prefix == sys.base_prefix and not os.environ.get("VIRTUAL_ENV"):
+            return "system_pip", []
+        return "pip", [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"]
+    if pyproject.is_file():
+        return "system_pip", []
+    return None
+
+
+def _node_manager(project: Path) -> tuple[str, list[str]] | None:
+    """Choose a Node package manager from package metadata and one lockfile."""
+    manifest = project / "package.json"
+    if not manifest.is_file():
+        return None
+    try:
+        parsed = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    declared = parsed.get("packageManager")
+    declared_name = declared.split("@", 1)[0].casefold() if isinstance(declared, str) else None
+    lock_managers = [
+        manager for filename, manager in (
+            ("package-lock.json", "npm"), ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"), ("bun.lock", "bun"), ("bun.lockb", "bun"),
+        ) if (project / filename).is_file()
+    ]
+    candidates = set(lock_managers)
+    if declared_name:
+        candidates.add(declared_name)
+    if not candidates:
+        candidates.add("npm")
+    if len(candidates) != 1:
+        return "ambiguous", []
+    manager = candidates.pop()
+    if manager == "npm":
+        return manager, ["npm", "ci"] if "npm" in lock_managers else ["npm", "install"]
+    if manager == "pnpm":
+        frozen = ["--frozen-lockfile"] if "pnpm" in lock_managers else []
+        return manager, ["pnpm", "install"] + frozen
+    if manager == "yarn":
+        frozen = ["--frozen-lockfile"] if "yarn" in lock_managers else []
+        return manager, ["yarn", "install"] + frozen
+    if manager == "bun":
+        frozen = ["--frozen-lockfile"] if "bun" in lock_managers else []
+        return manager, ["bun", "install"] + frozen
+    return "unsupported", []
+
+
+def _dependency_operation(project: Path) -> tuple[str, list[str]] | dict:
+    """Resolve exactly one supported dependency manager at a project root."""
+    operations = [
+        operation
+        for operation in (_python_manager(project), _node_manager(project))
+        if operation
+    ]
+    cargo = project / "Cargo.toml"
+    if cargo.is_file():
+        locked = ["--locked"] if (project / "Cargo.lock").is_file() else []
+        operations.append(("cargo", ["cargo", "fetch"] + locked))
+    dotnet_projects = sorted(
+        path
+        for path in project.iterdir()
+        if path.suffix.casefold() in {".csproj", ".fsproj", ".vbproj"}
+    )
+    if len(dotnet_projects) == 1:
+        command = ["dotnet", "restore", dotnet_projects[0].name]
+        if (project / "packages.lock.json").is_file():
+            command.append("--locked-mode")
+        operations.append(("dotnet", command))
+    elif len(dotnet_projects) > 1:
+        operations.append(("ambiguous", []))
+    if not operations:
+        return tool_error(
+            "No supported dependency manifest was found in the selected directory.",
+            status="unsupported_project",
+        )
+    if len(operations) != 1 or operations[0][0] == "ambiguous":
+        return tool_error(
+            "The project has multiple or ambiguous dependency manifests; specify "
+            "a directory containing exactly one supported project.",
+            status="ambiguous_project",
+        )
+    manager, command = operations[0]
+    if manager == "system_pip":
+        return tool_error(
+            "A pip-compatible project was found, but no active virtual environment "
+            "makes this a potentially system-wide install.",
+            status="system_install_denied",
+        )
+    if manager == "unsupported" or not command:
+        return tool_error(
+            "The detected package manager is not supported.",
+            status="unsupported_project",
+        )
+    return manager, command
+
+
+def install_dependencies(path: str = ".") -> dict:
+    """Install dependencies from one recognized project inside the active workspace.
+
+    Args:
+        path: Workspace-relative directory containing one supported project manifest.
+
+    The tool selects a shell-free package-manager operation, prefers lock-preserving
+    modes, rejects system-wide pip installs, and reports dependency files changed by
+    the operation. Nested projects must be selected explicitly.
+    """
+    if not isinstance(path, str) or not path.strip():
+        return tool_error("path must be a nonempty directory path.", status="invalid_project")
+    workspace = Path.cwd().resolve()
+    try:
+        project = (workspace / path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return tool_error("The project path is invalid.", status="invalid_project")
+    if project != workspace and not project.is_relative_to(workspace):
+        return tool_error(
+            "The project path must stay inside the active workspace.",
+            status="invalid_project",
+        )
+    if not project.is_dir():
+        return tool_error(
+            "The project path must name an existing directory.",
+            status="invalid_project",
+        )
+    try:
+        operation = _dependency_operation(project)
+        before = _dependency_file_state(project)
+    except OSError as error:
+        return tool_error(
+            f"Could not inspect dependency manifests: {error}",
+            status="invalid_project",
+        )
+    if isinstance(operation, dict):
+        return operation
+    manager, command = operation
+    result = _run_configured_command(
+        command,
+        f"{manager} dependency installation",
+        success_status="succeeded",
+        cwd=project,
+    )
+    try:
+        after = _dependency_file_state(project)
+    except OSError as error:
+        after = before
+        result["modified_files_error"] = str(error)
+    result["manager"] = manager
+    result["command"] = command
+    result["project_path"] = str(project)
+    result["modified_files"] = sorted(
+        name for name in before.keys() | after.keys() if before.get(name) != after.get(name)
+    )
+    return result
 
 
 def run_command(command: list[str]) -> dict:

@@ -9,7 +9,12 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from harness_prototype.config import CheckConfig
-from harness_prototype.execution import run_checks, run_command, run_tests
+from harness_prototype.execution import (
+    install_dependencies,
+    run_checks,
+    run_command,
+    run_tests,
+)
 
 
 class TestExecutionTests(unittest.TestCase):
@@ -245,6 +250,92 @@ class TestExecutionTests(unittest.TestCase):
             truncated = run_command(["git", "status"])
         self.assertTrue(truncated["output_truncated"])
         self.assertFalse(truncated["complete"])
+
+    def test_install_dependencies_prefers_locked_manifests(self) -> None:
+        """Generate lock-preserving commands without invoking real package managers."""
+        cases = [
+            ({"package.json": "{}", "package-lock.json": "{}"}, ["npm", "ci"], "npm"),
+            (
+                {"pyproject.toml": "[project]\nname='sample'\n", "uv.lock": ""},
+                ["uv", "sync", "--locked"],
+                "uv",
+            ),
+            (
+                {"Cargo.toml": "[package]\nname='sample'\n", "Cargo.lock": ""},
+                ["cargo", "fetch", "--locked"],
+                "cargo",
+            ),
+            (
+                {"sample.csproj": "<Project />", "packages.lock.json": "{}"},
+                ["dotnet", "restore", "sample.csproj", "--locked-mode"],
+                "dotnet",
+            ),
+        ]
+        for files, expected_command, expected_manager in cases:
+            with self.subTest(manager=expected_manager):
+                for path in self.workspace.iterdir():
+                    path.unlink()
+                for name, content in files.items():
+                    (self.workspace / name).write_text(content, encoding="utf-8")
+                process, launch = self._process_factory(0, stdout=b"installed\n")
+                with patch("harness_prototype.execution.subprocess.Popen", side_effect=launch):
+                    result = install_dependencies()
+                self.assertEqual(process.command, expected_command)
+                self.assertEqual(result["manager"], expected_manager)
+                self.assertEqual(result["status"], "succeeded")
+                self.assertEqual(process.options["cwd"], self.workspace.resolve())
+                self.assertFalse(process.options["shell"])
+
+    def test_install_dependencies_rejects_unsafe_or_ambiguous_projects(self) -> None:
+        """Reject workspace escapes, manager conflicts, and system pip installs."""
+        with patch("harness_prototype.execution.subprocess.Popen") as launch:
+            outside = install_dependencies("..")
+            (self.workspace / "package.json").write_text("{}", encoding="utf-8")
+            (self.workspace / "package-lock.json").write_text("{}", encoding="utf-8")
+            (self.workspace / "yarn.lock").write_text("", encoding="utf-8")
+            ambiguous = install_dependencies()
+            for path in self.workspace.iterdir():
+                path.unlink()
+            (self.workspace / "requirements.txt").write_text("example\n", encoding="utf-8")
+            with patch("harness_prototype.execution.sys.prefix", "base"), patch(
+                "harness_prototype.execution.sys.base_prefix", "base"
+            ), patch.dict(os.environ, {}, clear=True):
+                system_pip = install_dependencies()
+        self.assertEqual(outside["status"], "invalid_project")
+        self.assertEqual(ambiguous["status"], "ambiguous_project")
+        self.assertEqual(system_pip["status"], "system_install_denied")
+        launch.assert_not_called()
+
+    def test_install_dependencies_reports_failure_timeout_and_modified_files(self) -> None:
+        """Preserve structured process outcomes and report changed lockfiles."""
+        (self.workspace / "package.json").write_text("{}", encoding="utf-8")
+        lockfile = self.workspace / "package-lock.json"
+        lockfile.write_text("before", encoding="utf-8")
+        process, base_launch = self._process_factory(2, stderr=b"install failed\n")
+
+        def changing_launch(command, **kwargs):
+            """Simulate a package manager changing its lockfile before exiting."""
+            lockfile.write_text("after content", encoding="utf-8")
+            return base_launch(command, **kwargs)
+
+        with patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=changing_launch
+        ):
+            failed = install_dependencies()
+        self.assertTrue(failed["ok"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["exit_code"], 2)
+        self.assertEqual(failed["modified_files"], ["package-lock.json"])
+
+        process.wait.side_effect = subprocess.TimeoutExpired("npm", 1)
+        with patch(
+            "harness_prototype.execution.subprocess.Popen", side_effect=base_launch
+        ), patch("harness_prototype.execution.TEST_TIMEOUT_SECONDS", 1), patch(
+            "harness_prototype.execution._terminate_process"
+        ):
+            timed_out = install_dependencies()
+        self.assertFalse(timed_out["ok"])
+        self.assertEqual(timed_out["status"], "timed_out")
 
 
 if __name__ == "__main__":
