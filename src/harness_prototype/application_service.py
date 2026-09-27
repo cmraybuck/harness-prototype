@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import Condition, Event, Lock, Thread
 from time import monotonic
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 from ollama import Client
@@ -18,7 +18,8 @@ from ollama import Client
 from .access import AccessChoice
 from .agent_loop import AgentRuntime
 from .approval import ApprovalPromptResult, ApprovalRequest
-from .config import HOST, MODELS
+from .application_state import ConversationStore, StateStore
+from .config import HOST, MODELS, STATE_DATABASE_PATH
 from .services import stop_all_services
 from .tools import TOOL_SPECS
 
@@ -83,10 +84,12 @@ class ConversationRegistry:
         self,
         runtime_factory: Callable[[str, Path], AgentRuntime],
         models: tuple[str, ...],
+        store: ConversationStore,
     ) -> None:
         """Create a registry with injectable runtime construction."""
         self.runtime_factory = runtime_factory
         self.models = models
+        self.store = store
         self.permissions = PermissionBroker()
         self._lock = Lock()
         self._turns_changed = Condition(self._lock)
@@ -104,6 +107,7 @@ class ConversationRegistry:
                 "invalid_workspace", "Workspace must be an existing directory.", HTTPStatus.BAD_REQUEST
             )
         runtime = self.runtime_factory(model, resolved)
+        self.store.create(runtime.conversation_id, "New conversation", model, resolved, runtime.messages)
         with self._lock:
             self._runtimes[runtime.conversation_id] = runtime
         return runtime
@@ -113,10 +117,53 @@ class ConversationRegistry:
         with self._lock:
             runtime = self._runtimes.get(conversation_id)
         if runtime is None:
+            persisted = self.store.load(conversation_id)
+            if persisted is not None:
+                workspace = Path(persisted["workspace"])
+                if not workspace.is_dir():
+                    raise ProtocolError(
+                        "workspace_unavailable",
+                        "The conversation workspace is no longer available.",
+                        HTTPStatus.CONFLICT,
+                    )
+                runtime = self.runtime_factory(persisted["model"], workspace)
+                runtime.conversation_id = persisted["conversation_id"]
+                runtime.messages = persisted["messages"]
+                runtime.capability_state.active_groups = set(persisted["capability_groups"])
+                if persisted["active_skills"]:
+                    activation = runtime.activate_skills(persisted["active_skills"])
+                    if not activation["ok"]:
+                        runtime.skill_state.active_ids = ()
+                with self._lock:
+                    self._runtimes[conversation_id] = runtime
+        if runtime is None:
             raise ProtocolError(
                 "conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND
             )
         return runtime
+
+    def list(self, limit: int, after: str | None) -> tuple[list[dict[str, Any]], str | None]:
+        """Return one stable page of persisted conversation metadata."""
+        try:
+            return self.store.list_conversations(limit, after)
+        except ValueError as error:
+            raise ProtocolError("invalid_cursor", str(error), HTTPStatus.BAD_REQUEST) from error
+
+    def rename(self, conversation_id: str, title: str) -> AgentRuntime:
+        """Rename an idle conversation without changing its retained context."""
+        runtime = self.get_idle(conversation_id)
+        self.store.update_metadata(conversation_id, title=title)
+        return runtime
+
+    def delete(self, conversation_id: str) -> None:
+        """Delete an idle persisted conversation and evict its runtime."""
+        self.get_idle(conversation_id)
+        if not self.store.delete(conversation_id):
+            raise ProtocolError(
+                "conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND
+            )
+        with self._lock:
+            self._runtimes.pop(conversation_id, None)
 
     def begin_turn(self, conversation_id: str, turn_id: str) -> AgentRuntime:
         """Prepare and reserve one conversation for an identified turn."""
@@ -136,6 +183,10 @@ class ConversationRegistry:
             runtime.prepare_turn()
             self._active_turns[conversation_id] = (turn_id, runtime)
         return runtime
+
+    def abandon_turn(self, conversation_id: str) -> None:
+        """Release a reservation when persistence fails before execution starts."""
+        self.finish_turn(conversation_id)
 
     def cancel_turn(self, conversation_id: str, turn_id: str) -> None:
         """Interrupt only the active turn matching both stable identifiers."""
@@ -253,6 +304,15 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {"api_version": API_VERSION, "status": "ready"})
             elif parts == [API_VERSION, "capabilities"]:
                 self._json(HTTPStatus.OK, self._capabilities())
+            elif parts == [API_VERSION, "conversations"]:
+                limit, after = self._paging_query(text_cursor=True)
+                conversations, next_cursor = self.server.registry.list(limit, after)
+                self._json(HTTPStatus.OK, {"api_version": API_VERSION, "conversations": conversations, "next_cursor": next_cursor})
+            elif len(parts) == 4 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "history":
+                self.server.registry.get(parts[2])
+                limit, after = self._paging_query(text_cursor=False)
+                turns, next_cursor = self.server.registry.store.history(parts[2], limit, int(after or 0))
+                self._json(HTTPStatus.OK, {"api_version": API_VERSION, "conversation_id": parts[2], "turns": turns, "next_cursor": next_cursor})
             elif len(parts) == 3 and parts[:2] == [API_VERSION, "conversations"]:
                 runtime = self.server.registry.get(parts[2])
                 self._json(HTTPStatus.OK, self._conversation(runtime))
@@ -293,25 +353,44 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             self._protocol_error(error)
 
     def do_PATCH(self) -> None:
-        """Select a configured model or workspace for a conversation."""
+        """Rename or select a configured model or workspace for a conversation."""
         try:
             parts = self._path_parts()
             if len(parts) != 3 or parts[:2] != [API_VERSION, "conversations"]:
                 raise ProtocolError("not_found", "Operation was not found.", HTTPStatus.NOT_FOUND)
             body = self._read_json()
-            runtime = self.server.registry.get_idle(parts[2])
+            if set(body) == {"title"} and isinstance(body["title"], str):
+                title = body["title"].strip()
+                if not title or len(title) > 200:
+                    raise ProtocolError("invalid_title", "Title must be 1 to 200 characters.", HTTPStatus.BAD_REQUEST)
+                runtime = self.server.registry.rename(parts[2], title)
+            else:
+                runtime = self.server.registry.get_idle(parts[2])
             if set(body) == {"model"} and isinstance(body["model"], str):
                 if body["model"] not in self.server.registry.models:
                     raise ProtocolError("invalid_model", "Model is not configured.", HTTPStatus.BAD_REQUEST)
                 runtime.change_model(body["model"])
+                self.server.registry.store.save_runtime(runtime)
             elif set(body) == {"workspace"} and isinstance(body["workspace"], str):
                 workspace = Path(body["workspace"]).expanduser().resolve()
                 if not workspace.is_dir():
                     raise ProtocolError("invalid_workspace", "Workspace must be an existing directory.", HTTPStatus.BAD_REQUEST)
                 runtime.change_workspace(workspace)
-            else:
+                self.server.registry.store.save_runtime(runtime)
+            elif set(body) != {"title"}:
                 raise ProtocolError("invalid_request", "Expected one model or workspace string.", HTTPStatus.BAD_REQUEST)
             self._json(HTTPStatus.OK, self._conversation(runtime))
+        except ProtocolError as error:
+            self._protocol_error(error)
+
+    def do_DELETE(self) -> None:
+        """Delete one idle conversation without touching its workspace or logs."""
+        try:
+            parts = self._path_parts()
+            if len(parts) != 3 or parts[:2] != [API_VERSION, "conversations"]:
+                raise ProtocolError("not_found", "Operation was not found.", HTTPStatus.NOT_FOUND)
+            self.server.registry.delete(parts[2])
+            self._json(HTTPStatus.OK, {"status": "deleted", "conversation_id": parts[2]})
         except ProtocolError as error:
             self._protocol_error(error)
 
@@ -332,6 +411,11 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             raise ProtocolError("invalid_request", "Expected one nonempty message string.", HTTPStatus.BAD_REQUEST)
         turn_id = str(uuid4())
         runtime = self.server.registry.begin_turn(conversation_id, turn_id)
+        try:
+            self.server.registry.store.start_turn(conversation_id, turn_id, body["message"])
+        except Exception:
+            self.server.registry.abandon_turn(conversation_id)
+            raise
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -366,14 +450,29 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             )
             return ApprovalPromptResult(decision == "allow", "service_client")
 
+        def observe_event(event: dict[str, Any]) -> None:
+            """Persist runtime evidence before exposing its public projection."""
+            if event.get("type") == "tool_result":
+                self.server.registry.store.checkpoint_turn(runtime, turn_id, event)
+            else:
+                self.server.registry.store.save_turn_event(conversation_id, turn_id, event)
+            stream.observe_runtime(event)
+
         try:
             result = runtime.continue_conversation(
                 body["message"],
                 on_text=lambda text: stream.emit("assistant_text", {"text": text}) if text else None,
                 on_permission=directory_permission,
                 on_approval=tool_approval,
-                on_event=stream.observe_runtime,
+                on_event=observe_event,
                 interrupt_prepared=True,
+            )
+            self.server.registry.store.save_runtime(runtime)
+            self.server.registry.store.save_turn_messages(
+                conversation_id, turn_id, runtime.messages
+            )
+            self.server.registry.store.finish_turn(
+                conversation_id, turn_id, result.outcome, result.error
             )
         finally:
             self.server.registry.finish_turn(conversation_id)
@@ -414,9 +513,30 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
     def _path_parts(self) -> list[str]:
         """Return decoded route segments without accepting query operations."""
         parsed = urlsplit(self.path)
-        if parsed.query or parsed.fragment:
-            raise ProtocolError("invalid_path", "Query parameters are not supported.", HTTPStatus.BAD_REQUEST)
+        if parsed.fragment:
+            raise ProtocolError("invalid_path", "Fragments are not supported.", HTTPStatus.BAD_REQUEST)
         return [part for part in parsed.path.split("/") if part]
+
+    def _paging_query(self, *, text_cursor: bool) -> tuple[int, str | None]:
+        """Validate bounded stable paging query parameters."""
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        if set(query) - {"limit", "after"} or any(len(values) != 1 for values in query.values()):
+            raise ProtocolError("invalid_query", "Only one limit and after value are supported.", HTTPStatus.BAD_REQUEST)
+        try:
+            limit = int(query.get("limit", ["50"])[0])
+            if isinstance(limit, bool) or not 1 <= limit <= 100:
+                raise ValueError
+            after = query.get("after", [None])[0]
+            if after == "":
+                raise ValueError
+            if after is not None and not text_cursor:
+                parsed_after = int(after)
+                if parsed_after < 0:
+                    raise ValueError
+                after = str(parsed_after)
+        except ValueError:
+            raise ProtocolError("invalid_paging", "limit must be 1 to 100 and after must be a valid cursor.", HTTPStatus.BAD_REQUEST) from None
+        return limit, after
 
     def _json(self, status: HTTPStatus, body: dict[str, Any]) -> None:
         """Write one bounded JSON response."""
@@ -438,15 +558,23 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "models": list(self.server.registry.models),
             "tools": sorted(TOOL_SPECS),
-            "operations": ["health", "conversations", "turns", "cancellation", "permissions", "model_selection", "workspace_selection"],
+            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "model_selection", "workspace_selection"],
             "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "failure", "interruption", "completion"],
             "limits": {"max_request_bytes": MAX_REQUEST_BYTES},
         }
 
-    @staticmethod
-    def _conversation(runtime: AgentRuntime) -> dict[str, Any]:
+    def _conversation(self, runtime: AgentRuntime) -> dict[str, Any]:
         """Return public conversation metadata."""
-        return {"api_version": API_VERSION, "conversation_id": runtime.conversation_id, "model": runtime.model, "workspace": str(runtime.workspace)}
+        persisted = self.server.registry.store.load(runtime.conversation_id) or {}
+        return {
+            "api_version": API_VERSION,
+            "conversation_id": runtime.conversation_id,
+            "title": persisted.get("title", "New conversation"),
+            "model": runtime.model,
+            "workspace": str(runtime.workspace),
+            "created_at": persisted.get("created_at"),
+            "updated_at": persisted.get("updated_at"),
+        }
 
 
 class ApplicationHTTPServer(ThreadingHTTPServer):
@@ -473,6 +601,7 @@ class DesktopServiceHost:
         workspace: Path | None = None,
         models: tuple[str, ...] = MODELS,
         runtime_factory: Callable[[str, Path], AgentRuntime] | None = None,
+        state_database_path: Path = STATE_DATABASE_PATH,
     ) -> None:
         """Validate exposure policy and configure a not-yet-started service."""
         try:
@@ -485,8 +614,9 @@ class DesktopServiceHost:
             raise ValueError("port must be an integer from 0 through 65535.")
         active_workspace = (workspace or Path.cwd()).resolve()
         factory = runtime_factory or (lambda model, path: AgentRuntime(Client(host=HOST), model, path))
+        store = ConversationStore(StateStore(state_database_path))
         self.server = ApplicationHTTPServer(
-            (host, port), ConversationRegistry(factory, models), active_workspace
+            (host, port), ConversationRegistry(factory, models, store), active_workspace
         )
         self._thread: Thread | None = None
 
