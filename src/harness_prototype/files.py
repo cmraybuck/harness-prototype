@@ -4,6 +4,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -25,6 +26,7 @@ EXCLUDED_SEARCH_DIRECTORIES = {
     ".svn", ".tox", ".venv", "__pycache__", "build", "coverage", "dist",
     "node_modules", "target", "venv",
 }
+EXCLUDED_SEARCH_DIRECTORY_PATHS = {("work", "logs")}
 
 
 @dataclass(frozen=True)
@@ -470,21 +472,31 @@ def search_project(
     file_pattern: str = "*",
     max_results: int = 100,
 ) -> dict:
-    """Search nested UTF-8 files for literal text in an authorized path.
+    """Search nested UTF-8 files with automatic bounded fallback matching.
 
     Args:
-        text: Nonempty, case-sensitive literal text to find within a source line.
+        text: Nonempty text to find within a source line.
         path: File or directory to search, absolute or relative to the working
             directory. Session authorization is enforced before this function.
         file_pattern: Optional case-insensitive filename wildcard, such as
             ``*.py``. It must be a filename pattern rather than a path.
         max_results: Maximum matching lines to return, between 1 and 100.
 
-    Results include resolved paths, one-based line numbers, and line
+    The search prefers exact case-sensitive matches while also finding
+    case-insensitive literal matches and case-insensitive matches that treat
+    each run of query whitespace as one or more whitespace characters. Results
+    are led by the strongest match while preserving at least one result from
+    each available quality when the result limit permits. Every match discloses
+    its quality; the result summarizes ``match_quality``, ``match_counts``, and
+    whether a fallback was returned. A complete miss may include shorter
+    ``suggested_queries``.
+
+    Results also include resolved paths, one-based line numbers, and line
     excerpts. Git metadata, common dependency/generated directories, links,
     binary or non-UTF-8 files, and files over 1 MiB are skipped. Traversal,
-    runtime, result count, and JSON-encoded result text are bounded; ``complete``
-    and ``stop_reason`` distinguish exhaustive searches from partial results.
+    runtime, result count, and JSON-encoded result text are bounded;
+    ``complete`` and ``stop_reason`` distinguish exhaustive searches from
+    partial results.
     """
     if not isinstance(text, str) or not text:
         return tool_error("text must be a nonempty string.")
@@ -497,6 +509,17 @@ def search_project(
         return tool_error("file_pattern must be a nonempty filename wildcard, not a path.")
     if type(max_results) is not int or not 1 <= max_results <= 100:
         return tool_error("max_results must be an integer between 1 and 100.")
+
+    exact_pattern = re.compile(re.escape(text))
+    case_insensitive_pattern = re.compile(re.escape(text), re.IGNORECASE)
+    flexible_parts = text.split()
+    flexible_pattern = (
+        re.compile(
+            r"\s+".join(re.escape(part) for part in flexible_parts),
+            re.IGNORECASE,
+        )
+        if flexible_parts else None
+    )
 
     try:
         workspace = Path.cwd().resolve()
@@ -511,6 +534,14 @@ def search_project(
     result = tool_success(
         workspace=str(workspace),
         path=str(search_path),
+        match_quality="none",
+        match_counts={
+            "exact": 0,
+            "case_insensitive": 0,
+            "whitespace_flexible": 0,
+        },
+        fallback_used=False,
+        suggested_queries=[],
         matches=[],
         stop_reason=None,
         files_searched=0,
@@ -521,13 +552,65 @@ def search_project(
     )
     deadline = time.monotonic() + SEARCH_SECONDS
     visited = 0
-    output_size = 0
     folded_pattern = file_pattern.casefold()
     pending = deque([search_path])
+    qualities = ("exact", "case_insensitive", "whitespace_flexible")
+    candidates: dict[str, list[dict]] = {quality: [] for quality in qualities}
 
-    def stop(reason: str) -> dict:
-        """Mark the search partial and return its accumulated evidence."""
-        result.update(complete=False, truncated=True, stop_reason=reason)
+    def suggested_queries() -> list[str]:
+        """Derive a few distinctive literal anchors without widening the path."""
+        full_query = text.strip().casefold()
+        anchors = []
+        seen = set()
+        for anchor in re.findall(r"[A-Za-z_][A-Za-z0-9_.:-]{2,}", text):
+            folded_anchor = anchor.casefold()
+            if folded_anchor == full_query or folded_anchor in seen:
+                continue
+            seen.add(folded_anchor)
+            anchors.append(anchor)
+        return sorted(anchors, key=len, reverse=True)[:3]
+
+    def finish(reason: str | None = None) -> dict:
+        """Rank available matches fairly and enforce result and output bounds."""
+        available_qualities = [quality for quality in qualities if candidates[quality]]
+        selected = []
+        consumed = {quality: 0 for quality in qualities}
+        for quality in available_qualities:
+            if len(selected) >= max_results:
+                break
+            selected.append(candidates[quality][0])
+            consumed[quality] = 1
+        for quality in qualities:
+            remaining = max_results - len(selected)
+            if remaining <= 0:
+                break
+            start = consumed[quality]
+            selected.extend(candidates[quality][start:start + remaining])
+
+        output_size = 0
+        for match in selected:
+            encoded_size = len(json.dumps(match, ensure_ascii=False))
+            if output_size + encoded_size > SEARCH_OUTPUT_CHARS:
+                reason = reason or "output_limit"
+                break
+            result["matches"].append(match)
+            output_size += encoded_size
+        returned_qualities = list(dict.fromkeys(
+            match["match_quality"] for match in result["matches"]
+        ))
+        if len(returned_qualities) == 1:
+            result["match_quality"] = returned_qualities[0]
+        elif returned_qualities:
+            result["match_quality"] = "mixed"
+        result["fallback_used"] = any(
+            quality != "exact" for quality in returned_qualities
+        )
+        if not available_qualities and result["complete"] and reason is None:
+            result["suggested_queries"] = suggested_queries()
+        if sum(result["match_counts"].values()) > max_results:
+            reason = reason or "result_limit"
+        if reason is not None:
+            result.update(complete=False, truncated=True, stop_reason=reason)
         return result
 
     def record_error(path_with_error: Path, error: OSError) -> None:
@@ -541,7 +624,7 @@ def search_project(
 
     while pending:
         if time.monotonic() >= deadline:
-            return stop("time_limit")
+            return finish("time_limit")
         current = pending.popleft()
         try:
             if current.is_symlink() or current.is_junction():
@@ -550,7 +633,16 @@ def search_project(
                 continue
             relative_parts = current.relative_to(search_path).parts
             directory_parts = relative_parts if current.is_dir() else relative_parts[:-1]
-            if any(part.casefold() in EXCLUDED_SEARCH_DIRECTORIES for part in directory_parts):
+            folded_directory_parts = tuple(part.casefold() for part in directory_parts)
+            excluded_relative_path = any(
+                len(folded_directory_parts) >= len(excluded_path)
+                and folded_directory_parts[-len(excluded_path):] == excluded_path
+                for excluded_path in EXCLUDED_SEARCH_DIRECTORY_PATHS
+            )
+            if (
+                any(part in EXCLUDED_SEARCH_DIRECTORIES for part in folded_directory_parts)
+                or excluded_relative_path
+            ):
                 result["skipped_files"]["excluded"] += 1
                 continue
             if current.is_dir():
@@ -559,7 +651,7 @@ def search_project(
                 for entry in children:
                     visited += 1
                     if visited > MAX_ENTRIES:
-                        return stop("entry_limit")
+                        return finish("entry_limit")
                     pending.append(Path(entry.path))
                 continue
             if not fnmatch.fnmatchcase(current.name.casefold(), folded_pattern):
@@ -579,11 +671,22 @@ def search_project(
             result["files_searched"] += 1
             lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
             for line_number, line in enumerate(lines, 1):
-                if text not in line:
+                quality = "none"
+                found = exact_pattern.search(line)
+                if found is not None:
+                    quality = "exact"
+                else:
+                    found = case_insensitive_pattern.search(line)
+                    if found is not None:
+                        quality = "case_insensitive"
+                    elif flexible_pattern is not None:
+                        found = flexible_pattern.search(line)
+                        if found is not None:
+                            quality = "whitespace_flexible"
+                if found is None:
                     continue
-                match_index = line.index(text)
-                excerpt_start = max(0, match_index - 200)
-                excerpt_end = min(len(line), match_index + len(text) + 200)
+                excerpt_start = max(0, found.start() - 200)
+                excerpt_end = min(len(line), found.end() + 200)
                 excerpt = line[excerpt_start:excerpt_end]
                 if excerpt_start:
                     excerpt = "…" + excerpt
@@ -593,17 +696,14 @@ def search_project(
                     "path": str(current),
                     "line_number": line_number,
                     "excerpt": excerpt,
+                    "match_quality": quality,
                 }
-                encoded_size = len(json.dumps(match, ensure_ascii=False))
-                if output_size + encoded_size > SEARCH_OUTPUT_CHARS:
-                    return stop("output_limit")
-                result["matches"].append(match)
-                output_size += encoded_size
-                if len(result["matches"]) >= max_results:
-                    return stop("result_limit")
+                result["match_counts"][quality] += 1
+                if len(candidates[quality]) < max_results:
+                    candidates[quality].append(match)
         except OSError as error:
             record_error(current, error)
-    return result
+    return finish()
 
 
 def read_file(path: str, start_line: int = 1, max_lines: int = 100) -> dict:

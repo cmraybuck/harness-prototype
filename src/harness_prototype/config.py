@@ -26,7 +26,9 @@ class Settings:
     models: tuple[str, ...]
     temperature: float
     context_length: int
+    research_context_length: int
     max_tool_rounds: int
+    inspection_tool_round_allowance: int
     identical_tool_call_limit: int
     consecutive_tool_failure_limit: int
     test_command: tuple[str, ...]
@@ -178,13 +180,29 @@ def load_settings(
         targets=True,
     )
 
+    context_length = positive_integer("HARNESS_CONTEXT_LENGTH", "4096")
+    research_context_length = positive_integer(
+        "HARNESS_RESEARCH_CONTEXT_LENGTH",
+        str(max(context_length, 32768)),
+    )
+    if research_context_length < context_length:
+        raise ValueError(
+            "HARNESS_RESEARCH_CONTEXT_LENGTH must be greater than or equal to "
+            "HARNESS_CONTEXT_LENGTH."
+        )
+
     return Settings(
         host=host,
         model=model,
         models=models,
         temperature=temperature,
-        context_length=positive_integer("HARNESS_CONTEXT_LENGTH", "4096"),
+        context_length=context_length,
+        research_context_length=research_context_length,
         max_tool_rounds=positive_integer("HARNESS_MAX_TOOL_ROUNDS", "8"),
+        inspection_tool_round_allowance=positive_integer(
+            "HARNESS_INSPECTION_TOOL_ROUND_ALLOWANCE",
+            "4",
+        ),
         identical_tool_call_limit=positive_integer(
             "HARNESS_IDENTICAL_TOOL_CALL_LIMIT",
             "2",
@@ -209,7 +227,9 @@ MODEL = _settings.model
 MODELS = _settings.models
 TEMPERATURE = _settings.temperature
 CONTEXT_LENGTH = _settings.context_length
+RESEARCH_CONTEXT_LENGTH = _settings.research_context_length
 MAX_TOOL_ROUNDS = _settings.max_tool_rounds
+INSPECTION_TOOL_ROUND_ALLOWANCE = _settings.inspection_tool_round_allowance
 IDENTICAL_TOOL_CALL_LIMIT = _settings.identical_tool_call_limit
 CONSECUTIVE_TOOL_FAILURE_LIMIT = _settings.consecutive_tool_failure_limit
 LOG_DIRECTORY = _settings.log_directory

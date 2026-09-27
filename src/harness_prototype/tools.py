@@ -111,12 +111,47 @@ RUN_TESTS_SCHEMA = {
     },
 }
 
+SEARCH_PROJECT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_project",
+        "description": (
+            "Search project text in one bounded pass. Exact matches lead, while "
+            "case-insensitive and whitespace-flexible candidates remain visible. "
+            "Inspect match_quality, match_counts, fallback_used, and completeness."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["text"],
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Nonempty single-line text or stable source anchor.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File or directory to search; defaults to the workspace.",
+                },
+                "file_pattern": {
+                    "type": "string",
+                    "description": "Optional case-insensitive filename wildcard such as *.py.",
+                },
+            },
+        },
+    },
+}
+
 
 TOOL_SPECS = {
     "get_location": ToolSpec(get_location, ToolCategory.READ_ONLY),
     "list_files": ToolSpec(list_files, ToolCategory.READ_ONLY),
     "find_files": ToolSpec(find_files, ToolCategory.READ_ONLY),
-    "search_project": ToolSpec(search_project, ToolCategory.READ_ONLY),
+    "search_project": ToolSpec(
+        search_project,
+        ToolCategory.READ_ONLY,
+        model_schema=SEARCH_PROJECT_SCHEMA,
+    ),
     "read_file": ToolSpec(read_file, ToolCategory.READ_ONLY),
     "git_status": ToolSpec(git_status, ToolCategory.READ_ONLY),
     "git_diff": ToolSpec(git_diff, ToolCategory.READ_ONLY),
