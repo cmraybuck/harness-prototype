@@ -13,6 +13,7 @@ from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.main import (
     APP_DESCRIPTION,
     APP_DISPLAY_NAME,
+    COMMAND_DESCRIPTIONS,
     MODEL_DESCRIPTIONS,
     TerminalUI,
     main,
@@ -67,6 +68,41 @@ class MainTests(unittest.TestCase):
             self.assertEqual(select_model(models, ui), "slow")
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertNotIn("(default)", rendered)
+
+    def test_inline_command_suggestions_filter_and_complete_input(self) -> None:
+        """Filter command names beneath the prompt and complete the selection."""
+        ui = TerminalUI()
+        with patch.object(
+            ui, "_read_key", side_effect=["/", "m", "o", "d", "confirm"]
+        ), patch("harness_prototype.main.sys.stdin", isatty=Mock(return_value=True)), patch(
+            "harness_prototype.main.sys.stdout", isatty=Mock(return_value=True)
+        ), patch("builtins.print") as output:
+            self.assertEqual(ui.prompt(), "/model")
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Switch models", rendered)
+        self.assertIn("/clear", COMMAND_DESCRIPTIONS)
+
+    def test_slash_input_remains_ordinary_text_when_no_command_matches(self) -> None:
+        """Submit an absolute path instead of treating every slash as a command."""
+        ui = TerminalUI()
+        keys = list("/home/micah") + ["confirm"]
+        with patch.object(ui, "_read_key", side_effect=keys), patch(
+            "harness_prototype.main.sys.stdin", isatty=Mock(return_value=True)
+        ), patch(
+            "harness_prototype.main.sys.stdout", isatty=Mock(return_value=True)
+        ), patch("builtins.print"):
+            self.assertEqual(ui.prompt(), "/home/micah")
+
+    def test_hidden_tool_activity_keeps_permission_receipts_visible(self) -> None:
+        """Hide routine tool dialogue without hiding safety decisions."""
+        ui = TerminalUI()
+        ui.tool_activity_mode = "hidden"
+        with patch("builtins.print") as output:
+            ui.show_tool_call("Reading secret.txt")
+            ui.show_permission_receipt("Denied one operation.")
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertNotIn("Reading secret.txt", rendered)
+        self.assertIn("Denied one operation", rendered)
 
     def test_qwen_vision_model_has_capability_description(self) -> None:
         """Describe the vision model's multimodal and agentic strengths."""
@@ -454,6 +490,72 @@ class MainTests(unittest.TestCase):
             main()
         self.assertEqual(len(snapshots[1]), 2)
         self.assertEqual(snapshots[1][-1]["content"], "small")
+
+    def test_slash_clear_resets_conversation_without_calling_model(self) -> None:
+        """Handle slash commands locally and submit only later conversation turns."""
+        snapshots = []
+
+        def turn(**kwargs) -> None:
+            """Capture the history submitted after the reset."""
+            snapshots.append(list(kwargs["messages"]))
+
+        with patch(
+            "builtins.input", side_effect=["before", "/clear", "after", "/exit"]
+        ), patch("builtins.print"), patch(
+            "harness_prototype.main.select_model", return_value="test-model"
+        ), patch("harness_prototype.main.Client"), patch(
+            "harness_prototype.main.run_turn", side_effect=turn
+        ):
+            main()
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[1][-1]["content"], "after")
+        retained_user_messages = [
+            message["content"] for message in snapshots[1] if message["role"] == "user"
+        ]
+        self.assertNotIn("before", retained_user_messages)
+
+    def test_unrecognized_slash_input_is_sent_to_the_model(self) -> None:
+        """Keep paths and prose beginning with a slash available as normal prompts."""
+        snapshots = []
+
+        def turn(**kwargs) -> None:
+            """Capture the prompt passed to the conversation loop."""
+            snapshots.append(list(kwargs["messages"]))
+
+        with patch("builtins.input", side_effect=["/home/micah/project", "/exit"]), patch(
+            "builtins.print"
+        ), patch(
+            "harness_prototype.main.select_model", return_value="test-model"
+        ), patch("harness_prototype.main.Client"), patch(
+            "harness_prototype.main.run_turn", side_effect=turn
+        ):
+            main()
+        self.assertEqual(snapshots[0][-1]["content"], "/home/micah/project")
+
+    def test_model_command_switches_model_and_resets_context(self) -> None:
+        """Require confirmation before applying a model change and fresh history."""
+        requests = []
+
+        def turn(**kwargs) -> None:
+            """Record the selected model and submitted conversation."""
+            requests.append((kwargs["model"], list(kwargs["messages"])))
+
+        with patch("builtins.input", side_effect=["first", "/model", "second", "/exit"]), patch(
+            "builtins.print"
+        ), patch(
+            "harness_prototype.main.select_model", side_effect=["old-model", "new-model"]
+        ), patch(
+            "harness_prototype.main.confirm_model_switch", return_value=True
+        ), patch("harness_prototype.main.Client"), patch(
+            "harness_prototype.main.run_turn", side_effect=turn
+        ):
+            main()
+        self.assertEqual([request[0] for request in requests], ["old-model", "new-model"])
+        retained_user_messages = [
+            message["content"] for message in requests[1][1] if message["role"] == "user"
+        ]
+        self.assertNotIn("first", retained_user_messages)
+        self.assertEqual(requests[1][1][-1]["content"], "second")
 
     def test_session_exit_cleans_up_managed_services(self) -> None:
         """Stop every harness-launched service when the prompt loop exits."""
