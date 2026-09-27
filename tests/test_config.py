@@ -34,6 +34,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.test_command[:3], ("uv", "run", "python"))
         self.assertEqual(settings.targeted_test_command[-1], "{targets}")
         self.assertEqual(settings.checks, {})
+        self.assertEqual(settings.services, {})
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (120, 12000))
         self.assertIn("git", settings.command_allowed_executables)
         self.assertEqual(settings.log_directory, (Path(__file__).parents[1] / "work/logs").resolve())
@@ -58,6 +59,7 @@ class ConfigTests(unittest.TestCase):
                 'HARNESS_TEST_COMMAND=["python","-m","pytest"]\n'
                 'HARNESS_TARGETED_TEST_COMMAND=["python","-m","pytest","{targets}"]\n'
                 'HARNESS_CHECKS={"lint":{"command":["ruff","check","."],"targets":{"source":["ruff","check","src"]}}}\n'
+                'HARNESS_SERVICES={"web":{"command":["python","server.py"],"cwd":"app","ready_text":"ready","startup_timeout_seconds":7}}\n'
                 'HARNESS_TEST_TIMEOUT_SECONDS=45\nHARNESS_TEST_OUTPUT_LIMIT=9000\n'
                 'HARNESS_COMMAND_ALLOWED_EXECUTABLES=git,custom-tool\n'
                 'HARNESS_TEMPERATURE=0.3\nHARNESS_OLLAMA_HOST=http://localhost:1234\n',
@@ -79,6 +81,10 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(settings.checks["lint"].command, ("ruff", "check", "."))
         self.assertEqual(settings.checks["lint"].targets["source"], ("ruff", "check", "src"))
+        self.assertEqual(settings.services["web"].command, ("python", "server.py"))
+        self.assertEqual(settings.services["web"].cwd, "app")
+        self.assertEqual(settings.services["web"].ready_text, "ready")
+        self.assertEqual(settings.services["web"].startup_timeout_seconds, 7)
         self.assertEqual((settings.test_timeout_seconds, settings.test_output_limit), (45, 9000))
         self.assertEqual(settings.command_allowed_executables, ("git", "custom-tool"))
         self.assertEqual(settings.temperature, 0.3)
@@ -164,6 +170,21 @@ class ConfigTests(unittest.TestCase):
         for value in values:
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "HARNESS_CHECKS"):
                 load_settings(None, {"HARNESS_CHECKS": value})
+
+    def test_services_require_named_shell_free_commands_and_valid_readiness(self) -> None:
+        """Reject malformed service definitions before any process can launch."""
+        values = [
+            "[]", '{"web":[]}', '{"web":{"cwd":"."}}',
+            '{"web":{"command":"python server.py"}}',
+            '{"web":{"command":["python"],"cwd":"../outside","extra":true}}',
+            '{"web":{"command":["python"],"ready_text":""}}',
+            '{"web":{"command":["python"],"startup_timeout_seconds":true}}',
+        ]
+        for value in values:
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "HARNESS_SERVICES"
+            ):
+                load_settings(None, {"HARNESS_SERVICES": value})
 
     def test_logging_configuration_resolves_path_and_redactions(self) -> None:
         """Resolve relative storage and load only explicitly named secret values."""

@@ -217,6 +217,22 @@ class MainTests(unittest.TestCase):
         self.assertIn("Timeout", rendered)
         self.assertIn("Allowed dependency installation for client", rendered)
 
+    def test_service_approvals_show_identity_without_commands_or_handles(self) -> None:
+        """Summarize service lifecycle operations without exposing configured payloads."""
+        start = ApprovalRequest("start_service", {"name": "web"}, ToolCategory.EXECUTION)
+        stop = ApprovalRequest(
+            "stop_service", {"handle": "secret-handle"}, ToolCategory.EXECUTION,
+        )
+        with patch.object(
+            TerminalUI, "_read_key", return_value="confirm"
+        ), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(start))
+            self.assertTrue(request_tool_approval(stop))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("service start for web", rendered)
+        self.assertIn("harness-managed service", rendered)
+        self.assertNotIn("secret-handle", rendered)
+
     def test_command_session_grant_is_reused_for_the_same_executable(self) -> None:
         """Reuse an executable grant while continuing to prompt for other commands."""
         ui = TerminalUI()
@@ -339,6 +355,16 @@ class MainTests(unittest.TestCase):
             main()
         self.assertEqual(len(snapshots[1]), 2)
         self.assertEqual(snapshots[1][-1]["content"], "small")
+
+    def test_session_exit_cleans_up_managed_services(self) -> None:
+        """Stop every harness-launched service when the prompt loop exits."""
+        with patch("builtins.input", return_value="quit"), patch(
+            "builtins.print"
+        ), patch("harness_prototype.main.select_model", return_value="test-model"), patch(
+            "harness_prototype.main.Client"
+        ), patch("harness_prototype.main.stop_all_services") as cleanup:
+            main()
+        cleanup.assert_called_once_with()
 
     def test_cancelled_stream_recovers_for_next_prompt(self) -> None:
         """Discard incomplete streamed text and accept another turn."""

@@ -26,6 +26,16 @@ class CheckConfig:
 
 
 @dataclass(frozen=True)
+class ServiceConfig:
+    """Store one configured background service and its readiness contract."""
+
+    command: tuple[str, ...]
+    cwd: str
+    ready_text: str | None
+    startup_timeout_seconds: int
+
+
+@dataclass(frozen=True)
 class Settings:
     """Validated connection and generation settings for one application startup."""
 
@@ -42,6 +52,7 @@ class Settings:
     test_command: tuple[str, ...]
     targeted_test_command: tuple[str, ...]
     checks: dict[str, CheckConfig]
+    services: dict[str, ServiceConfig]
     test_timeout_seconds: int
     test_output_limit: int
     command_allowed_executables: tuple[str, ...]
@@ -194,6 +205,59 @@ def load_settings(
             )
         return checks
 
+    def configured_services() -> dict[str, ServiceConfig]:
+        """Parse named shell-free service commands and readiness settings."""
+        setting = "HARNESS_SERVICES"
+        try:
+            raw_services = json.loads(value(setting, "{}"))
+        except json.JSONDecodeError:
+            raise ValueError(f"{setting} must be a JSON object.") from None
+        if not isinstance(raw_services, dict):
+            raise ValueError(f"{setting} must be a JSON object.")
+        services: dict[str, ServiceConfig] = {}
+        for service_name, definition in raw_services.items():
+            if (
+                not isinstance(service_name, str)
+                or not service_name.strip()
+                or service_name != service_name.strip()
+                or any(not character.isprintable() for character in service_name)
+            ):
+                raise ValueError(f"{setting} service names must be nonempty trimmed strings.")
+            if not isinstance(definition, dict) or set(definition) - {
+                "command", "cwd", "ready_text", "startup_timeout_seconds",
+            }:
+                raise ValueError(
+                    f"{setting}.{service_name} contains unsupported fields."
+                )
+            if "command" not in definition:
+                raise ValueError(f"{setting}.{service_name}.command is required.")
+            cwd = definition.get("cwd", ".")
+            ready_text = definition.get("ready_text")
+            timeout = definition.get("startup_timeout_seconds", 10)
+            if (
+                not isinstance(cwd, str) or not cwd.strip()
+                or cwd != cwd.strip() or any(not character.isprintable() for character in cwd)
+            ):
+                raise ValueError(f"{setting}.{service_name}.cwd must be a nonempty path.")
+            if ready_text is not None and (
+                not isinstance(ready_text, str) or not ready_text
+                or any(not character.isprintable() for character in ready_text)
+            ):
+                raise ValueError(
+                    f"{setting}.{service_name}.ready_text must be null or nonempty printable text."
+                )
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+                raise ValueError(
+                    f"{setting}.{service_name}.startup_timeout_seconds must be a positive integer."
+                )
+            services[service_name] = ServiceConfig(
+                command_arguments(definition["command"], f"{setting}.{service_name}.command"),
+                cwd,
+                ready_text,
+                timeout,
+            )
+        return services
+
     host = value("HARNESS_OLLAMA_HOST", "http://127.0.0.1:11434")
     try:
         url = urlsplit(host)
@@ -309,6 +373,7 @@ def load_settings(
         test_command=test_command,
         targeted_test_command=targeted_test_command,
         checks=configured_checks(),
+        services=configured_services(),
         test_timeout_seconds=positive_integer("HARNESS_TEST_TIMEOUT_SECONDS", "120"),
         test_output_limit=positive_integer("HARNESS_TEST_OUTPUT_LIMIT", "12000"),
         command_allowed_executables=executable_allowlist(),
@@ -335,6 +400,7 @@ APPROVAL_POLICIES = _settings.approval_policies
 TEST_COMMAND = _settings.test_command
 TARGETED_TEST_COMMAND = _settings.targeted_test_command
 CHECKS = _settings.checks
+SERVICES = _settings.services
 TEST_TIMEOUT_SECONDS = _settings.test_timeout_seconds
 TEST_OUTPUT_LIMIT = _settings.test_output_limit
 COMMAND_ALLOWED_EXECUTABLES = _settings.command_allowed_executables

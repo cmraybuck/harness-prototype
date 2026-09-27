@@ -10,7 +10,7 @@ from types import UnionType
 from typing import get_args, get_origin
 
 from .approval import ToolCategory
-from .config import CHECKS
+from .config import CHECKS, SERVICES
 from .execution import (
     MAX_COMMAND_ARGUMENTS,
     MAX_TEST_TARGETS,
@@ -31,6 +31,7 @@ from .files import (
 from .git import git_diff, git_status
 from .locations import get_location
 from .project_detection import detect_project_technologies
+from .services import start_service, stop_service
 from .tool_results import tool_error
 
 
@@ -125,6 +126,16 @@ def _command_activity(arguments: dict) -> str:
     count = max(len(command) - 1, 0)
     noun = "argument" if count == 1 else "arguments"
     return f"Running {command[0]} with {count} {noun}"
+
+
+def _start_service_activity(arguments: dict) -> str:
+    """Describe a configured service start without exposing its command."""
+    return f"Starting service {_argument(arguments, 'name', 'unknown')}"
+
+
+def _stop_service_activity(arguments: dict) -> str:
+    """Describe a managed service stop without exposing process identifiers."""
+    return "Stopping a managed service"
 
 
 def _changes_activity(arguments: dict) -> str:
@@ -305,6 +316,53 @@ INSTALL_DEPENDENCIES_SCHEMA = {
     },
 }
 
+_SERVICE_NAMES = list(SERVICES)
+
+START_SERVICE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "start_service",
+        "description": (
+            "Start an exactly configured background service, wait for readiness, "
+            "and return an opaque handle plus bounded startup logs."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["name"],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact configured service name.",
+                    **({"enum": _SERVICE_NAMES} if _SERVICE_NAMES else {}),
+                },
+            },
+        },
+    },
+}
+
+STOP_SERVICE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "stop_service",
+        "description": (
+            "Stop one service previously launched by start_service and return its "
+            "final bounded logs. Unknown handles cannot affect other processes."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["handle"],
+            "properties": {
+                "handle": {
+                    "type": "string",
+                    "description": "Opaque handle returned by start_service.",
+                },
+            },
+        },
+    },
+}
+
 SEARCH_PROJECT_SCHEMA = {
     "type": "function",
     "function": {
@@ -428,6 +486,23 @@ TOOL_SPECS = {
             "one workspace project; supported manifest managers; system pip denied; "
             "locks preferred; configured timeout/output bounds",
         ),
+    ),
+    "start_service": ToolSpec(
+        start_service,
+        ToolCategory.EXECUTION,
+        _start_service_activity,
+        model_schema=START_SERVICE_SCHEMA,
+        material_limits=(
+            "configured services only", "one process per service name",
+            "configured readiness timeout", "configured output bounds",
+        ),
+    ),
+    "stop_service": ToolSpec(
+        stop_service,
+        ToolCategory.EXECUTION,
+        _stop_service_activity,
+        model_schema=STOP_SERVICE_SCHEMA,
+        material_limits=("handles created by this harness session only", "bounded final logs"),
     ),
     "apply_file_changes": ToolSpec(
         apply_file_changes,
