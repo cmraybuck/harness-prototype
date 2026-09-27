@@ -29,6 +29,7 @@ class ToolDispatchTests(unittest.TestCase):
                 "get_location", "list_files", "find_files", "search_project",
                 "read_file", "git_status", "git_diff", "apply_file_changes",
                 "run_tests",
+                "detect_project_technologies",
             },
         )
 
@@ -115,6 +116,7 @@ class ToolDispatchTests(unittest.TestCase):
                     "read_file": {"path": str(sample)},
                     "git_status": {},
                     "git_diff": {},
+                    "detect_project_technologies": {"path": temporary},
                     "apply_file_changes": {
                         "base_path": ".",
                         "changes": [

@@ -129,7 +129,7 @@ Every registered tool declares one risk category: `read_only`, `write`,
 
 Configure these with `HARNESS_READ_ONLY_POLICY`, `HARNESS_WRITE_POLICY`,
 `HARNESS_EXECUTION_POLICY`, `HARNESS_NETWORK_POLICY`, and
-`HARNESS_DEPLOYMENT_POLICY`. The seven inspection tools are explicitly categorized
+`HARNESS_DEPLOYMENT_POLICY`. The eight inspection tools are explicitly categorized
 as read-only, whose default is `always_allow`; therefore they have no general
 tool-approval prompts in a default installation. `apply_file_changes` is
 categorized as write, whose default is `ask_first`, so its summarized structured
@@ -212,6 +212,7 @@ Representative result shapes (payload fields are abbreviated) are:
 | `read_file(path, start_line=1, max_lines=100)` | Returns raw UTF-8 text, a SHA-256 `revision`, resolved `path`, `total_lines`, and `lines_read`. Continue with `next_line` when `truncated=true`; the revision identifies the complete file and remains the same across pages. |
 | `git_status()` | Reports staged, unstaged, untracked, renamed, deleted, and conflicted workspace-relative paths. `clean=true` explicitly identifies a clean repository. Paths may appear in multiple categories; rename entries include old and new paths plus index/worktree status. Non-Git workspaces return a structured error. |
 | `git_diff(mode="combined", path=null)` | Returns patch content for `unstaged`, `staged`, or `combined` local changes, preceded by structured change presence, file/hunk counts, additions/deletions, full patch length, and per-file statistics. `path` is an optional workspace-relative file or directory and cannot escape the workspace. Untracked paths are listed separately because their contents are not part of a Git diff. Non-Git workspaces return a structured error. |
+| `detect_project_technologies(path=".")` | Reads recognized manifests beneath a directory without executing project code. Reports per-project languages, package managers, test frameworks, scripts, and evidence, or an explicit `inconclusive` result. Supports `pyproject.toml`, `requirements.txt`, `Pipfile`, `package.json`, `Cargo.toml`, and C#/F#/Visual Basic project files. Scans at most 20,000 entries, reads manifests up to 256 KiB, and returns at most 100 manifests and 50 scripts per project. Lock-file and dependency heuristics can be inconclusive and do not prove that an installed tool is usable. |
 | `run_tests(targets=null)` | Runs the configured full suite in the active workspace, or expands 1–50 selectors at the targeted command's `{targets}` argument. Targets are separate arguments, cannot be options, and path-like selectors cannot escape the workspace. Returns `status` (`passed`, `failed`, `timed_out`, `launch_error`, or `invalid_target`), stdout, stderr, exit code, duration, and per-stream truncation fields when execution starts. Test failures are completed tool operations with `ok=true` and `status=failed`; validation, launch, and timeout errors use `ok=false`. |
 | `apply_file_changes(base_path, changes)` | Applies one preflighted batch of 1–100 structured `create`, `overwrite`, `append`, or `replace` actions to UTF-8 files of any extension. Relative paths start at `base_path`; absolute paths are used directly. Existing-file actions require the current `revision` from `read_file`; `replace` also requires `old_text` that occurs exactly once. Returns absolute `affected_paths` and per-file actions and new revisions. |
 
@@ -234,7 +235,9 @@ Search deadlines are best effort, not hard timeouts.
 ## Conversation limits and recovery
 
 Repository-specific requests that ask for implementation, files, functions,
-configuration, tests, or causal tracing use an evidence gate. Unsupported prose
+configuration, tests, or causal tracing use an evidence gate. A direct request to
+use, call, invoke, or execute a named registered tool bypasses that gate so the
+requested operation can supply its own structured evidence. Unsupported prose
 is withheld while the harness supplies bounded, progress-aware instructions to
 search a short source anchor and read returned files. The requested language
 determines required evidence categories: implementation is always required;
@@ -375,6 +378,7 @@ before sharing them.
 | `src/harness_prototype/tool_results.py` | Common model-facing tool result contract |
 | `src/harness_prototype/locations.py` | Platform-specific location discovery |
 | `src/harness_prototype/files.py` | Directory listing, bounded search/read, revisions, and atomic UTF-8 changes |
+| `src/harness_prototype/project_detection.py` | Bounded manifest parsing and project technology detection |
 | `src/harness_prototype/git.py` | Bounded, read-only Git workspace status and diff inspection |
 | `src/harness_prototype/execution.py` | Shell-free configured test execution, process limits, and bounded output capture |
 | `src/harness_prototype/config.py` | Validated configuration |

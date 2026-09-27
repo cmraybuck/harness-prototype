@@ -169,9 +169,24 @@ def latest_user_prompt(messages: list) -> str:
     )
 
 
+def explicitly_requests_registered_tool(prompt: str) -> bool:
+    """Identify direct requests to invoke one named model-facing tool."""
+    folded = prompt.casefold()
+    for tool_name in AVAILABLE_TOOLS:
+        escaped_name = re.escape(tool_name.casefold())
+        if re.search(
+            rf"\b(?:use|call|invoke|execute)\s+(?:the\s+)?`?{escaped_name}`?\b",
+            folded,
+        ):
+            return True
+    return False
+
+
 def requires_repository_inspection(messages: list) -> bool:
     """Identify requests that demand claims about the active repository."""
     latest_prompt = latest_user_prompt(messages).casefold()
+    if explicitly_requests_registered_tool(latest_prompt):
+        return False
     words = {
         word.strip(".,:;!?()[]{}\"'`")
         for word in latest_prompt.split()

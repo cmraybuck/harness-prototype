@@ -33,6 +33,18 @@ class WorkspaceAccessTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(prompted, [])
 
+    def test_project_detection_requires_access_to_an_outside_root(self) -> None:
+        """Route technology scans through the shared directory authorization."""
+        prompted = []
+        result = self.access.authorize_tool(
+            "detect_project_technologies",
+            {"path": str(self.outside)},
+            lambda path: prompted.append(path) or AccessChoice.DENY,
+        )
+
+        self.assertEqual(result["status"], "access_denied")
+        self.assertEqual(prompted, [self.outside])
+
     def test_directory_grant_covers_descendants(self) -> None:
         """Reuse one outside-directory grant without another prompt."""
         prompted = []
