@@ -61,6 +61,13 @@ class ToolDispatchTests(unittest.TestCase):
             run_tests_schema["function"]["parameters"]["properties"]["targets"]["maxItems"],
             50,
         )
+        search_schema = next(
+            tool for tool in MODEL_TOOLS
+            if isinstance(tool, dict) and tool["function"]["name"] == "search_project"
+        )
+        search_parameters = search_schema["function"]["parameters"]
+        self.assertEqual(search_parameters["required"], ["text"])
+        self.assertNotIn("max_results", search_parameters["properties"])
 
     def test_rejects_unknown_tool_and_invalid_argument_shape(self) -> None:
         """Return structured errors for invalid dispatch requests."""
