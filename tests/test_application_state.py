@@ -11,6 +11,7 @@ from harness_prototype.application_state import (
     CURRENT_SCHEMA_VERSION,
     ConversationStore,
     CorruptStateStoreError,
+    DurableGrantStore,
     StateStore,
     UnsupportedSchemaError,
 )
@@ -131,6 +132,29 @@ class ApplicationStateTests(unittest.TestCase):
             for scope in ("", " padded", "line\nbreak"):
                 with self.subTest(scope=scope), self.assertRaises(ValueError):
                     store.set(scope, "key", True)
+
+    def test_durable_grants_match_a_narrow_scope_and_record_lifecycle(self) -> None:
+        """Persist exact grants, update last use, and revoke them immediately."""
+        with tempfile.TemporaryDirectory() as temporary:
+            state = StateStore(Path(temporary) / "state.sqlite3")
+            grants = DurableGrantStore(state)
+            created = grants.create("grant-1", "executable", "C:/work", "git")
+
+            self.assertIsNone(grants.match("executable", "C:/other", "git"))
+            reused = DurableGrantStore(StateStore(state.path)).match(
+                "executable", "C:/work", "git"
+            )
+            self.assertEqual(reused["grant_id"], "grant-1")
+            self.assertGreaterEqual(reused["last_used_at"], created["last_used_at"])
+            self.assertTrue(grants.revoke("grant-1"))
+            self.assertIsNone(grants.match("executable", "C:/work", "git"))
+            with closing(state._connect()) as connection:
+                actions = [
+                    row[0] for row in connection.execute(
+                        "SELECT action FROM durable_grant_events ORDER BY sequence"
+                    )
+                ]
+            self.assertEqual(actions, ["created", "reused", "revoked"])
 
     def test_conversation_turn_recovery_and_stable_paging(self) -> None:
         """Persist ordered messages and mark an abandoned turn interrupted on reopen."""

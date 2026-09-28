@@ -62,6 +62,27 @@ class WorkspaceAccessTests(unittest.TestCase):
         ))
         self.assertEqual(prompted, [self.outside])
 
+    def test_one_time_grant_does_not_enter_the_session_cache(self) -> None:
+        """Prompt again after a one-time filesystem decision."""
+        decisions = iter((AccessChoice.GRANT_ONCE, AccessChoice.DENY))
+        prompted: list[Path] = []
+
+        def decide(path: Path) -> AccessChoice:
+            """Return successive decisions while recording each prompt."""
+            prompted.append(path)
+            return next(decisions)
+
+        first = self.access.authorize_tool(
+            "find_files", {"root": str(self.outside)}, decide
+        )
+        second = self.access.authorize_tool(
+            "find_files", {"root": str(self.outside)}, decide
+        )
+
+        self.assertIsNone(first)
+        self.assertEqual(second["status"], "access_denied")
+        self.assertEqual(prompted, [self.outside, self.outside])
+
     def test_denial_is_remembered_and_cannot_be_bypassed_by_parent(self) -> None:
         """Reject later child or parent requests without prompting again."""
         first = self.access.authorize_tool(

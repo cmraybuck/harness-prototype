@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 MAX_VALUE_BYTES = 64 * 1024
 MAX_SCOPE_LENGTH = 100
 MAX_KEY_LENGTH = 200
@@ -162,6 +162,8 @@ class StateStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DELETE FROM durable_grant_events")
+            connection.execute("DELETE FROM durable_grants")
             connection.execute("DELETE FROM conversations")
             connection.execute("DELETE FROM state_entries")
             connection.commit()
@@ -297,6 +299,34 @@ def _apply_migration(connection: sqlite3.Connection, version: int) -> None:
             """,
         ):
             connection.execute(statement)
+    elif version == 4:
+        for statement in (
+            """
+            CREATE TABLE durable_grants (
+                grant_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                workspace TEXT NOT NULL,
+                target TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                last_used_at_utc TEXT NOT NULL,
+                UNIQUE(kind, workspace, target)
+            )
+            """,
+            """
+            CREATE TABLE durable_grant_events (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                grant_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX durable_grants_created_order
+                ON durable_grants(created_at_utc, grant_id)
+            """,
+        ):
+            connection.execute(statement)
     else:
         raise StateStoreError(f"No migration is defined for schema {version}.")
 
@@ -363,11 +393,16 @@ def _validate_database(path: Path, *, allow_older: bool) -> None:
             conversations = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversations'"
             ).fetchone()
+            durable_grants = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'durable_grants'"
+            ).fetchone()
     except sqlite3.DatabaseError as error:
         raise CorruptStateStoreError(f"Invalid state database: {error}") from error
     if result != ("ok",) or table is None or version < (1 if allow_older else CURRENT_SCHEMA_VERSION):
         raise CorruptStateStoreError("Invalid or incomplete state database.")
     if version >= 3 and conversations is None:
+        raise CorruptStateStoreError("Invalid or incomplete state database.")
+    if version >= 4 and durable_grants is None:
         raise CorruptStateStoreError("Invalid or incomplete state database.")
     if version > CURRENT_SCHEMA_VERSION:
         raise UnsupportedSchemaError(
@@ -384,6 +419,138 @@ def _remove_sidecars(path: Path) -> None:
     """Remove stale SQLite sidecars after atomically replacing a closed database."""
     for suffix in ("-wal", "-shm"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+class DurableGrantStore:
+    """Persist and audit narrowly scoped local permission grants."""
+
+    def __init__(self, state: StateStore) -> None:
+        """Bind durable grant operations to the shared application database."""
+        self.state = state
+
+    def create(self, grant_id: str, kind: str, workspace: str, target: str) -> dict[str, Any]:
+        """Create or refresh one exact grant without widening its scope."""
+        self._validate(grant_id, kind, workspace, target)
+        timestamp = _utc_timestamp()
+        with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT grant_id, created_at_utc FROM durable_grants "
+                    "WHERE kind = ? AND workspace = ? AND target = ?",
+                    (kind, workspace, target),
+                ).fetchone()
+                effective_id = existing[0] if existing else grant_id
+                created_at = existing[1] if existing else timestamp
+                if existing:
+                    connection.execute(
+                        "UPDATE durable_grants SET last_used_at_utc = ? WHERE grant_id = ?",
+                        (timestamp, effective_id),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO durable_grants VALUES (?, ?, ?, ?, ?, ?)",
+                        (effective_id, kind, workspace, target, timestamp, timestamp),
+                    )
+                self._audit(connection, effective_id, "created", kind, timestamp)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "grant_id": effective_id, "kind": kind, "workspace": workspace,
+            "target": target, "created_at": created_at, "last_used_at": timestamp,
+        }
+
+    def match(self, kind: str, workspace: str, target: str) -> dict[str, Any] | None:
+        """Reuse only an exact valid grant and record its last use."""
+        self._validate("lookup", kind, workspace, target)
+        timestamp = _utc_timestamp()
+        with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT grant_id, created_at_utc FROM durable_grants "
+                "WHERE kind = ? AND workspace = ? AND target = ?",
+                (kind, workspace, target),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return None
+            connection.execute(
+                "UPDATE durable_grants SET last_used_at_utc = ? WHERE grant_id = ?",
+                (timestamp, row[0]),
+            )
+            self._audit(connection, row[0], "reused", kind, timestamp)
+            connection.commit()
+        return {
+            "grant_id": row[0], "kind": kind, "workspace": workspace,
+            "target": target, "created_at": row[1], "last_used_at": timestamp,
+        }
+
+    def list(self) -> list[dict[str, Any]]:
+        """List durable grants in stable creation order."""
+        with closing(self.state._connect()) as connection:
+            rows = connection.execute(
+                "SELECT grant_id, kind, workspace, target, created_at_utc, last_used_at_utc "
+                "FROM durable_grants ORDER BY created_at_utc, grant_id"
+            ).fetchall()
+        return [
+            {"grant_id": row[0], "kind": row[1], "workspace": row[2],
+             "target": row[3], "created_at": row[4], "last_used_at": row[5]}
+            for row in rows
+        ]
+
+    def revoke(self, grant_id: str) -> bool:
+        """Revoke one grant immediately while retaining a payload-free audit event."""
+        _validate_identifier(grant_id, "grant_id", MAX_KEY_LENGTH)
+        timestamp = _utc_timestamp()
+        with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT kind FROM durable_grants WHERE grant_id = ?", (grant_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            connection.execute("DELETE FROM durable_grants WHERE grant_id = ?", (grant_id,))
+            self._audit(connection, grant_id, "revoked", row[0], timestamp)
+            connection.commit()
+        return True
+
+    def record_denial(self, kind: str) -> None:
+        """Audit a denied durable-capable request without retaining its payload."""
+        if kind not in {
+            "directory", "executable", "file", "operation", "service", "risk_category", "tool"
+        }:
+            raise ValueError("kind is not a supported durable grant kind.")
+        with closing(self.state._connect()) as connection:
+            self._audit(connection, "none", "denied", kind, _utc_timestamp())
+
+    @staticmethod
+    def _validate(grant_id: str, kind: str, workspace: str, target: str) -> None:
+        """Validate bounded grant fields at the persistence boundary."""
+        _validate_identifier(grant_id, "grant_id", MAX_KEY_LENGTH)
+        if kind not in {
+            "directory", "executable", "file", "operation", "service", "risk_category"
+        }:
+            raise ValueError("kind is not a supported durable grant kind.")
+        for name, value in (("workspace", workspace), ("target", target)):
+            if (
+                not isinstance(value, str) or not value or value != value.strip()
+                or len(value) > 4096 or any(not character.isprintable() for character in value)
+            ):
+                raise ValueError(f"{name} must be a nonempty printable string up to 4096 characters.")
+
+    @staticmethod
+    def _audit(
+        connection: sqlite3.Connection, grant_id: str, action: str, kind: str, timestamp: str,
+    ) -> None:
+        """Append a grant lifecycle event without paths, commands, or arguments."""
+        connection.execute(
+            "INSERT INTO durable_grant_events(grant_id, action, kind, created_at_utc) "
+            "VALUES (?, ?, ?, ?)",
+            (grant_id, action, kind, timestamp),
+        )
 
 
 class ConversationStore:

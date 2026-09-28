@@ -14,6 +14,7 @@ class AccessChoice(IntEnum):
     GRANT_DIRECTORY = 1
     GRANT_ALL = 2
     DENY = 3
+    GRANT_ONCE = 4
 
 
 PermissionPrompt = Callable[[Path], AccessChoice]
@@ -57,6 +58,8 @@ class WorkspaceAccess:
                 continue
 
             choice = prompt(target)
+            if choice == AccessChoice.GRANT_ONCE:
+                continue
             if choice == AccessChoice.GRANT_ALL:
                 self.full_access = True
                 return None
