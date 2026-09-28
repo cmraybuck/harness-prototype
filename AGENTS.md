@@ -38,7 +38,7 @@ work, not existing capabilities.
 ## Code organization
 
 - Keep `main.py` as the interactive launcher and `__main__.py` as its thin
-  `python -m harness_prototype` adapter. The installed `harness-prototype` command
+`python -m harness_prototype` adapter. The installed `flux` command
   also targets `main.py`. Model requests, streaming, context checks, and tool
   exchanges belong in `agent_loop.py`.
 - Keep tool implementations independent of terminal output and the Ollama client.
