@@ -1,0 +1,38 @@
+services:
+  flux:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      HARNESS_OLLAMA_HOST: ${HARNESS_OLLAMA_HOST:-http://host.docker.internal:11434}
+      HARNESS_STATE_DATABASE_PATH: /var/lib/flux/state.sqlite3
+      HARNESS_LOG_DIRECTORY: /var/lib/flux/logs
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - 127.0.0.1:${FLUX_PORT:-8765}:8765
+    volumes:
+      - type: volume
+        source: flux-data
+        target: /var/lib/flux
+      - type: bind
+        source: ${FLUX_WORKSPACE_PATH:-.}
+        target: /workspace
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/v1/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  flux-data:
