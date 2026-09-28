@@ -46,6 +46,91 @@ their existing names as compatibility interfaces during the branding transition.
 `uv run python -m harness_prototype` also remains supported. These technical names
 should not be used as the product name in new user-facing text.
 
+### Optional Docker Compose service
+
+Docker Compose runs the presentation-independent FLUX HTTP service while the
+native terminal command above remains supported. Copy `.env.example` to `.env`,
+and configure at least `HARNESS_MODELS`. By default, Compose mounts this repository
+as `/workspace`, so no workspace setting is required for a first run. Set
+`FLUX_WORKSPACE_PATH` to an existing host directory when FLUX should start in a
+different project. The bind mount is intentionally limited to that workspace;
+Compose refuses to create a missing override directory. On Docker Desktop, the
+default Ollama endpoint is `http://host.docker.internal:11434`. Override
+`HARNESS_OLLAMA_HOST` for another explicitly reachable Ollama server.
+
+```dotenv
+HARNESS_MODELS=qwen3:8b
+# Optional: FLUX_WORKSPACE_PATH=C:/Users/example/source/project
+# HARNESS_OLLAMA_HOST=http://host.docker.internal:11434
+# FLUX_PORT=8765
+```
+
+Start the service, inspect its health, and stop it without removing data:
+
+```powershell
+docker compose up --build -d
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:8765/v1/health
+docker compose down
+```
+
+The host port is bound to `127.0.0.1` by default. The `flux-data` named volume
+holds the SQLite database and append-only logs under `/var/lib/flux`, preserving
+settings, scoped grants, conversations, and turn history when the container is
+recreated. Configuration is supplied explicitly by `.env`; it is not copied into
+the image. Startup fails with a diagnostic when the workspace mount is missing,
+Ollama is unavailable, or the stored SQLite schema is corrupt or newer than the
+running FLUX version.
+
+Docker only exposes directories explicitly mounted into the container. To work
+with another project, change `FLUX_WORKSPACE_PATH` and recreate the container, or
+add another deliberate bind mount in a local Compose override. Application-level
+permission cannot expose an unmounted host path. A desktop GUI that needs dynamic
+folder selection should run the backend natively on the host and connect over
+loopback; `FLUX_PORT` and `FLUX_WORKSPACE_PATH` are Docker-only settings and are
+not required by the native backend.
+
+For an upgrade, preserve `.env`, pull the repository changes, then rebuild and
+replace only the container. Compose retains the named volume:
+
+```powershell
+docker compose build --pull
+docker compose up --build -d
+```
+
+For a consistent application-level backup, create a local `backups` directory
+and run the backup while the service is available. The backup command uses
+SQLite's online backup operation rather than copying live database files:
+
+```powershell
+New-Item -ItemType Directory -Force backups | Out-Null
+docker compose run --rm --no-deps --entrypoint python --volume "${PWD}/backups:/backup" flux -c "from pathlib import Path; from harness_prototype.application_state import StateStore; from harness_prototype.config import STATE_DATABASE_PATH; StateStore(STATE_DATABASE_PATH).backup_to(Path('/backup/state.sqlite3'))"
+```
+
+To restore, first stop all application clients, then validate and replace the
+database through `StateStore.restore_from`. The stored schema is checked before
+replacement and known older schemas are migrated:
+
+```powershell
+docker compose down
+docker compose run --rm --no-deps --entrypoint python --volume "${PWD}/backups:/backup:ro" flux -c "from pathlib import Path; from harness_prototype.application_state import StateStore; from harness_prototype.config import STATE_DATABASE_PATH; StateStore(STATE_DATABASE_PATH).restore_from(Path('/backup/state.sqlite3'))"
+docker compose up -d
+```
+
+The SQLite commands above cover application state. Archive or restore logs with
+the service stopped when they also need to be retained:
+
+```powershell
+docker compose down
+docker compose run --rm --no-deps --entrypoint python --volume "${PWD}/backups:/backup" flux -c "import tarfile; tarfile.open('/backup/logs.tar.gz', 'w:gz').add('/var/lib/flux/logs', arcname='logs')"
+# To restore the archive after intentionally clearing the volume's logs:
+docker compose run --rm --no-deps --entrypoint python --volume "${PWD}/backups:/backup:ro" flux -c "import tarfile; tarfile.open('/backup/logs.tar.gz').extractall('/var/lib/flux', filter='data')"
+```
+
+Only restore trusted archives. To intentionally remove all container-managed
+state and logs, run `docker compose down --volumes`. This is destructive and
+cannot be recovered without a backup.
+
 Copy `.env.example` to `.env` to configure the server, model choices, temperature,
 context window, tool-round limit, or tool approval policies. Environment variables
 override `.env`, then built-in defaults apply. No model is selected by default;

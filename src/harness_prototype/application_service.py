@@ -1,10 +1,13 @@
 """Versioned localhost API for presentation-independent FLUX clients."""
 
+import argparse
 from collections import defaultdict, deque
 from collections.abc import Callable
 import hashlib
 import ipaddress
 import json
+import signal
+import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,12 +17,12 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
-from ollama import Client
+from ollama import Client, RequestError, ResponseError
 
 from .access import AccessChoice
 from .agent_loop import AgentRuntime
 from .approval import ApprovalPromptResult, ApprovalRequest
-from .application_state import ConversationStore, DurableGrantStore, StateStore
+from .application_state import ConversationStore, DurableGrantStore, StateStore, StateStoreError
 from .config import COMMAND_ALLOWED_EXECUTABLES, HOST, MODELS, SERVICES, STATE_DATABASE_PATH
 from .files import file_change_target_paths
 from .services import stop_all_services
@@ -801,3 +804,65 @@ class DesktopServiceHost:
             self.server.shutdown()
             self._thread.join(timeout=5)
         self.server.server_close()
+
+    def serve_forever(self) -> None:
+        """Serve in the current thread until interrupted, then release resources."""
+        try:
+            self.server.serve_forever()
+        finally:
+            self.server.registry.stop()
+            stop_all_services()
+            self.server.server_close()
+
+
+def verify_ollama_connection(client: Client | None = None) -> None:
+    """Fail startup with an actionable error when the configured Ollama API is unavailable."""
+    active_client = client or Client(host=HOST)
+    try:
+        active_client.list()
+    except (OSError, RequestError, ResponseError) as error:
+        raise RuntimeError(
+            f"Unable to reach the configured Ollama endpoint at {HOST}. "
+            "Start Ollama or set HARNESS_OLLAMA_HOST to a reachable HTTP(S) endpoint."
+        ) from error
+
+
+def service_main(arguments: list[str] | None = None) -> int:
+    """Run the localhost application service as a foreground process."""
+    parser = argparse.ArgumentParser(description="Run the FLUX application service.")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="Allow a non-loopback bind; use only behind an explicit host-side access boundary.",
+    )
+    options = parser.parse_args(arguments)
+    try:
+        verify_ollama_connection()
+        host = DesktopServiceHost(
+            options.host,
+            options.port,
+            allow_remote=options.allow_remote,
+            workspace=options.workspace,
+        )
+    except (OSError, RuntimeError, StateStoreError, ValueError) as error:
+        print(f"FLUX service startup failed: {error}", file=sys.stderr)
+        return 1
+
+    def stop_service(_signum: int, _frame: object) -> None:
+        """Translate container termination into an orderly foreground shutdown."""
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_service)
+    try:
+        print(f"FLUX service listening on http://{host.address[0]}:{host.address[1]}", flush=True)
+        host.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(service_main())
