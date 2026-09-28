@@ -19,6 +19,20 @@ Copy-Item .env.example .env
 uv run flux
 ```
 
+Launch the native desktop shell instead of the terminal interface with:
+
+```powershell
+uv run flux-desktop
+```
+
+`flux-desktop` is installed as a Windows GUI entry point, opens a native window,
+and starts a private loopback backend on an OS-assigned port. The shell lists and
+creates durable conversations and lets users select configured Ollama models and
+existing workspace directories. It reports backend and Ollama availability with
+retry guidance; users never need to open or configure a localhost page. Turn
+rendering and permission decisions remain in a later GUI milestone, so use
+`uv run flux` for active agent turns in this release.
+
 The script uses Windows Package Manager (`winget`) to install Ollama and `uv` when
 needed, installs Python 3.12 and the dependencies pinned by `uv.lock`, and starts
 the loopback Ollama API if it is offline. It downloads only model identifiers
@@ -657,6 +671,7 @@ before sharing them.
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
 | `src/harness_prototype/agent_loop.py` | Reusable conversation runtime, model streaming, context checks, tool exchanges, and recovery |
 | `src/harness_prototype/application_service.py` | Versioned loopback API, streamed turn events, permission coordination, and desktop-host lifecycle seam |
+| `src/harness_prototype/desktop.py` | Native Tk desktop shell, loopback API client, application navigation, and recoverable connection states |
 | `src/harness_prototype/documentation.py` | HTTPS documentation retrieval, URL policy, bounds, and text extraction |
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
@@ -705,6 +720,25 @@ integration, and training are future work.
 
 ### Local application service
 
+The desktop stack is Python's standard-library Tk/ttk toolkit over the existing
+loopback HTTP service. It keeps the prototype to one language and installed
+package, creates a real application window rather than a browser-hosted UI, and
+does not add a web runtime or duplicate backend behavior. Components use ttk,
+application state stays on the Tk thread, and all backend I/O runs on short-lived
+worker threads before results are marshalled back with `after`. The frontend owns
+only presentation state; conversations, selections, tools, model calls, and
+durability remain backend-owned.
+
+Tk is available with the supported Windows Python installation. For a distributable
+Windows build, package the `harness_prototype.desktop:desktop_main` GUI entry point
+with a Python freezer and include Tcl/Tk; installer production is intentionally
+outside this prototype issue. The same module and backend contract have no
+Windows-only calls. A later macOS build can use a framework-enabled Python/Tk
+distribution and a macOS application bundle while retaining the API client and
+desktop components. This documents a packaging path, not current macOS support or
+testing. Platform-specific launch, bundle, and signing behavior belongs in a thin
+adapter rather than shared UI or backend code.
+
 `DesktopServiceHost` exposes `AgentRuntime` to an installed desktop client without
 moving Ollama or tool execution into that client. It binds to `127.0.0.1` on an
 OS-assigned port by default; a non-loopback bind is rejected unless the embedding
@@ -717,7 +751,7 @@ The version-one HTTP operations are:
 
 | Operation | Purpose |
 | --- | --- |
-| `GET /v1/health` | Report listener readiness. |
+| `GET /v1/health` | Report listener readiness and actionable Ollama availability. |
 | `GET /v1/capabilities` | List configured models, backend tools, operations, events, and request limits. |
 | `POST /v1/conversations` | Create a durable conversation with optional `model` and `workspace` strings. |
 | `GET /v1/conversations?limit=50&after={id}` | List conversations newest-first with a stable cursor and a 1–100 item bound. |

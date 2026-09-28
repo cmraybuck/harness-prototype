@@ -357,7 +357,14 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         try:
             parts = self._path_parts()
             if parts == [API_VERSION, "health"]:
-                self._json(HTTPStatus.OK, {"api_version": API_VERSION, "status": "ready"})
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "api_version": API_VERSION,
+                        "status": "ready",
+                        "ollama": self.server.ollama_status(),
+                    },
+                )
             elif parts == [API_VERSION, "capabilities"]:
                 self._json(HTTPStatus.OK, self._capabilities())
             elif parts == [API_VERSION, "conversations"]:
@@ -738,10 +745,17 @@ class ApplicationHTTPServer(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], registry: ConversationRegistry, workspace: Path) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        registry: ConversationRegistry,
+        workspace: Path,
+        ollama_status: Callable[[], dict[str, str]],
+    ) -> None:
         """Bind the handler to its registry and default workspace."""
         self.registry = registry
         self.default_workspace = workspace.resolve()
+        self.ollama_status = ollama_status
         super().__init__(address, ApplicationServiceHandler)
 
 
@@ -757,6 +771,7 @@ class DesktopServiceHost:
         workspace: Path | None = None,
         models: tuple[str, ...] = MODELS,
         runtime_factory: Callable[[str, Path], AgentRuntime] | None = None,
+        ollama_status: Callable[[], dict[str, str]] | None = None,
         state_database_path: Path = STATE_DATABASE_PATH,
     ) -> None:
         """Validate exposure policy and configure a not-yet-started service."""
@@ -770,12 +785,14 @@ class DesktopServiceHost:
             raise ValueError("port must be an integer from 0 through 65535.")
         active_workspace = (workspace or Path.cwd()).resolve()
         factory = runtime_factory or (lambda model, path: AgentRuntime(Client(host=HOST), model, path))
+        status_check = ollama_status or get_ollama_status
         state = StateStore(state_database_path)
         store = ConversationStore(state)
         self.server = ApplicationHTTPServer(
             (host, port),
             ConversationRegistry(factory, models, store, DurableGrantStore(state)),
             active_workspace,
+            status_check,
         )
         self._thread: Thread | None = None
 
@@ -815,16 +832,29 @@ class DesktopServiceHost:
             self.server.server_close()
 
 
-def verify_ollama_connection(client: Client | None = None) -> None:
-    """Fail startup with an actionable error when the configured Ollama API is unavailable."""
+def get_ollama_status(client: Client | None = None) -> dict[str, str]:
+    """Return an actionable, non-sensitive Ollama availability projection."""
     active_client = client or Client(host=HOST)
     try:
         active_client.list()
-    except (OSError, RequestError, ResponseError) as error:
+    except (OSError, RequestError, ResponseError):
+        return {
+            "status": "unavailable",
+            "message": (
+                "Unable to reach the configured Ollama endpoint. Start Ollama or "
+                "update HARNESS_OLLAMA_HOST, then retry."
+            ),
+        }
+    return {"status": "available"}
+
+
+def verify_ollama_connection(client: Client | None = None) -> None:
+    """Fail startup with an actionable error when the configured Ollama API is unavailable."""
+    status = get_ollama_status(client)
+    if status["status"] != "available":
         raise RuntimeError(
-            f"Unable to reach the configured Ollama endpoint at {HOST}. "
-            "Start Ollama or set HARNESS_OLLAMA_HOST to a reachable HTTP(S) endpoint."
-        ) from error
+            status["message"]
+        )
 
 
 def service_main(arguments: list[str] | None = None) -> int:
