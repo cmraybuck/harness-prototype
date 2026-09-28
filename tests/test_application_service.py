@@ -148,6 +148,32 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(response.status, 413)
         self.assertEqual(oversized["error"]["code"], "request_too_large")
 
+    def test_conversation_creation_requires_a_configured_model(self) -> None:
+        """Return actionable recovery guidance when model selection is unconfigured."""
+        empty_host = DesktopServiceHost(
+            workspace=self.workspace,
+            models=(),
+            state_database_path=self.workspace / "empty-state.sqlite3",
+        )
+        empty_host.start()
+        try:
+            connection = http.client.HTTPConnection(*empty_host.address, timeout=5)
+            connection.request(
+                "POST",
+                "/v1/conversations",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            error = json.loads(response.read())
+            connection.close()
+        finally:
+            empty_host.stop()
+        self.assertEqual(response.status, 409)
+        self.assertEqual(error["error"]["code"], "model_configuration_required")
+        self.assertTrue(error["error"]["recoverable"])
+        self.assertIn("HARNESS_MODELS", error["error"]["message"])
+
         status, health = self.request("GET", "/v1/health")
         self.assertEqual((status, health["status"]), (200, "ready"))
 

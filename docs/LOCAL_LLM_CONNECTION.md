@@ -1,7 +1,7 @@
 # Connect FLUX to the Team Ollama Host
 
-This guide explains how to run FLUX on a teammate's computer while using
-Devstral Small 2 through Ollama on a Windows host. Tailscale carries the connection
+This guide explains how to run FLUX on a teammate's computer while using an
+explicitly selected Ollama model on a Windows host. Tailscale carries the connection
 over the team's private network; do not expose Ollama through a router or the
 public internet.
 
@@ -33,8 +33,8 @@ Copy-Item .env.example .env
 The script installs missing copies of Ollama and Tailscale through Windows Package
 Manager, optionally switches to the configured previously authenticated profile,
 and runs `tailscale up` when disconnected. It then starts the loopback Ollama API
-when needed, pulls the configured models, creates the private TCP Serve rule, and
-prints the URL teammates should use. It does not edit the centralized tailnet
+when needed, pulls explicitly configured models, creates the private TCP Serve
+rule, and prints the URL teammates should use. It does not edit the centralized tailnet
 Grant. Tailscale may still require browser authentication after installation. The
 manual steps below explain the same setup and the required security decisions.
 
@@ -44,7 +44,7 @@ the team, while the account selection belongs to the individual computer:
 | Setting | Scope | Used by | Purpose |
 | --- | --- | --- | --- |
 | `HARNESS_OLLAMA_HOST` | Same for all teammates | Teammate script and FLUX | Reachable base URL printed by the host script |
-| `HARNESS_MODELS` | Same for host and teammates | Both scripts and FLUX | Comma-separated models to install, verify, and offer at startup |
+| `HARNESS_MODELS` | Same for host and teammates | Both scripts and FLUX | Optional comma-separated models to install, verify, and offer at startup |
 | `HARNESS_TAILSCALE_PROFILE` | Per computer | Both scripts | Optional entry from `tailscale switch --list` that can reach the Ollama host. An empty value keeps the active profile. |
 | `HARNESS_OLLAMA_LOCAL_HOST` | Host only | Host script | Loopback-only Ollama API forwarded by Tailscale |
 | `HARNESS_TAILSCALE_SERVE_PORT` | Host only; reflected in the shared host URL | Host script | Private tailnet TCP port exposed by Tailscale Serve |
@@ -66,17 +66,13 @@ ollama --version
 curl.exe http://127.0.0.1:11434
 ```
 
-Install the default models used by FLUX:
+Choose and install compatible models, then use their exact identifiers in
+`HARNESS_MODELS`. For example, with a placeholder identifier:
 
 ```powershell
-ollama pull devstral-small-2:latest
-ollama pull qwen3:8b
-ollama pull qwen3-vl:8b
+ollama pull YOUR_MODEL
 ollama list
 ```
-
-`qwen3-vl:8b` provides image understanding, visual and spatial reasoning,
-image-informed coding, and tool use. It requires Ollama 0.12.7 or newer.
 
 Test the local API. The JSON response should list all configured models:
 
@@ -184,7 +180,7 @@ tailnet contains or has access to the Ollama host; otherwise leave it empty:
 
 ```dotenv
 HARNESS_OLLAMA_HOST=http://HOST_TAILSCALE_IP:11434
-HARNESS_MODELS=devstral-small-2:latest,qwen3:8b,qwen3-vl:8b
+HARNESS_MODELS=YOUR_MODEL
 HARNESS_TAILSCALE_PROFILE=profile@example.com
 ```
 
@@ -334,10 +330,10 @@ To stop sharing the API without disconnecting Tailscale:
 tailscale serve --tcp=11434 off
 ```
 
-To unload the model from memory while leaving Ollama available:
+To unload a model from memory while leaving Ollama available:
 
 ```powershell
-ollama stop devstral-small-2:latest
+ollama stop YOUR_MODEL
 ```
 
 ## Offboarding a teammate

@@ -14,10 +14,7 @@ class ConfigTests(unittest.TestCase):
         """Run with portable defaults when no dotenv file or overrides are supplied."""
         settings = load_settings(None, {})
         self.assertEqual(settings.host, "http://127.0.0.1:11434")
-        self.assertEqual(
-            settings.models,
-            ("devstral-small-2:latest", "qwen3:8b", "qwen3-vl:8b"),
-        )
+        self.assertEqual(settings.models, ())
         self.assertEqual(
             (
                 settings.temperature,
@@ -95,7 +92,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(load_settings(Path(temp) / "missing", {}), load_settings(None, {}))
 
     def test_invalid_values(self):
-        """Reject invalid numeric settings, blank models, and malformed server URLs."""
+        """Reject invalid numeric settings and malformed server URLs."""
         cases = {
             "HARNESS_CONTEXT_LENGTH": ["0", "-1", "1.5", "true"],
             "HARNESS_RESEARCH_CONTEXT_LENGTH": ["0", "-1", "1.5", "true"],
@@ -109,13 +106,24 @@ class ConfigTests(unittest.TestCase):
                 "", " , ", "../tool", "tools/runner", "tools\\runner", "bad tool",
             ],
             "HARNESS_TEMPERATURE": ["nan", "inf", "-0.1", "3"],
-            "HARNESS_MODELS": ["", " ", ", ,"],
             "HARNESS_OLLAMA_HOST": ["localhost", "http://localhost/api/chat", "http://localhost:99999", "http://user:secret@localhost"],
         }
         for key, values in cases.items():
             for value in values:
                 with self.subTest(key=key, value=value), self.assertRaisesRegex(ValueError, key):
                     load_settings(None, {key: value})
+
+    def test_blank_model_configuration_represents_unconfigured_state(self) -> None:
+        """Treat absent or blank model settings as an explicit empty selection."""
+        for value in (None, "", " ", ", ,"):
+            with self.subTest(value=value):
+                environment = {} if value is None else {"HARNESS_MODELS": value}
+                self.assertEqual(load_settings(None, environment).models, ())
+
+    def test_explicit_models_preserve_order_and_remove_duplicates(self) -> None:
+        """Keep deterministic configured order while ignoring repeated identifiers."""
+        settings = load_settings(None, {"HARNESS_MODELS": "second, first,second"})
+        self.assertEqual(settings.models, ("second", "first"))
 
     def test_research_context_cannot_be_smaller_than_normal_context(self) -> None:
         """Reject a research context window smaller than the ordinary window."""

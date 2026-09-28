@@ -34,11 +34,22 @@ function Get-SetupValue {
 }
 
 function ConvertTo-ModelList {
-    <# Parse a comma-separated model list, preserving order and removing duplicates. #>
+    <# Parse an optional model list, preserving order and removing duplicates. #>
     param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
     $result = @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
     if ($result.Count -eq 0) { throw "HARNESS_MODELS must contain at least one model identifier." }
     return $result
+}
+
+function Get-ModelSetupValue {
+    <# Resolve an optional model setting while preserving an explicit blank value. #>
+    param([AllowEmptyString()][string]$Override, [bool]$OverrideProvided, [hashtable]$DotEnv)
+    if ($OverrideProvided) { return $Override.Trim() }
+    $processValue = [Environment]::GetEnvironmentVariable("HARNESS_MODELS")
+    if ($null -ne $processValue) { return $processValue.Trim() }
+    if ($DotEnv.ContainsKey("HARNESS_MODELS")) { return $DotEnv["HARNESS_MODELS"].Trim() }
+    return ""
 }
 
 function Get-OllamaBaseUrl {
@@ -132,7 +143,7 @@ $envPath = Join-Path $projectRoot ".env"
 $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExamplePath }
 $dotEnv = Import-DotEnv $settingsPath
 $baseUrl = Get-OllamaBaseUrl (Get-SetupValue $OllamaHost "HARNESS_OLLAMA_HOST" $dotEnv "http://127.0.0.1:11434")
-$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b,qwen3-vl:8b"
+$modelListValue = Get-ModelSetupValue $Models $PSBoundParameters.ContainsKey("Models") $dotEnv
 $selectedModels = @(ConvertTo-ModelList $modelListValue)
 $selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
 $hostName = ([System.Uri]$baseUrl).Host
@@ -158,6 +169,9 @@ foreach ($requiredModel in $selectedModels) {
         $displayModels = if ($availableModels.Count -gt 0) { $availableModels -join ", " } else { "none" }
         throw "Model '$requiredModel' is not installed on the Ollama host. Available models: $displayModels"
     }
+}
+if ($selectedModels.Count -eq 0) {
+    Write-Host "No models configured; skipping model validation. Set HARNESS_MODELS after installing a compatible Ollama model."
 }
 
 if (Test-Path -LiteralPath $envPath) {

@@ -14,7 +14,6 @@ from harness_prototype.main import (
     APP_DESCRIPTION,
     APP_DISPLAY_NAME,
     COMMAND_DESCRIPTIONS,
-    MODEL_DESCRIPTIONS,
     TerminalUI,
     main,
     request_directory_access,
@@ -33,6 +32,22 @@ class MainTests(unittest.TestCase):
             APP_DESCRIPTION,
             "A local-first software engineering agent powered by Ollama.",
         )
+
+    def test_empty_model_selection_is_rejected_without_indexing(self) -> None:
+        """Represent an unconfigured selector with a clear error."""
+        with self.assertRaisesRegex(ValueError, "No models are configured"):
+            select_model(())
+
+    def test_startup_without_models_shows_recovery_guidance(self) -> None:
+        """Stop before client creation and explain how to configure a model."""
+        with patch("harness_prototype.main.MODELS", ()), patch(
+            "builtins.print"
+        ) as output, patch("harness_prototype.main.Client") as client:
+            main()
+        client.assert_not_called()
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("Model setup required", rendered)
+        self.assertIn("HARNESS_MODELS", rendered)
 
     def test_header_uses_flux_identity(self) -> None:
         """Present FLUX instead of a legacy or generic name in the session header."""
@@ -123,13 +138,6 @@ class MainTests(unittest.TestCase):
         rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertNotIn("Reading secret.txt", rendered)
         self.assertIn("Denied one operation", rendered)
-
-    def test_qwen_vision_model_has_capability_description(self) -> None:
-        """Describe the vision model's multimodal and agentic strengths."""
-        description = MODEL_DESCRIPTIONS["qwen3-vl:8b"]
-        self.assertIn("vision", description)
-        self.assertIn("images", description)
-        self.assertIn("tool use", description)
 
     def test_streamed_response_cannot_overwrite_prior_output(self) -> None:
         """Convert carriage returns from model output into ordinary newlines."""
