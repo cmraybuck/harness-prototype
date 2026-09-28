@@ -31,12 +31,6 @@ from .services import stop_all_services
 from .tools import TOOL_SPECS
 
 
-MODEL_DESCRIPTIONS = {
-    "devstral-small-2:latest": "strong coding and agentic tool use; heavier and slower",
-    "qwen3:8b": "fast, lightweight text reasoning and tool use",
-    "qwen3-vl:8b": "vision-language reasoning for images, text, coding, and tool use",
-}
-
 APP_DISPLAY_NAME = "FLUX"
 APP_DESCRIPTION = "A local-first software engineering agent powered by Ollama."
 
@@ -553,15 +547,15 @@ def select_model(
     ui: TerminalUI | None = None,
 ) -> str:
     """Ask which configured model to use for this session."""
+    if not models:
+        raise ValueError("No models are configured.")
     if len(models) == 1:
         return models[0]
 
     active_ui = ui or TerminalUI()
     options = []
     for model in models:
-        description = MODEL_DESCRIPTIONS.get(model)
-        label = model if description is None else f"{model} - {description}"
-        options.append(label)
+        options.append(model)
     selected = active_ui.choose_option(
         f"{APP_DISPLAY_NAME} - Select a model",
         [],
@@ -765,6 +759,14 @@ def main() -> None:
     """Read prompts and keep conversation history until the user exits."""
     ui = TerminalUI()
     ui.clear_screen()
+    if not MODELS:
+        ui.show_notice(
+            "Model setup required",
+            "Set HARNESS_MODELS in .env to one or more installed Ollama model "
+            "identifiers, then restart FLUX.",
+            "33",
+        )
+        return
     try:
         selected_model = select_model(MODELS, ui)
     except (KeyboardInterrupt, EOFError):

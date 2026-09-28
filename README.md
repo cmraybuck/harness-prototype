@@ -9,12 +9,13 @@ services, and run approved allowlisted engineering commands.
 
 ## Run
 
-Install uv and Ollama, start Ollama, and download the default model choices:
+Install uv and Ollama, then install a compatible model of your choice. Copy the
+example configuration and record its exact Ollama identifier before starting FLUX:
 
 ```powershell
-ollama pull devstral-small-2:latest
-ollama pull qwen3:8b
-ollama pull qwen3-vl:8b
+ollama pull YOUR_MODEL
+Copy-Item .env.example .env
+# Set HARNESS_MODELS=YOUR_MODEL in .env.
 uv run python -m harness_prototype
 ```
 
@@ -27,8 +28,10 @@ should not be used as the product name in new user-facing text.
 
 Copy `.env.example` to `.env` to configure the server, model choices, temperature,
 context window, tool-round limit, or tool approval policies. Environment variables
-override `.env`, then built-in defaults apply. Restart after changes. Settings are
-validated at startup; keep personal settings in the Git-ignored `.env`.
+override `.env`, then built-in defaults apply. No model is selected by default;
+FLUX provides setup guidance until `HARNESS_MODELS` names at least one installed
+model. Restart after changes. Settings are validated at startup; keep personal
+settings in the Git-ignored `.env`.
 
 Test execution uses shell-free JSON argument arrays. The targeted command requires
 one standalone `{targets}` argument, which is replaced by separately validated test
@@ -91,7 +94,7 @@ Tailscale profile that can reach it, and run the Windows setup:
 
 ```powershell
 Copy-Item .env.example .env
-# Set HARNESS_OLLAMA_HOST and, when needed, HARNESS_TAILSCALE_PROFILE in .env.
+# Set HARNESS_OLLAMA_HOST, HARNESS_MODELS, and any Tailscale profile in .env.
 .\setup.ps1
 uv run harness-prototype
 ```
@@ -121,18 +124,12 @@ persistent machine or user policy:
 Set-ExecutionPolicy -Scope Process RemoteSigned
 ```
 
-Defaults: local server `http://127.0.0.1:11434`; startup choice among the strong
-coding and agentic tool use of `devstral-small-2:latest`, the fast and lightweight
-text reasoning of `qwen3:8b`, and the image-aware visual reasoning, coding, and
-tool use of `qwen3-vl:8b`; temperature `0.15`, context window `4096`; eight
-model/tool rounds per turn; two executions of an
-identical tool operation; and three consecutive tool failures. Set
-`HARNESS_MODELS` to a comma-separated list to change and order the choices. The
-startup selector always begins on the first entry and requires confirmation.
-
-`qwen3-vl:8b` requires Ollama 0.12.7 or newer. Its visual capabilities let
-FLUX send supported raster images inspected with `inspect_file` to the model
-for understanding, spatial reasoning, and image-informed coding tasks.
+Defaults: local server `http://127.0.0.1:11434`; no selected model; temperature
+`0.15`; context window `4096`; eight model/tool rounds per turn; two executions
+of an identical tool operation; and three consecutive tool failures. Set
+`HARNESS_MODELS` to a comma-separated list of compatible, installed model
+identifiers. Their order is preserved, and the startup selector begins on the
+first entry and requires confirmation.
 
 Try “What files are in the current directory?” or “Find hello.txt on my Desktop
 and read it.” In an interactive terminal, startup clears prior terminal output and

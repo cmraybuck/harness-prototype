@@ -99,6 +99,13 @@ class ConversationRegistry:
 
     def create(self, model: str, workspace: Path) -> AgentRuntime:
         """Create and retain one conversation runtime."""
+        if not self.models:
+            raise ProtocolError(
+                "model_configuration_required",
+                "No models are configured. Set HARNESS_MODELS to one or more installed "
+                "Ollama model identifiers, then restart FLUX.",
+                HTTPStatus.CONFLICT,
+            )
         if model not in self.models:
             raise ProtocolError("invalid_model", "Model is not configured.", HTTPStatus.BAD_REQUEST)
         resolved = workspace.expanduser().resolve()
@@ -398,7 +405,15 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         """Validate creation input and return stable conversation metadata."""
         if set(body) - {"model", "workspace"}:
             raise ProtocolError("invalid_request", "Request contains unsupported fields.", HTTPStatus.BAD_REQUEST)
-        model = body.get("model", self.server.registry.models[0])
+        configured_models = self.server.registry.models
+        if not configured_models:
+            raise ProtocolError(
+                "model_configuration_required",
+                "No models are configured. Set HARNESS_MODELS to one or more installed "
+                "Ollama model identifiers, then restart FLUX.",
+                HTTPStatus.CONFLICT,
+            )
+        model = body.get("model", configured_models[0])
         workspace = body.get("workspace", str(self.server.default_workspace))
         if not isinstance(model, str) or not isinstance(workspace, str):
             raise ProtocolError("invalid_request", "Model and workspace must be strings.", HTTPStatus.BAD_REQUEST)

@@ -34,11 +34,22 @@ function Get-SetupValue {
 }
 
 function ConvertTo-ModelList {
-    <# Parse a comma-separated model list, preserving order and removing duplicates. #>
+    <# Parse an optional model list, preserving order and removing duplicates. #>
     param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return @() }
     $result = @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
     if ($result.Count -eq 0) { throw "HARNESS_MODELS must contain at least one model identifier." }
     return $result
+}
+
+function Get-ModelSetupValue {
+    <# Resolve an optional model setting while preserving an explicit blank value. #>
+    param([AllowEmptyString()][string]$Override, [bool]$OverrideProvided, [hashtable]$DotEnv)
+    if ($OverrideProvided) { return $Override.Trim() }
+    $processValue = [Environment]::GetEnvironmentVariable("HARNESS_MODELS")
+    if ($null -ne $processValue) { return $processValue.Trim() }
+    if ($DotEnv.ContainsKey("HARNESS_MODELS")) { return $DotEnv["HARNESS_MODELS"].Trim() }
+    return ""
 }
 
 function Update-ProcessPath {
@@ -153,7 +164,7 @@ $envExamplePath = Join-Path $projectRoot ".env.example"
 $settingsPath = if (Test-Path -LiteralPath $envPath) { $envPath } else { $envExamplePath }
 $dotEnv = Import-DotEnv $settingsPath
 $selectedProfile = Get-SetupValue $TailscaleProfile "HARNESS_TAILSCALE_PROFILE" $dotEnv ""
-$modelListValue = Get-SetupValue $Models "HARNESS_MODELS" $dotEnv "devstral-small-2:latest,qwen3:8b,qwen3-vl:8b"
+$modelListValue = Get-ModelSetupValue $Models $PSBoundParameters.ContainsKey("Models") $dotEnv
 $selectedModels = @(ConvertTo-ModelList $modelListValue)
 $localBaseUrl = Assert-BaseUrl (Get-SetupValue $LocalOllamaHost "HARNESS_OLLAMA_LOCAL_HOST" $dotEnv "http://127.0.0.1:11434")
 $portValue = if ($null -ne $ServePort) { [string]$ServePort } else { Get-SetupValue "" "HARNESS_TAILSCALE_SERVE_PORT" $dotEnv "11434" }
@@ -175,6 +186,9 @@ foreach ($requiredModel in $selectedModels) {
     Write-Host "Ensuring model '$requiredModel' is installed..."
     & ollama pull $requiredModel
     if ($LASTEXITCODE -ne 0) { throw "Ollama could not install model '$requiredModel'." }
+}
+if ($selectedModels.Count -eq 0) {
+    Write-Host "No models configured; skipping model downloads. Set HARNESS_MODELS after selecting compatible Ollama models."
 }
 
 Write-Host "Forwarding private Tailscale port $configuredPort to $localBaseUrl..."

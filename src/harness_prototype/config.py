@@ -281,15 +281,10 @@ def load_settings(
     except ValueError:
         raise ValueError("HARNESS_TEMPERATURE must be a number between 0 and 2.") from None
 
-    configured_models = value(
-        "HARNESS_MODELS",
-        "devstral-small-2:latest,qwen3:8b,qwen3-vl:8b",
-    )
+    configured_models = values.get("HARNESS_MODELS") or ""
     models = tuple(dict.fromkeys(
         candidate.strip() for candidate in configured_models.split(",") if candidate.strip()
     ))
-    if not models:
-        raise ValueError("HARNESS_MODELS must contain at least one model identifier.")
     log_directory = Path(value("HARNESS_LOG_DIRECTORY", "work/logs")).expanduser()
     if not log_directory.is_absolute():
         log_directory = PROJECT_ROOT / log_directory
