@@ -35,6 +35,10 @@ install App Installer, Ollama, and `uv` through approved Windows mechanisms and
 rerun the script. The script reports failed downloads and Ollama startup failures
 with recovery guidance. It never silently selects or downloads a model.
 
+Exit FLUX with `/exit`. Ollama normally remains available in the background for
+the next session; run `.\stop.ps1` when you want to stop its local processes. This
+local stop script does not change Tailscale state.
+
 Run from this checkout. FLUX is the canonical user-facing name and is always
 written in uppercase. The installed command `uv run flux`, Python
 package/module `harness_prototype`, and `HARNESS_*` environment variables retain
@@ -569,6 +573,7 @@ before sharing them.
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
 | `src/harness_prototype/application_state.py` | Versioned transactional SQLite application-state storage, backup, and recovery |
 | `setup.ps1` | Local-only Windows Ollama, Python, and locked dependency setup |
+| `stop.ps1` | Stops local Ollama processes without changing Tailscale state |
 | `setup-remote.ps1` | Optional Windows Tailscale client and remote Ollama setup |
 | `setup-host.ps1` | Windows Ollama and Tailscale installation, model installation, and Tailscale Serve setup |
 | `stop-host.ps1` | Stops Ollama and disconnects the Windows host from Tailscale |

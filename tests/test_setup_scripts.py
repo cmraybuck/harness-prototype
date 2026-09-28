@@ -121,6 +121,31 @@ ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ value = $result })
         self.assertEqual(results[0][0].count("HARNESS_OLLAMA_HOST="), 1)
         self.assertIn("HARNESS_OLLAMA_HOST=http://127.0.0.1:11434", results[0][0])
 
+    def test_local_stop_script_does_not_change_tailscale_state(self) -> None:
+        """Keep local shutdown limited to Ollama processes."""
+        script_path = PROJECT_ROOT / "stop.ps1"
+        content = script_path.read_text(encoding="utf-8")
+        self.assertIn('Get-Process -Name "ollama*"', content)
+        self.assertIn("Stop-Process -Force", content)
+        self.assertNotIn("tailscale", content.casefold())
+        environment = dict(os.environ)
+        environment["FLUX_TEST_SCRIPT_PATH"] = str(script_path)
+        completed = subprocess.run(
+            [
+                POWERSHELL,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile($env:FLUX_TEST_SCRIPT_PATH,[ref]$null,[ref]$errors) | Out-Null; if ($errors.Count) { throw $errors[0].Message }",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=environment,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
