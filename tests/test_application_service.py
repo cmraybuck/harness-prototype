@@ -9,6 +9,7 @@ import unittest
 
 from harness_prototype.agent_loop import AgentRuntime, RuntimeInterrupted
 from harness_prototype.application_service import DesktopServiceHost, MAX_REQUEST_BYTES
+from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.locations import get_location
 
 
@@ -147,6 +148,104 @@ class ApplicationServiceTests(unittest.TestCase):
         connection.close()
         self.assertEqual(response.status, 413)
         self.assertEqual(oversized["error"]["code"], "request_too_large")
+
+    def test_durable_grants_can_be_listed_and_revoked_without_payloads(self) -> None:
+        """Expose grant administration while keeping lifecycle audit rows redacted."""
+        grant = self.host.server.registry.grants.create(
+            "grant-1", "directory", str(self.workspace.resolve()), str(self.workspace.resolve())
+        )
+        status, listed = self.request("GET", "/v1/grants")
+        self.assertEqual(status, 200)
+        self.assertEqual(listed["grants"], [grant])
+
+        status, revoked = self.request("DELETE", "/v1/grants/grant-1")
+        self.assertEqual((status, revoked["status"]), (200, "revoked"))
+        status, listed = self.request("GET", "/v1/grants")
+        self.assertEqual((status, listed["grants"]), (200, []))
+        status, missing = self.request("DELETE", "/v1/grants/grant-1")
+        self.assertEqual((status, missing["error"]["code"]), (404, "grant_not_found"))
+
+    def test_durable_tool_grant_suppresses_matching_prompt_after_restart(self) -> None:
+        """Reuse only a matching durable tool scope after reopening application state."""
+        database = self.workspace / "durable-state.sqlite3"
+
+        def permission_turn(**kwargs: object) -> str:
+            """Request one deterministic network-category approval."""
+            decision = kwargs["on_approval"](ApprovalRequest(
+                "fetch_documentation", {"url": "https://example.com/private?token=secret"},
+                ToolCategory.NETWORK,
+            ))
+            kwargs["messages"].append({"role": "assistant", "content": str(bool(decision))})
+            return "success"
+
+        def runtime_factory(model: str, workspace: Path) -> AgentRuntime:
+            """Build a runtime whose turn exercises the approval callback."""
+            return AgentRuntime(object(), model, workspace, turn_runner=permission_turn)
+
+        first_host = DesktopServiceHost(
+            workspace=self.workspace, models=("test-model",),
+            runtime_factory=runtime_factory, state_database_path=database,
+        )
+        first_host.start()
+        try:
+            first_connection = http.client.HTTPConnection(*first_host.address, timeout=5)
+            first_connection.request(
+                "POST", "/v1/conversations", body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            created = json.loads(first_connection.getresponse().read())
+            first_connection.close()
+            connection = http.client.HTTPConnection(*first_host.address, timeout=5)
+            connection.request(
+                "POST", f"/v1/conversations/{created['conversation_id']}/turns",
+                body=b'{"message":"fetch"}', headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            json.loads(response.fp.readline())
+            requested = json.loads(response.fp.readline())
+            self.assertEqual(requested["type"], "permission_request")
+            resolver = http.client.HTTPConnection(*first_host.address, timeout=5)
+            resolver.request(
+                "POST", f"/v1/permissions/{requested['permission_request_id']}",
+                body=b'{"decision":"allow_durable"}',
+                headers={"Content-Type": "application/json"},
+            )
+            resolved_response = resolver.getresponse()
+            self.assertEqual(resolved_response.status, 200)
+            resolved_response.read()
+            resolver.close()
+            response.read()
+            connection.close()
+        finally:
+            first_host.stop()
+
+        second_host = DesktopServiceHost(
+            workspace=self.workspace, models=("test-model",),
+            runtime_factory=runtime_factory, state_database_path=database,
+        )
+        second_host.start()
+        try:
+            connection = http.client.HTTPConnection(*second_host.address, timeout=5)
+            connection.request(
+                "POST", "/v1/conversations", body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            created = json.loads(connection.getresponse().read())
+            connection.close()
+            connection = http.client.HTTPConnection(*second_host.address, timeout=5)
+            connection.request(
+                "POST", f"/v1/conversations/{created['conversation_id']}/turns",
+                body=b'{"message":"fetch again"}',
+                headers={"Content-Type": "application/json"},
+            )
+            events = [
+                json.loads(line) for line in connection.getresponse().read().splitlines()
+            ]
+            connection.close()
+        finally:
+            second_host.stop()
+        self.assertNotIn("permission_request", [event["type"] for event in events])
+        self.assertIn("permission_grant", [event["type"] for event in events])
 
     def test_conversation_creation_requires_a_configured_model(self) -> None:
         """Return actionable recovery guidance when model selection is unconfigured."""

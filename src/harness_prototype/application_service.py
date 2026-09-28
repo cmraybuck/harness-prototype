@@ -2,6 +2,7 @@
 
 from collections import defaultdict, deque
 from collections.abc import Callable
+import hashlib
 import ipaddress
 import json
 from http import HTTPStatus
@@ -18,8 +19,9 @@ from ollama import Client
 from .access import AccessChoice
 from .agent_loop import AgentRuntime
 from .approval import ApprovalPromptResult, ApprovalRequest
-from .application_state import ConversationStore, StateStore
-from .config import HOST, MODELS, STATE_DATABASE_PATH
+from .application_state import ConversationStore, DurableGrantStore, StateStore
+from .config import COMMAND_ALLOWED_EXECUTABLES, HOST, MODELS, SERVICES, STATE_DATABASE_PATH
+from .files import file_change_target_paths
 from .services import stop_all_services
 from .tools import TOOL_SPECS
 
@@ -36,6 +38,46 @@ class ProtocolError(ValueError):
         super().__init__(message)
         self.code = code
         self.status = status
+
+
+def _durable_tool_identities(
+    request: ApprovalRequest, workspace: Path,
+) -> list[tuple[str, str, str]]:
+    """Return non-sensitive exact identities eligible for scoped reuse."""
+    canonical_workspace = str(workspace.resolve())
+    if request.tool_name == "run_command" and isinstance(request.arguments, dict):
+        command = request.arguments.get("command")
+        if isinstance(command, list) and command and isinstance(command[0], str):
+            return [("executable", canonical_workspace, command[0].casefold())]
+    if request.tool_name == "apply_file_changes":
+        targets = file_change_target_paths(request.arguments)
+        if isinstance(targets, list) and targets:
+            return [("file", canonical_workspace, str(path.resolve())) for path in targets]
+    if request.tool_name == "start_service" and isinstance(request.arguments, dict):
+        name = request.arguments.get("name")
+        if isinstance(name, str):
+            return [("service", canonical_workspace, name)]
+    if request.tool_name == "fetch_documentation":
+        return [("risk_category", canonical_workspace, request.category.value)]
+    try:
+        encoded = json.dumps(
+            request.arguments, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return []
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+    return [("operation", canonical_workspace, f"{request.tool_name}:sha256:{fingerprint}")]
+
+
+def _tool_identity_is_valid(request: ApprovalRequest) -> bool:
+    """Revalidate configuration properties that define a reusable tool grant."""
+    if request.tool_name == "run_command":
+        identities = _durable_tool_identities(request, Path.cwd())
+        return bool(identities) and identities[0][2] in COMMAND_ALLOWED_EXECUTABLES
+    if request.tool_name == "start_service" and isinstance(request.arguments, dict):
+        return request.arguments.get("name") in SERVICES
+    return True
 
 
 class PermissionBroker:
@@ -85,12 +127,16 @@ class ConversationRegistry:
         runtime_factory: Callable[[str, Path], AgentRuntime],
         models: tuple[str, ...],
         store: ConversationStore,
+        grants: DurableGrantStore,
     ) -> None:
         """Create a registry with injectable runtime construction."""
         self.runtime_factory = runtime_factory
         self.models = models
         self.store = store
+        self.grants = grants
         self.permissions = PermissionBroker()
+        self.session_directory_grants: set[tuple[str, str]] = set()
+        self.session_tool_grants: set[tuple[str, str, str]] = set()
         self._lock = Lock()
         self._turns_changed = Condition(self._lock)
         self._runtimes: dict[str, AgentRuntime] = {}
@@ -315,6 +361,11 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 limit, after = self._paging_query(text_cursor=True)
                 conversations, next_cursor = self.server.registry.list(limit, after)
                 self._json(HTTPStatus.OK, {"api_version": API_VERSION, "conversations": conversations, "next_cursor": next_cursor})
+            elif parts == [API_VERSION, "grants"]:
+                self._json(HTTPStatus.OK, {
+                    "api_version": API_VERSION,
+                    "grants": self.server.registry.grants.list(),
+                })
             elif len(parts) == 4 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "history":
                 self.server.registry.get(parts[2])
                 limit, after = self._paging_query(text_cursor=False)
@@ -391,9 +442,16 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             self._protocol_error(error)
 
     def do_DELETE(self) -> None:
-        """Delete one idle conversation without touching its workspace or logs."""
+        """Delete one conversation or revoke one durable permission grant."""
         try:
             parts = self._path_parts()
+            if len(parts) == 3 and parts[:2] == [API_VERSION, "grants"]:
+                if not self.server.registry.grants.revoke(parts[2]):
+                    raise ProtocolError(
+                        "grant_not_found", "Durable grant was not found.", HTTPStatus.NOT_FOUND
+                    )
+                self._json(HTTPStatus.OK, {"status": "revoked", "grant_id": parts[2]})
+                return
             if len(parts) != 3 or parts[:2] != [API_VERSION, "conversations"]:
                 raise ProtocolError("not_found", "Operation was not found.", HTTPStatus.NOT_FOUND)
             self.server.registry.delete(parts[2])
@@ -438,32 +496,105 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         self.end_headers()
         stream = TurnEventStream(self, runtime, turn_id)
         stream.emit("turn_started")
+        workspace = str(runtime.workspace.resolve())
 
         def directory_permission(path: Path) -> AccessChoice:
             """Request a scoped filesystem decision through the stream."""
+            canonical = path.expanduser().resolve()
+            session_match = any(
+                saved_workspace == workspace
+                and (canonical == Path(saved_path) or canonical.is_relative_to(Path(saved_path)))
+                for saved_workspace, saved_path in self.server.registry.session_directory_grants
+            )
+            if session_match:
+                stream.emit("permission_grant", {"action": "reused", "lifetime": "session", "kind": "directory"})
+                return AccessChoice.GRANT_DIRECTORY
+            for grant in self.server.registry.grants.list():
+                granted_path = Path(grant["target"])
+                if (
+                    grant["kind"] == "directory"
+                    and grant["workspace"] == workspace
+                    and granted_path.is_dir()
+                    and (canonical == granted_path or canonical.is_relative_to(granted_path))
+                ):
+                    self.server.registry.grants.match("directory", workspace, grant["target"])
+                    stream.emit("permission_grant", {"action": "reused", "lifetime": "durable", "kind": "directory", "grant_id": grant["grant_id"]})
+                    return AccessChoice.GRANT_ONCE
             decision = self.server.registry.permissions.request(
-                {"kind": "directory", "path": str(path), "choices": ["grant_directory", "grant_all", "deny"]},
+                {"kind": "directory", "path": str(canonical), "choices": [
+                    "allow_once", "allow_session", "allow_durable", "grant_all_session", "deny"
+                ]},
                 stream.emit,
                 lambda: stream.disconnected,
             )
-            return {
-                "grant_directory": AccessChoice.GRANT_DIRECTORY,
-                "grant_all": AccessChoice.GRANT_ALL,
-            }.get(decision, AccessChoice.DENY)
+            if decision == "allow_session":
+                self.server.registry.session_directory_grants.add((workspace, str(canonical)))
+            elif decision == "allow_durable":
+                grant = self.server.registry.grants.create(
+                    str(uuid4()), "directory", workspace, str(canonical)
+                )
+                stream.emit("permission_grant", {"action": "created", "lifetime": "durable", "kind": "directory", "grant_id": grant["grant_id"]})
+            elif decision == "deny":
+                self.server.registry.grants.record_denial("directory")
+                stream.emit("permission_grant", {"action": "denied", "lifetime": "one_time", "kind": "directory"})
+            if decision == "grant_all_session":
+                return AccessChoice.GRANT_ALL
+            if decision == "allow_session":
+                return AccessChoice.GRANT_DIRECTORY
+            if decision in {"allow_once", "allow_durable"}:
+                return AccessChoice.GRANT_ONCE
+            return AccessChoice.DENY
 
         def tool_approval(request: ApprovalRequest) -> ApprovalPromptResult:
             """Request a redacted tool-policy decision through the stream."""
+            identities = _durable_tool_identities(request, runtime.workspace)
+            if identities and all(identity in self.server.registry.session_tool_grants for identity in identities):
+                stream.emit("permission_grant", {"action": "reused", "lifetime": "session", "kind": identities[0][0]})
+                return ApprovalPromptResult(True, "session_tool_grant")
+            saved_grants = {
+                (grant["kind"], grant["workspace"], grant["target"]): grant
+                for grant in self.server.registry.grants.list()
+            }
+            durable_match = (
+                bool(identities)
+                and _tool_identity_is_valid(request)
+                and all(identity in saved_grants for identity in identities)
+            )
+            if durable_match:
+                for kind, saved_workspace, target in identities:
+                    self.server.registry.grants.match(kind, saved_workspace, target)
+                stream.emit("permission_grant", {"action": "reused", "lifetime": "durable", "kind": identities[0][0]})
+                return ApprovalPromptResult(True, "durable_tool_grant")
+            choices = ["allow_once", "deny"]
+            if identities:
+                choices = ["allow_once", "allow_session", "allow_durable", "deny"]
             decision = self.server.registry.permissions.request(
                 {
                     "kind": "tool",
                     "tool_name": request.tool_name,
                     "category": request.category.value,
-                    "choices": ["allow", "deny"],
+                    "choices": choices,
                 },
                 stream.emit,
                 lambda: stream.disconnected,
             )
-            return ApprovalPromptResult(decision == "allow", "service_client")
+            if decision == "allow_session":
+                self.server.registry.session_tool_grants.update(identities)
+            elif decision == "allow_durable":
+                for kind, saved_workspace, target in identities:
+                    self.server.registry.grants.create(
+                        str(uuid4()), kind, saved_workspace, target
+                    )
+                stream.emit("permission_grant", {"action": "created", "lifetime": "durable", "kind": identities[0][0]})
+            elif decision in {None, "deny"}:
+                self.server.registry.grants.record_denial(
+                    identities[0][0] if identities else "tool"
+                )
+                stream.emit("permission_grant", {"action": "denied", "lifetime": "one_time", "kind": "tool"})
+            return ApprovalPromptResult(
+                decision in {"allow_once", "allow_session", "allow_durable"},
+                f"service_client_{decision or 'interrupted'}",
+            )
 
         def observe_event(event: dict[str, Any]) -> None:
             """Persist runtime evidence before exposing its public projection."""
@@ -502,9 +633,16 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         """Resolve a pending permission with a documented choice string."""
         if set(body) != {"decision"} or not isinstance(body["decision"], str):
             raise ProtocolError("invalid_request", "Expected one decision string.", HTTPStatus.BAD_REQUEST)
-        if body["decision"] not in {"allow", "deny", "grant_directory", "grant_all"}:
+        if body["decision"] not in {
+            "allow", "allow_once", "allow_session", "allow_durable", "deny",
+            "grant_directory", "grant_all", "grant_all_session",
+        }:
             raise ProtocolError("invalid_decision", "Permission decision is not supported.", HTTPStatus.BAD_REQUEST)
-        if not self.server.registry.permissions.resolve(request_id, body["decision"]):
+        decision = {
+            "allow": "allow_once", "grant_directory": "allow_session",
+            "grant_all": "grant_all_session",
+        }.get(body["decision"], body["decision"])
+        if not self.server.registry.permissions.resolve(request_id, decision):
             raise ProtocolError("permission_not_found", "Permission request is no longer pending.", HTTPStatus.NOT_FOUND)
         self._json(HTTPStatus.OK, {"status": "resolved", "permission_request_id": request_id})
 
@@ -573,8 +711,8 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "models": list(self.server.registry.models),
             "tools": sorted(TOOL_SPECS),
-            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "model_selection", "workspace_selection"],
-            "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "failure", "interruption", "completion"],
+            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "model_selection", "workspace_selection"],
+            "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "permission_grant", "failure", "interruption", "completion"],
             "limits": {"max_request_bytes": MAX_REQUEST_BYTES},
         }
 
@@ -629,9 +767,12 @@ class DesktopServiceHost:
             raise ValueError("port must be an integer from 0 through 65535.")
         active_workspace = (workspace or Path.cwd()).resolve()
         factory = runtime_factory or (lambda model, path: AgentRuntime(Client(host=HOST), model, path))
-        store = ConversationStore(StateStore(state_database_path))
+        state = StateStore(state_database_path)
+        store = ConversationStore(state)
         self.server = ApplicationHTTPServer(
-            (host, port), ConversationRegistry(factory, models, store), active_workspace
+            (host, port),
+            ConversationRegistry(factory, models, store, DurableGrantStore(state)),
+            active_workspace,
         )
         self._thread: Thread | None = None
 

@@ -250,7 +250,13 @@ hypotheses. A diagnosis-only request does not authorize file changes.
 The directory where the app starts is the default workspace. File operations
 inside it require no confirmation. Before a file tool accesses another directory,
 the terminal asks whether to grant that directory, grant full machine access, or
-deny access. Grants and denials last until the app exits, including across `clear`.
+deny access. Terminal grants and denials last until the app exits, including across
+`clear`. Application-service clients additionally distinguish one-time, application-
+session, and durable grants. Durable grants are saved in the application-state
+database and are always tied to the canonical active workspace plus an exact
+directory, file, executable, configured service, or risk category. Durable full-
+machine grants are not supported. Other reusable operations are stored as a tool
+name plus a SHA-256 argument fingerprint, not as their raw argument payload.
 
 ## Tool approval policies
 
@@ -297,6 +303,17 @@ session workspace boundary below: a read-only tool that is generally allowed may
 still require directory access when it targets a path outside the workspace.
 Session file-edit grants affect only the write approval gate: they never bypass
 directory access checks, file revisions, validation, or application shutdown.
+Application-service permission requests advertise `allow_once`, `allow_session`,
+and, where a narrow reusable identity exists, `allow_durable`. Directory requests
+also offer session-only full access. Before a durable grant is reused, FLUX resolves
+paths again and rechecks executable and service configuration. A changed workspace,
+path, executable, service, or tool scope therefore prompts again. Interruptions,
+timeouts, and disconnected clients deny unanswered requests.
+
+Durable grants can be inspected with `GET /v1/grants` and revoked immediately with
+`DELETE /v1/grants/{grant_id}`. Creation, reuse, denial, and revocation are recorded
+as grant lifecycle events; stored audit rows contain the grant identifier, kind,
+action, and timestamp, but omit paths, commands, arguments, and file contents.
 
 ## File discovery and reading
 
@@ -571,7 +588,7 @@ before sharing them.
 | `src/harness_prototype/execution.py` | Shell-free configured and allowlisted command execution, process limits, and bounded output capture |
 | `src/harness_prototype/config.py` | Validated configuration |
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
-| `src/harness_prototype/application_state.py` | Versioned transactional SQLite application-state storage, backup, and recovery |
+| `src/harness_prototype/application_state.py` | Versioned transactional SQLite application-state, durable permission-grant, backup, and recovery storage |
 | `setup.ps1` | Local-only Windows Ollama, Python, and locked dependency setup |
 | `stop.ps1` | Stops local Ollama processes without changing Tailscale state |
 | `setup-remote.ps1` | Optional Windows Tailscale client and remote Ollama setup |
