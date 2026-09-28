@@ -52,6 +52,7 @@ class ApplicationServiceTests(unittest.TestCase):
             workspace=self.workspace,
             models=("test-model", "other-model"),
             runtime_factory=runtime_factory,
+            ollama_status=lambda: {"status": "available"},
             state_database_path=self.workspace / "state.sqlite3",
         )
         self.host.start()
@@ -101,6 +102,7 @@ class ApplicationServiceTests(unittest.TestCase):
         """Expose readiness and reject accidental non-loopback listeners."""
         status, health = self.request("GET", "/v1/health")
         self.assertEqual((status, health["status"]), (200, "ready"))
+        self.assertEqual(health["ollama"], {"status": "available"})
         status, capabilities = self.request("GET", "/v1/capabilities")
         self.assertEqual(status, 200)
         self.assertIn("tool_result", capabilities["event_types"])

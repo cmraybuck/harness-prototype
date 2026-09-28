@@ -17,6 +17,9 @@ dependencies = [
 [project.scripts]
 flux = "harness_prototype.main:main"
 
+[project.gui-scripts]
+flux-desktop = "harness_prototype.desktop:desktop_main"
+
 [build-system]
 requires = ["uv_build>=0.12.3,<0.13.0"]
 build-backend = "uv_build"
