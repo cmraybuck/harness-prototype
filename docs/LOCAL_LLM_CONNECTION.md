@@ -190,7 +190,7 @@ the HTTP base address; do not append `/api/tags`, `/api/chat`, or another API pa
 Run the setup:
 
 ```powershell
-.\setup.ps1
+.\setup-remote.ps1
 ```
 
 The script uses Windows Package Manager to install missing copies of `uv` and
@@ -207,7 +207,7 @@ save the selected values back to it. `-Models` accepts a comma-separated string.
 For example:
 
 ```powershell
-.\setup.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
+.\setup-remote.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
 ```
 
 If Windows blocks the script because of its execution policy, inspect the active
@@ -217,7 +217,7 @@ created scripts without changing the persistent user or machine policy:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process RemoteSigned
-.\setup.ps1
+.\setup-remote.ps1
 ```
 
 The script checks that the host is visible and that its Ollama API contains all

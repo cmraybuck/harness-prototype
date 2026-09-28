@@ -63,6 +63,7 @@ class MainTests(unittest.TestCase):
         project_file = Path(__file__).parents[1] / "pyproject.toml"
         project = tomllib.loads(project_file.read_text(encoding="utf-8"))["project"]
         self.assertEqual(project["name"], "harness-prototype")
+        self.assertEqual(project["scripts"], {"flux": "harness_prototype.main:main"})
         self.assertEqual(
             project["description"],
             f"{APP_DISPLAY_NAME} — {APP_DESCRIPTION[0].lower()}{APP_DESCRIPTION[1:-1]}",

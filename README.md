@@ -9,18 +9,34 @@ services, and run approved allowlisted engineering commands.
 
 ## Run
 
-Install uv and Ollama, then install a compatible model of your choice. Copy the
-example configuration and record its exact Ollama identifier before starting FLUX:
+On Windows 10 version 1809 or newer, or Windows 11, clone this repository and run
+the local setup from PowerShell:
 
 ```powershell
-ollama pull YOUR_MODEL
 Copy-Item .env.example .env
-# Set HARNESS_MODELS=YOUR_MODEL in .env.
-uv run python -m harness_prototype
+# Optionally set HARNESS_MODELS in .env before setup.
+.\setup.ps1
+uv run flux
 ```
 
+The script uses Windows Package Manager (`winget`) to install Ollama and `uv` when
+needed, installs Python 3.12 and the dependencies pinned by `uv.lock`, and starts
+the loopback Ollama API if it is offline. It downloads only model identifiers
+explicitly listed in `HARNESS_MODELS`, in their configured order. Leaving that
+setting blank preserves the no-model-selected state, and FLUX provides setup
+guidance at launch. Pass `-Launch` to start FLUX after setup, or `-Models
+"model-one,model-two"` to explicitly replace the configured list. Reruns reuse
+installed prerequisites and models and preserve unrelated `.env` settings.
+
+The supported automated path requires a Windows client with `winget`, an internet
+connection for missing packages, Python, dependencies, or configured models, and
+permission to install them. If `winget` is unavailable or blocked by policy,
+install App Installer, Ollama, and `uv` through approved Windows mechanisms and
+rerun the script. The script reports failed downloads and Ollama startup failures
+with recovery guidance. It never silently selects or downloads a model.
+
 Run from this checkout. FLUX is the canonical user-facing name and is always
-written in uppercase. The installed command `uv run harness-prototype`, Python
+written in uppercase. The installed command `uv run flux`, Python
 package/module `harness_prototype`, and `HARNESS_*` environment variables retain
 their existing names as compatibility interfaces during the branding transition.
 `uv run python -m harness_prototype` also remains supported. These technical names
@@ -83,29 +99,29 @@ Change these commands for another project or test runner. The timeout is a posit
 number of seconds. The output limit is a positive per-stream byte limit; bounded
 output retains both its beginning and end when the configured limit permits.
 
-For team access to an Ollama host over Tailscale, follow
+For optional team access to an Ollama host over Tailscale, follow
 [`docs/LOCAL_LLM_CONNECTION.md`](docs/LOCAL_LLM_CONNECTION.md). It covers host
 forwarding, least-privilege access, teammate setup, the local-file data boundary,
 troubleshooting, and offboarding.
 
 After a teammate has installed Git and cloned this repository, copy the example
 configuration, set the team-shared remote host IPv4 address and the optional
-Tailscale profile that can reach it, and run the Windows setup:
+Tailscale profile that can reach it, and run the separate remote setup:
 
 ```powershell
 Copy-Item .env.example .env
 # Set HARNESS_OLLAMA_HOST, HARNESS_MODELS, and any Tailscale profile in .env.
-.\setup.ps1
-uv run harness-prototype
+.\setup-remote.ps1
+uv run flux
 ```
 
-The script installs `uv`, Python 3.12, and Tailscale when needed, connects
+The remote script installs `uv`, Python 3.12, and Tailscale when needed, connects
 Tailscale, verifies the private host and models, and installs the locked
 dependencies. Command-line parameters can override and update its connection
 values; for example:
 
 ```powershell
-.\setup.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
+.\setup-remote.ps1 -OllamaHost http://HOST_TAILSCALE_IP:11434 -Launch
 ```
 
 The host can be prepared with
@@ -552,7 +568,8 @@ before sharing them.
 | `src/harness_prototype/config.py` | Validated configuration |
 | `src/harness_prototype/interaction_log.py` | Append-only turn logs, identifiers, timing, and redaction |
 | `src/harness_prototype/application_state.py` | Versioned transactional SQLite application-state storage, backup, and recovery |
-| `setup.ps1` | Windows teammate prerequisite checks, remote Ollama validation, and local setup |
+| `setup.ps1` | Local-only Windows Ollama, Python, and locked dependency setup |
+| `setup-remote.ps1` | Optional Windows Tailscale client and remote Ollama setup |
 | `setup-host.ps1` | Windows Ollama and Tailscale installation, model installation, and Tailscale Serve setup |
 | `stop-host.ps1` | Stops Ollama and disconnects the Windows host from Tailscale |
 | `evaluate.py`, `tests/` | Live-model scenarios and deterministic checks |
