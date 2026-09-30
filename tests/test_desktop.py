@@ -4,12 +4,13 @@ from io import BytesIO
 import json
 from pathlib import Path
 import tkinter as tk
+from tkinter import ttk
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 from harness_prototype.desktop import (
-    ConversationView, DesktopApiClient, DesktopApiError, FluxDesktop, desktop_main,
+    ConversationView, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, desktop_main,
 )
 
 
@@ -175,7 +176,7 @@ class ConversationViewTests(unittest.TestCase):
         text = "".join(text for _, text in view.render())
         self.assertLess(len(text), 1000)
         self.assertIn('"next_line": 42', text)
-        self.assertIn("Permission required", text)
+        self.assertNotIn("Permission required", text)
         self.assertNotIn("secret", text)
         self.assertNotIn("private", text)
 
@@ -220,6 +221,7 @@ class ConversationViewTests(unittest.TestCase):
         first.accept(self.event(1, "turn_started", turn="first"))
         second.accept(self.event(1, "turn_started", turn="second"))
         desktop.views = {"one": first, "two": second}
+        desktop._permissions = {}
         queued = []
         desktop._run_task = lambda work: queued.append(work)
         desktop.cancel_turn()
@@ -305,6 +307,121 @@ class DesktopWidgetTests(unittest.TestCase):
                                    "sequence": 3, "type": "completion", "outcome": "cancelled"})
         self.assertEqual(str(desktop.send_button["state"]), "normal")
         self.assertEqual(str(desktop.cancel_button["state"]), "disabled")
+
+    def test_permission_keyboard_default_redaction_and_dismissal(self) -> None:
+        """Select the least broad grant and deny window dismissal without payload leaks."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        decide = MagicMock()
+        event = {"operation": "apply_file_changes", "category": "write", "scope": "file: sample.txt",
+                 "choices": ["deny", "allow_durable", "allow_session", "allow_once"],
+                 "arguments": {"content": "private-secret"}, "revision": "private-secret"}
+        dialog = PermissionView(root, event, decide)
+        self.assertEqual(dialog.choices[dialog.options.curselection()[0]], "allow_once")
+        labels = [widget.cget("text") for widget in dialog.options.master.winfo_children()
+                  if widget.winfo_class() == "TLabel"]
+        review = next(widget for widget in dialog.options.master.winfo_children() if isinstance(widget, ttk.Frame))
+        labels.append(next(widget for widget in review.winfo_children() if isinstance(widget, tk.Text)).get("1.0", tk.END))
+        self.assertNotIn("private-secret", "".join(labels))
+        self.assertIn("file: sample.txt", "".join(labels))
+        root.deiconify()
+        root.update()
+        dialog.options.focus_force()
+        root.update()
+        dialog.options.event_generate("<Down>")
+        root.update()
+        self.assertEqual(dialog.choices[dialog.options.curselection()[0]], "allow_session")
+        dialog.options.event_generate("<Up>")
+        root.update()
+        dialog.options.event_generate("<space>")
+        root.update()
+        decide.assert_called_once_with("allow_once")
+        dialog.confirm("allow_durable")
+        decide.assert_called_once()
+        denied = MagicMock()
+        second = PermissionView(root, event, denied)
+        root.tk.call(second.window.protocol("WM_DELETE_WINDOW"))
+        denied.assert_called_once_with("deny")
+        entered = MagicMock()
+        third = PermissionView(root, event, entered)
+        root.update()
+        third.options.focus_force()
+        root.update()
+        third.options.event_generate("<Return>")
+        root.update()
+        entered.assert_called_once_with("allow_once")
+        oversized = PermissionView(root, {**event, "scope": "x" * 12001}, MagicMock())
+        self.assertEqual(oversized.choices, ["deny"])
+        oversized.dismiss()
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_permission_routing_disconnect_and_receipt(
+        self, _history: MagicMock, tasks: MagicMock,
+    ) -> None:
+        """Decide the original request despite navigation and deny after a lost stream."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        client = MagicMock()
+        desktop = FluxDesktop(root, client, lambda: None, Path.cwd())
+        for owner in ("one", "two"):
+            desktop._select_conversation({"conversation_id": owner})
+        started = {"conversation_id": "one", "turn_id": "turn", "sequence": 1, "type": "turn_started"}
+        desktop._turn_event("one", started)
+        requested = {**started, "sequence": 2, "type": "permission_request",
+                     "permission_request_id": "permission", "choices": ["allow_once", "deny"]}
+        desktop._turn_event("one", requested)
+        desktop._permissions["permission"][2].choose_option()
+        tasks.call_args.args[0]()
+        client.resolve_permission.assert_called_once_with("permission", "allow_once")
+        desktop._show_permission("one", requested)
+        self.assertNotIn("permission", desktop._permissions)
+        requested = {**requested, "sequence": 3, "permission_request_id": "second"}
+        desktop._turn_event("one", requested)
+        desktop._turn_error("one", DesktopApiError("Disconnected"))
+        tasks.call_args.args[0]()
+        client.resolve_permission.assert_called_with("second", "deny")
+        self.assertFalse(desktop._permissions)
+        receipt = {**started, "sequence": 4, "type": "permission_receipt",
+                   "decision": "deny", "scope": "sample.txt", "arguments": "private-secret"}
+        desktop._turn_event("one", receipt)
+        rows = desktop.views["one"].render()
+        self.assertTrue(any(tag == "status" and "Permission · Deny" in text for tag, text in rows))
+        self.assertNotIn("private-secret", "".join(text for _, text in rows))
+
+    @patch.object(FluxDesktop, "_run_task")
+    def test_settings_save_and_revoke_use_captured_backend_values(self, tasks: MagicMock) -> None:
+        """Persist preferences and revoke only the selected durable grant through the API."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        client = MagicMock()
+        desktop = FluxDesktop(root, client, lambda: None, Path.cwd())
+        desktop.models = ["test-model"]
+        desktop._settings_loaded(({"default_model": "test-model", "backend_host": "http://localhost:11434"},
+                                  [{"grant_id": "grant", "kind": "file", "target": "sample.txt", "workspace": "."}]))
+        window = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))
+        widgets = window.winfo_children()[0].winfo_children()
+        next(widget for widget in widgets if isinstance(widget, ttk.Button)
+             and widget.cget("text") == "Save preferences").invoke()
+        tasks.call_args.args[0]()
+        client.save_settings.assert_called_once_with("test-model", "http://localhost:11434")
+        next(widget for widget in widgets if isinstance(widget, tk.Listbox)).selection_set(0)
+        next(widget for widget in widgets if isinstance(widget, ttk.Button)
+             and widget.cget("text") == "Revoke selected grant").invoke()
+        tasks.call_args.args[0]()
+        client.revoke_grant.assert_called_once_with("grant")
 
 
 if __name__ == "__main__":

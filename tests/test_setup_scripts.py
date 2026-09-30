@@ -146,6 +146,86 @@ ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ value = $result })
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_local_stop_script_cleans_up_only_ollama_workers(self) -> None:
+        """Exercise shutdown with mocked cmdlets so no real processes are stopped."""
+        launcher = {"Id": 10, "ProcessId": 10, "ProcessName": "ollama", "ExecutablePath": "C:/Apps/Ollama/ollama.exe", "HasExited": False}
+        worker = {"Id": 20, "ProcessId": 20, "ProcessName": "llama-server", "ExecutablePath": r"C:\Apps\Ollama\lib\ollama\llama-server.exe", "HasExited": False}
+        unrelated = {"Id": 30, "ProcessId": 30, "ProcessName": "llama-server", "ExecutablePath": "C:/Apps/llama.cpp/llama-server.exe", "HasExited": False}
+        cases = [
+            {"processes": [worker], "fail_id": 0, "exit_race": False},
+            {"processes": [launcher, worker, unrelated], "fail_id": 0, "exit_race": False},
+            {"processes": [], "fail_id": 0, "exit_race": False},
+            {"processes": [unrelated], "fail_id": 0, "exit_race": False},
+            {"processes": [worker], "fail_id": 20, "exit_race": False},
+            {"processes": [worker], "fail_id": 0, "exit_race": True},
+            {"processes": [{**worker, "ExecutablePath": None}], "fail_id": 0, "exit_race": False},
+            {"processes": [worker], "fail_id": 0, "exit_race": False, "stale_cim": True},
+        ]
+        command = r"""
+# Shadow every process cmdlet before invoking the real shutdown script.
+function Get-Process {
+    <# Return only the synthetic process table. #>
+    param([string]$Name, [int]$Id, $ErrorAction)
+    if ($Name) {
+        $global:FluxStopFixtureProcesses | Where-Object { $_.ProcessName -like $Name }
+    } else {
+        $global:FluxStopFixtureProcesses | Where-Object { $_.Id -eq $Id }
+    }
+}
+function Get-CimInstance {
+    <# Return synthetic workers and optionally simulate a concurrent exit. #>
+    param($ClassName, $Filter)
+    $workers = @($global:FluxStopFixtureProcesses | Where-Object { $_.ProcessName -eq 'llama-server' })
+    if ($global:FluxStopFixtureStaleCim) { $workers = $global:FluxStopFixtureOriginalWorkers }
+    if ($global:FluxStopFixtureExitRace) {
+        $global:FluxStopFixtureProcesses = @($global:FluxStopFixtureProcesses | Where-Object { $_.ProcessName -ne 'llama-server' })
+        $global:FluxStopFixtureExitRace = $false
+    }
+    $workers
+}
+function Stop-Process {
+    <# Record fake terminations instead of touching the operating system. #>
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline=$true)]$InputObject, [switch]$Force)
+    process {
+        if ($InputObject.Id -eq $global:FluxStopFixtureFailId) { throw 'Access denied in fixture.' }
+        $global:FluxStopFixtureStopped += $InputObject.Id
+        $global:FluxStopFixtureProcesses = @($global:FluxStopFixtureProcesses | Where-Object { $_.Id -ne $InputObject.Id })
+    }
+}
+function Wait-Process {
+    <# Fake workers exit immediately; never wait on an actual operating-system PID. #>
+    [CmdletBinding()]
+    param($InputObject, [int]$Timeout)
+}
+if ((Get-Command Stop-Process).CommandType -ne 'Function') { throw 'Mock shutdown is required.' }
+$results = @(foreach ($case in (ConvertFrom-Json $env:FLUX_STOP_FIXTURES)) {
+    $global:FluxStopFixtureProcesses = @($case.processes)
+    $global:FluxStopFixtureFailId = $case.fail_id
+    $global:FluxStopFixtureExitRace = $case.exit_race
+    $global:FluxStopFixtureStopped = @()
+    $global:FluxStopFixtureStaleCim = $case.PSObject.Properties.Name -contains 'stale_cim'
+    $global:FluxStopFixtureOriginalWorkers = @($case.processes | Where-Object { $_.ProcessName -eq 'llama-server' })
+    $failure = $null
+    try { & $env:FLUX_TEST_SCRIPT_PATH 6>$null | Out-Null } catch { $failure = $_.Exception.Message }
+    [pscustomobject]@{ stopped = @($global:FluxStopFixtureStopped); error = $failure }
+})
+ConvertTo-Json -Compress -Depth 5 -InputObject $results
+"""
+        environment = dict(os.environ)
+        environment["FLUX_TEST_SCRIPT_PATH"] = str(PROJECT_ROOT / "stop.ps1")
+        environment["FLUX_STOP_FIXTURES"] = json.dumps(cases)
+        completed = subprocess.run(
+            [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+            check=True, capture_output=True, text=True, encoding="utf-8", env=environment,
+        )
+        results = json.loads(completed.stdout)
+        self.assertEqual([result["stopped"] for result in results], [[20], [10, 20], [], [], [], [], [], [20]])
+        self.assertIn("Access denied", results[4]["error"])
+        self.assertIn("executable path", results[6]["error"])
+        for index in (0, 1, 2, 3, 5, 7):
+            self.assertIsNone(results[index]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

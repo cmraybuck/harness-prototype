@@ -21,6 +21,13 @@ REQUEST_TIMEOUT_SECONDS = 5
 DISPLAY_TEXT_LIMIT = 12000
 STREAM_EVENT_LIMIT = 2 * 1024 * 1024
 
+PERMISSION_CHOICES = {
+    "allow_once": "Allow once · This request only",
+    "allow_session": "Allow for application session · This scope until FLUX exits",
+    "allow_durable": "Allow durably · This scope until revoked in Settings",
+    "deny": "Deny · This request (directory denial remembered in this conversation)",
+}
+
 
 class DesktopApiError(RuntimeError):
     """Represent a recoverable failure while calling the private backend."""
@@ -45,6 +52,26 @@ class DesktopApiClient:
     def capabilities(self) -> dict[str, Any]:
         """Return configured models and portable backend capabilities."""
         return self._request("GET", "/capabilities")
+
+    def resolve_permission(self, request_id: str, decision: str) -> dict[str, Any]:
+        """Resolve exactly one temporary backend permission request."""
+        return self._request("POST", f"/permissions/{quote(request_id, safe='')}", {"decision": decision})
+
+    def settings(self) -> dict[str, Any]:
+        """Read credential-free local model and backend preferences."""
+        return self._request("GET", "/settings")
+
+    def save_settings(self, model: str, host: str) -> dict[str, Any]:
+        """Save validated preferences; backend changes apply after restart."""
+        return self._request("PATCH", "/settings", {"default_model": model, "backend_host": host})
+
+    def list_grants(self) -> list[dict[str, Any]]:
+        """Inspect durable permission scopes through their backend owner."""
+        return self._request("GET", "/grants")["grants"]
+
+    def revoke_grant(self, grant_id: str) -> dict[str, Any]:
+        """Revoke one durable grant without widening or changing other grants."""
+        return self._request("DELETE", f"/grants/{quote(grant_id, safe='')}")
 
     def list_conversations(self) -> list[dict[str, Any]]:
         """Return the first bounded conversation page for navigation."""
@@ -265,9 +292,15 @@ class ConversationView:
                     rows.append(("code", f"Result · {event.get('name', 'tool')}\n"
                                  + json.dumps(summary, ensure_ascii=False, indent=2)[:DISPLAY_TEXT_LIMIT] + "\n"))
                 elif kind == "permission_request":
-                    rows.append(("status", "\nPermission required · Waiting for approval. "
-                                 "Decision controls are not available in this GUI yet; "
-                                 "cancel or wait for automatic denial.\n"))
+                    pass
+                elif kind == "permission_receipt":
+                    decision = event.get("decision", "deny")
+                    label = PERMISSION_CHOICES.get(decision, "Denied")
+                    scope = str(event.get("scope", "Requested scope"))
+                    scope = scope if len(scope) <= 300 else scope[:297] + "…"
+                    rows.append(("status", f"\n    Permission · {label} · {scope}\n"))
+                elif kind == "permission_grant" and event.get("action") == "reused":
+                    rows.append(("status", f"\n    Permission · Allowed · {event.get('lifetime')} grant reused\n"))
                 elif kind in {"failure", "interruption"}:
                     rows.append(("status", f"\n{kind.title()} · {event.get('message') or 'Turn stopped.'}\n"))
                 elif kind == "completion":
@@ -306,6 +339,88 @@ class ConversationView:
         return formatted
 
 
+class PermissionView:
+    """Present a temporary redacted decision without changing the transcript."""
+
+    def __init__(self, root: tk.Tk, event: dict[str, Any], decide: Callable[[str], None]) -> None:
+        """Show only backend-owned summary fields and supported scoped choices."""
+        self.decide = decide
+        self.closed = False
+        self.choices = [choice for choice in ("allow_once", "allow_session", "allow_durable", "deny")
+                        if choice in event.get("choices", [])]
+        oversized = any(len(str(event.get(key, ""))) > DISPLAY_TEXT_LIMIT
+                        for key in ("operation", "category", "scope", "workspace", "summary"))
+        if oversized:
+            self.choices = ["deny"]
+        if "deny" not in self.choices:
+            self.choices.append("deny")
+        self.window = tk.Toplevel(root)
+        self.window.title("FLUX · Permission")
+        self.window.transient(root)
+        self.window.protocol("WM_DELETE_WINDOW", lambda: self.confirm("deny"))
+        frame = ttk.Frame(self.window, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        summary = "\n".join(f"{label}: {str(event.get(key, fallback))[:DISPLAY_TEXT_LIMIT]}" for label, key, fallback in (
+            ("Operation", "operation", event.get("tool_name", "Access directory")),
+            ("Risk", "category", "filesystem"), ("Scope", "scope", event.get("path", "Requested operation")),
+            ("Workspace", "workspace", "Current workspace"),
+            ("Request", "summary", "Directory access includes its subtree."),
+        ))
+        review = ttk.Frame(frame)
+        review.pack(fill=tk.BOTH, expand=True)
+        summary_text = tk.Text(review, width=85, height=10, wrap="word", foreground="#087f8c")
+        summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        summary_text.insert("1.0", summary)
+        summary_text.configure(state="disabled")
+        scrollbar = ttk.Scrollbar(review, command=summary_text.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        summary_text.configure(yscrollcommand=scrollbar.set)
+        if oversized:
+            ttk.Label(frame, text="Scope exceeds the review limit. Deny and request a smaller operation.").pack(anchor="w")
+        self.options = tk.Listbox(frame, width=85, height=len(self.choices), exportselection=False,
+                                  selectforeground="#166534", selectbackground="#dcfce7")
+        self.options.pack(fill=tk.X, pady=12)
+        for choice in self.choices:
+            self.options.insert(tk.END, PERMISSION_CHOICES[choice])
+        self.options.selection_set(0)
+        self.options.activate(0)
+        self.options.bind("<Up>", lambda _event: self.move(-1))
+        self.options.bind("<Down>", lambda _event: self.move(1))
+        self.window.bind("<Return>", lambda _event: self.choose_option())
+        self.window.bind("<space>", lambda _event: self.choose_option())
+        self.window.bind("<Escape>", lambda _event: self.confirm("deny"))
+        ttk.Label(frame, text="Up/Down to select · Space or Enter to confirm · Escape to deny").pack()
+        ttk.Button(frame, text="Confirm selection", command=self.choose_option).pack(pady=8)
+        self.options.focus_set()
+
+    def move(self, step: int) -> str:
+        """Move the focused selection without approving it."""
+        current = self.options.curselection()
+        index = max(0, min(len(self.choices) - 1, (current[0] if current else 0) + step))
+        self.options.selection_clear(0, tk.END)
+        self.options.selection_set(index)
+        self.options.activate(index)
+        return "break"
+
+    def choose_option(self) -> str:
+        """Confirm the focused option once through the shared dialog seam."""
+        selection = self.options.curselection()
+        return self.confirm(self.choices[selection[0]] if selection else "deny")
+
+    def confirm(self, decision: str) -> str:
+        """Restore the conversation before asynchronously delivering a decision."""
+        if not self.closed:
+            self.dismiss()
+            self.decide(decision)
+        return "break"
+
+    def dismiss(self) -> None:
+        """Close an expired decision view without submitting another answer."""
+        if not self.closed:
+            self.closed = True
+            self.window.destroy()
+
+
 class FluxDesktop:
     """Render a responsive native shell over the private backend API."""
 
@@ -327,6 +442,8 @@ class FluxDesktop:
         self.views: dict[str, ConversationView] = {}
         self._history_loading: set[str] = set()
         self._closing = False
+        self._permissions: dict[str, tuple[str, str, PermissionView]] = {}
+        self._decided_permissions: set[str] = set()
         self._backend_stopped = Event()
         self._ui_callbacks: SimpleQueue[Callable[[], None]] = SimpleQueue()
 
@@ -374,6 +491,9 @@ class FluxDesktop:
         )
         self.conversation_list.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
         self.conversation_list.bind("<<ListboxSelect>>", self._conversation_selected)
+        ttk.Button(navigation, text="Settings and durable grants", command=self.open_settings).grid(
+            row=3, column=0, sticky="ew", pady=12
+        )
 
         workspace = ttk.Frame(shell, padding=(24, 20))
         workspace.grid(row=1, column=1, sticky="nsew")
@@ -530,8 +650,21 @@ class FluxDesktop:
             view = self.views[conversation_id]
             if error:
                 view.error = str(error)
+                self._dismiss_permissions(conversation_id, deny=True)
             else:
                 view.recover(turns or [])
+                resolved = {event.get("permission_request_id") for event in view.events.values()
+                            if event["type"] == "permission_receipt"}
+                for request_id in resolved:
+                    pending = self._permissions.pop(request_id, None)
+                    if pending:
+                        pending[2].dismiss()
+                for event in view.events.values():
+                    if (event["type"] == "permission_request" and event["turn_id"] == view.active_turn_id
+                            and event.get("permission_request_id") not in resolved):
+                        self._show_permission(conversation_id, event)
+                if not view.active_turn_id:
+                    self._dismiss_permissions(conversation_id)
             if self.active_conversation_id == conversation_id:
                 self._render_conversation()
             if view.active_turn_id and not self._closing:
@@ -610,10 +743,18 @@ class FluxDesktop:
             self._turn_error(conversation_id, DesktopApiError("Mismatched conversation event."))
             return
         try:
-            self.views[conversation_id].accept(event)
+            accepted = self.views[conversation_id].accept(event)
         except DesktopApiError as error:
             self._turn_error(conversation_id, error)
             return
+        if accepted and event["type"] == "permission_request":
+            self._show_permission(conversation_id, event)
+        elif event["type"] == "permission_receipt":
+            pending = self._permissions.pop(event.get("permission_request_id"), None)
+            if pending:
+                pending[2].dismiss()
+        elif event["type"] in {"completion", "interruption", "failure"}:
+            self._dismiss_permissions(conversation_id)
         if self.active_conversation_id == conversation_id:
             self._render_conversation()
 
@@ -623,6 +764,7 @@ class FluxDesktop:
         view.error = str(error)
         view.transport_active = False
         view.sending = False
+        self._dismiss_permissions(conversation_id, deny=True)
         if self.active_conversation_id == conversation_id:
             self._render_conversation()
 
@@ -632,7 +774,108 @@ class FluxDesktop:
         view = self.views.get(conversation_id)
         if view and view.active_turn_id:
             turn_id = view.active_turn_id
+            self._dismiss_permissions(conversation_id, deny=True)
             self._run_task(lambda: self.client.cancel_turn(conversation_id, turn_id))
+
+    def _show_permission(self, conversation_id: str, event: dict[str, Any]) -> None:
+        """Keep each temporary decision bound to its original conversation and turn."""
+        request_id = event.get("permission_request_id")
+        if (not isinstance(request_id, str) or request_id in self._permissions
+                or request_id in self._decided_permissions or self._closing):
+            return
+        view = self.views.get(conversation_id)
+        if not view or view.active_turn_id != event.get("turn_id") or view.error:
+            return
+
+        def decide(decision: str) -> None:
+            """Deliver one choice off-thread, cancelling on a lost backend connection."""
+            self._permissions.pop(request_id, None)
+            self._decided_permissions.add(request_id)
+
+            def work() -> None:
+                """Resolve the captured request without retrying an uncertain approval."""
+                try:
+                    self.client.resolve_permission(request_id, decision)
+                except DesktopApiError as error:
+                    if error.code != "permission_not_found":
+                        try:
+                            self.client.cancel_turn(conversation_id, event["turn_id"])
+                        except DesktopApiError:
+                            pass
+                        raise
+
+            self._run_task(work)
+
+        dialog = PermissionView(self.root, event, decide)
+        self._permissions[request_id] = (conversation_id, event["turn_id"], dialog)
+        self.root.after(1000, lambda: self._load_history(conversation_id))
+
+    def _dismiss_permissions(self, conversation_id: str | None = None, *, deny: bool = False) -> None:
+        """Expire or deny only dialogs belonging to the affected conversation."""
+        for request_id, (owner, _, dialog) in list(self._permissions.items()):
+            if conversation_id is None or owner == conversation_id:
+                if deny:
+                    dialog.confirm("deny")
+                else:
+                    dialog.dismiss()
+                self._permissions.pop(request_id, None)
+
+    def open_settings(self) -> None:
+        """Load local preferences and durable scopes without blocking Tk."""
+        self._run_task(lambda: (self.client.settings(), self.client.list_grants()), self._settings_loaded)
+
+    def _settings_loaded(self, result: tuple[dict[str, Any], list[dict[str, Any]]]) -> None:
+        """Build a local settings view with exact, individually revocable grants."""
+        settings, grants = result
+        window = tk.Toplevel(self.root)
+        window.title("FLUX · Local settings")
+        window.transient(self.root)
+        frame = ttk.Frame(window, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        model = tk.StringVar(value=settings["default_model"])
+        host = tk.StringVar(value=settings["backend_host"])
+        ttk.Label(frame, text="Default model for new conversations").pack(anchor="w")
+        ttk.Combobox(frame, textvariable=model, values=self.models, state="readonly").pack(fill=tk.X)
+        ttk.Label(frame, text="Ollama HTTP(S) address · Applies after restarting FLUX").pack(anchor="w", pady=(12, 0))
+        ttk.Entry(frame, textvariable=host, width=70).pack(fill=tk.X)
+        notice = tk.StringVar()
+        ttk.Label(frame, textvariable=notice, style="Muted.TLabel").pack(anchor="w")
+
+        def saved(_result: dict[str, Any]) -> None:
+            """Confirm persistence without touching existing conversations."""
+            if window.winfo_exists():
+                notice.set("Saved. Restart FLUX to apply the backend address.")
+
+        def save() -> None:
+            """Capture Tk values before validating preferences on the backend."""
+            selected_model, selected_host = model.get(), host.get().strip()
+            self._run_task(lambda: self.client.save_settings(selected_model, selected_host), saved)
+
+        ttk.Button(frame, text="Save preferences", command=save).pack(anchor="w", pady=8)
+        ttk.Label(frame, text="Durable grants · Valid until revoked · Restricted to the listed workspace").pack(anchor="w")
+        listing = tk.Listbox(frame, width=100, height=10, exportselection=False)
+        listing.pack(fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=listing.xview)
+        scroll.pack(fill=tk.X)
+        listing.configure(xscrollcommand=scroll.set)
+        for grant in grants:
+            scope = grant["target"] if grant["kind"] != "operation" else "Exact operation " + grant["target"].split(":sha256:")[0]
+            listing.insert(tk.END, f"{grant['kind']} · {scope} · Workspace: {grant['workspace']} · Until revoked")
+
+        def revoked(_result: dict[str, Any]) -> None:
+            """Refresh grant administration after confirmed backend revocation."""
+            if window.winfo_exists():
+                window.destroy()
+                self.open_settings()
+
+        def revoke() -> None:
+            """Revoke the selected stable grant identity exactly once."""
+            selection = listing.curselection()
+            if selection:
+                grant_id = grants[selection[0]]["grant_id"]
+                self._run_task(lambda: self.client.revoke_grant(grant_id), revoked)
+
+        ttk.Button(frame, text="Revoke selected grant", command=revoke).pack(anchor="w", pady=8)
 
     def _retry_message(self, view: ConversationView) -> str | None:
         """Allow resubmission only after a failed turn without tool side effects."""
@@ -663,11 +906,10 @@ class FluxDesktop:
         if not self.models:
             self._show_error(DesktopApiError("No Ollama models are configured."))
             return
-        model = self.model_text.get() or self.models[0]
         workspace = Path(self.workspace_text.get())
         self.status_text.set("Creating conversation…")
         self._run_task(
-            lambda: self.client.create_conversation(model, workspace),
+            lambda: self.client.create_conversation(self.client.settings()["default_model"], workspace),
             lambda _created: self.refresh(),
         )
 
@@ -706,6 +948,8 @@ class FluxDesktop:
     def _show_error(self, error: Exception) -> None:
         """Render a recoverable backend or validation error without blocking the UI."""
         self.status_text.set("Needs attention")
+        if isinstance(error, DesktopApiError) and error.code == "backend_unavailable":
+            self._dismiss_permissions(deny=True)
         self.detail_text.set(str(error))
         self.retry_button.grid(row=4, column=0, sticky="w", pady=8)
 
@@ -713,6 +957,7 @@ class FluxDesktop:
         """Close the window promptly and stop the managed backend asynchronously."""
         if self._closing:
             return
+        self._dismiss_permissions(deny=True)
         self._closing = True
         self.root.withdraw()
 

@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 import json
 import signal
+import sqlite3
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -83,13 +84,36 @@ def _tool_identity_is_valid(request: ApprovalRequest) -> bool:
     return True
 
 
+def _permission_scope(identities: list[tuple[str, str, str]]) -> str:
+    """Describe reusable scopes without displaying arguments or operation hashes."""
+    labels = {
+        "file": "All edits to file", "executable": "All commands using executable",
+        "service": "Starts of configured service", "risk_category": "All operations in risk category",
+    }
+    return "; ".join(
+        f"{labels.get(kind, kind)}: {target}" if kind != "operation" else "Exact requested operation"
+        for kind, _, target in identities
+    ) or "This requested operation only"
+
+
+def _permission_action_summary(request: ApprovalRequest) -> str:
+    """Summarize file actions and counts without content, revisions, or raw objects."""
+    arguments = request.arguments if isinstance(request.arguments, dict) else {}
+    changes = arguments.get("changes") if request.tool_name == "apply_file_changes" else None
+    if isinstance(changes, list):
+        counts = {action: sum(isinstance(change, dict) and change.get("action") == action for change in changes)
+                  for action in ("create", "overwrite", "append", "replace")}
+        return f"{len(changes)} file changes · " + ", ".join(f"{action}: {count}" for action, count in counts.items())
+    return "Review the scope below before allowing this operation."
+
+
 class PermissionBroker:
     """Coordinate pending permission decisions without exposing raw payloads."""
 
     def __init__(self) -> None:
         """Create an empty thread-safe request registry."""
         self._lock = Lock()
-        self._pending: dict[str, tuple[Event, str | None]] = {}
+        self._pending: dict[str, tuple[Event, str | None, tuple[str, ...]]] = {}
 
     def request(
         self,
@@ -101,7 +125,7 @@ class PermissionBroker:
         request_id = str(uuid4())
         ready = Event()
         with self._lock:
-            self._pending[request_id] = (ready, None)
+            self._pending[request_id] = (ready, None, tuple(event["choices"]))
         emit("permission_request", {"permission_request_id": request_id, **event})
         deadline = monotonic() + PERMISSION_TIMEOUT_SECONDS
         while not ready.wait(0.1):
@@ -109,15 +133,18 @@ class PermissionBroker:
                 break
         with self._lock:
             pending = self._pending.pop(request_id, None)
-        return pending[1] if pending else None
+        decision = pending[1] if pending and not cancelled() else None
+        emit("permission_receipt", {"permission_request_id": request_id,
+                                   "decision": decision or "deny", "scope": event.get("scope", "Requested operation")})
+        return decision
 
     def resolve(self, request_id: str, decision: str) -> bool:
         """Resolve one pending permission exactly once."""
         with self._lock:
             pending = self._pending.get(request_id)
-            if pending is None:
+            if pending is None or pending[1] is not None or decision not in pending[2]:
                 return False
-            self._pending[request_id] = (pending[0], decision)
+            self._pending[request_id] = (pending[0], decision, pending[2])
             pending[0].set()
             return True
 
@@ -371,6 +398,8 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 )
             elif parts == [API_VERSION, "capabilities"]:
                 self._json(HTTPStatus.OK, self._capabilities())
+            elif parts == [API_VERSION, "settings"]:
+                self._json(HTTPStatus.OK, self._settings())
             elif parts == [API_VERSION, "conversations"]:
                 limit, after = self._paging_query(text_cursor=True)
                 conversations, next_cursor = self.server.registry.list(limit, after)
@@ -432,6 +461,31 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         """Rename or select a configured model or workspace for a conversation."""
         try:
             parts = self._path_parts()
+            if parts == [API_VERSION, "settings"]:
+                body = self._read_json()
+                if set(body) != {"default_model", "backend_host"}:
+                    raise ProtocolError("invalid_settings", "Expected default_model and backend_host.", HTTPStatus.BAD_REQUEST)
+                model, host = body["default_model"], body["backend_host"]
+                if not isinstance(model, str) or model not in self.server.registry.models:
+                    raise ProtocolError("invalid_model", "Model is not configured.", HTTPStatus.BAD_REQUEST)
+                if not isinstance(host, str) or len(host) > 2048:
+                    raise ProtocolError("invalid_host", "Expected an HTTP(S) backend address without credentials.", HTTPStatus.BAD_REQUEST)
+                try:
+                    address = urlsplit(host)
+                    valid = (address.scheme in {"http", "https"} and address.hostname
+                             and "@" not in address.netloc and not any(character.isspace() for character in host)
+                             and address.path in {"", "/"} and not address.query and not address.fragment)
+                    address.port
+                except ValueError:
+                    valid = False
+                if not valid:
+                    raise ProtocolError("invalid_host", "Expected an HTTP(S) backend address without credentials.", HTTPStatus.BAD_REQUEST)
+                try:
+                    self.server.registry.grants.state.set("desktop", "preferences", body)
+                except (sqlite3.Error, StateStoreError, OSError):
+                    raise ProtocolError("settings_unavailable", "Local preferences could not be saved. Try again.", HTTPStatus.SERVICE_UNAVAILABLE) from None
+                self._json(HTTPStatus.OK, self._settings())
+                return
             if len(parts) != 3 or parts[:2] != [API_VERSION, "conversations"]:
                 raise ProtocolError("not_found", "Operation was not found.", HTTPStatus.NOT_FOUND)
             body = self._read_json()
@@ -489,7 +543,7 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 "Ollama model identifiers, then restart FLUX.",
                 HTTPStatus.CONFLICT,
             )
-        model = body.get("model", configured_models[0])
+        model = body.get("model", self._settings()["default_model"])
         workspace = body.get("workspace", str(self.server.default_workspace))
         if not isinstance(model, str) or not isinstance(workspace, str):
             raise ProtocolError("invalid_request", "Model and workspace must be strings.", HTTPStatus.BAD_REQUEST)
@@ -539,11 +593,12 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                     stream.emit("permission_grant", {"action": "reused", "lifetime": "durable", "kind": "directory", "grant_id": grant["grant_id"]})
                     return AccessChoice.GRANT_ONCE
             decision = self.server.registry.permissions.request(
-                {"kind": "directory", "path": str(canonical), "choices": [
-                    "allow_once", "allow_session", "allow_durable", "grant_all_session", "deny"
+                {"kind": "directory", "operation": "Access directory", "category": "filesystem",
+                 "scope": str(canonical), "workspace": workspace, "path": str(canonical), "choices": [
+                    "allow_once", "allow_session", "allow_durable", "deny"
                 ]},
                 stream.emit,
-                lambda: stream.disconnected,
+                lambda: stream.disconnected or runtime.is_interrupted(),
             )
             if decision == "allow_session":
                 self.server.registry.session_directory_grants.add((workspace, str(canonical)))
@@ -591,10 +646,14 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                     "kind": "tool",
                     "tool_name": request.tool_name,
                     "category": request.category.value,
+                    "operation": request.tool_name,
+                    "summary": _permission_action_summary(request),
+                    "workspace": workspace,
+                    "scope": _permission_scope(identities),
                     "choices": choices,
                 },
                 stream.emit,
-                lambda: stream.disconnected,
+                lambda: stream.disconnected or runtime.is_interrupted(),
             )
             if decision == "allow_session":
                 self.server.registry.session_tool_grants.update(identities)
@@ -729,9 +788,20 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "models": list(self.server.registry.models),
             "tools": sorted(TOOL_SPECS),
-            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "model_selection", "workspace_selection"],
-            "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "permission_grant", "failure", "interruption", "completion"],
+            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "settings", "model_selection", "workspace_selection"],
+            "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "permission_receipt", "permission_grant", "failure", "interruption", "completion"],
             "limits": {"max_request_bytes": MAX_REQUEST_BYTES},
+        }
+
+    def _settings(self) -> dict[str, Any]:
+        """Return local preferences without exposing configured credentials."""
+        saved = self.server.registry.grants.state.get("desktop", "preferences", {})
+        models = self.server.registry.models
+        model = saved.get("default_model")
+        return {
+            "default_model": model if model in models else (models[0] if models else ""),
+            "backend_host": saved.get("backend_host", self.server.backend_label),
+            "backend_restart_required": True,
         }
 
     def _conversation(self, runtime: AgentRuntime) -> dict[str, Any]:
@@ -792,9 +862,11 @@ class DesktopServiceHost:
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
             raise ValueError("port must be an integer from 0 through 65535.")
         active_workspace = (workspace or Path.cwd()).resolve()
-        factory = runtime_factory or (lambda model, path: AgentRuntime(Client(host=HOST), model, path))
-        status_check = ollama_status or get_ollama_status
         state = StateStore(state_database_path)
+        preferences = state.get("desktop", "preferences", {})
+        backend_host = preferences.get("backend_host", HOST)
+        factory = runtime_factory or (lambda model, path: AgentRuntime(Client(host=backend_host), model, path))
+        status_check = ollama_status or (lambda: get_ollama_status(Client(host=backend_host)))
         store = ConversationStore(state)
         self.server = ApplicationHTTPServer(
             (host, port),
@@ -802,6 +874,8 @@ class DesktopServiceHost:
             active_workspace,
             status_check,
         )
+        address = urlsplit(backend_host)
+        self.server.backend_label = f"{address.scheme}://{address.netloc.rsplit('@', 1)[-1]}" if address.scheme in {"http", "https"} else "http://localhost:11434"
         self._thread: Thread | None = None
 
     @property
