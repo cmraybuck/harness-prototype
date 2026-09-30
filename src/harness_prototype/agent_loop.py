@@ -1752,6 +1752,10 @@ class AgentRuntime:
         """Request cooperative cancellation of the active conversation turn."""
         self._interrupt_requested.set()
 
+    def is_interrupted(self) -> bool:
+        """Report cooperative cancellation to adapters waiting on permissions."""
+        return self._interrupt_requested.is_set()
+
     def prepare_turn(self) -> None:
         """Clear stale cancellation before a caller publishes a new active turn."""
         self._interrupt_requested.clear()

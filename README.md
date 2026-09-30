@@ -51,8 +51,12 @@ rerun the script. The script reports failed downloads and Ollama startup failure
 with recovery guidance. It never silently selects or downloads a model.
 
 Exit FLUX with `/exit`. Ollama normally remains available in the background for
-the next session; run `.\stop.ps1` when you want to stop its local processes. This
-local stop script does not change Tailscale state.
+the next session; run `.\stop.ps1` when you want to stop its local processes and
+release loaded models. It stops Ollama launchers first, then `llama-server.exe`
+workers whose executable path is inside an Ollama directory, including orphaned
+workers. Unrelated llama.cpp servers are left running. Shutdown failures are
+reported rather than treated as success. This local stop script does not change
+Tailscale state or delete downloaded models.
 
 Run from this checkout. FLUX is the canonical user-facing name and is always
 written in uppercase. The installed command `uv run flux`, Python
@@ -405,7 +409,7 @@ Session file-edit grants affect only the write approval gate: they never bypass
 directory access checks, file revisions, validation, or application shutdown.
 Application-service permission requests advertise `allow_once`, `allow_session`,
 and, where a narrow reusable identity exists, `allow_durable`. Directory requests
-also offer session-only full access. Before a durable grant is reused, FLUX resolves
+offer only scoped choices. Before a durable grant is reused, FLUX resolves
 paths again and rechecks executable and service configuration. A changed workspace,
 path, executable, service, or tool scope therefore prompts again. Interruptions,
 timeouts, and disconnected clients deny unanswered requests.
@@ -756,8 +760,30 @@ second until completion or interruption; disconnects request cooperative backend
 cancellation and never automatically retry a prompt. Restarted backend turns show
 their persisted interruption status. Older histories without public display events
 show available assistant responses and outcome labels. Permission waits are visible
-through the point of approval, but this GUI cannot decide them yet: cancel the
-turn or wait for the backend's five-minute automatic denial.
+through the point of approval. Each permission opens a temporary native decision
+view showing operation, risk, scope, workspace, and each choice's lifetime.
+Up/Down selects and Space or Enter confirms; the initial selection is Allow once.
+Escape, window dismissal, turn cancellation, application exit, lost connection,
+and the backend's five-minute timeout deny unanswered requests. Decisions remain
+bound to their original conversation and turn even when navigation changes.
+Raw arguments, contents, revisions, and credentials stay out of the view; after
+it closes, a short subdued Permission receipt appears in the conversation.
+
+**Settings and durable grants** saves a default configured model for new
+conversations and a credential-free HTTP(S) Ollama backend address. The address
+applies after restarting FLUX; existing conversations retain their model. These
+local preferences live in the application SQLite database and the saved backend
+address takes precedence over `HARNESS_HOST` for the desktop service. The settings
+view lists each durable scope and workspace and can revoke individual grants.
+Allow once covers the pending request, application-session grants last until the
+backend exits, and durable grants survive restarts until revoked. Directory grants
+cover the listed subtree; tool scopes cover files, executables, configured services,
+risk categories, or an exact operation as advertised. A session grant separately
+covering the same scope remains valid after durable revocation. No unrestricted
+grant is offered in the GUI. Grant reuse and revocation are enforced by the backend;
+approval never bypasses tool validation or filesystem access checks.
+If a permission scope exceeds the GUI's 12,000-character review limit, only denial
+is offered; request a smaller operation to review every target.
 
 Tk is available with the supported Windows Python installation. For a distributable
 Windows build, package the `harness_prototype.desktop:desktop_main` GUI entry point
@@ -792,10 +818,12 @@ The version-one HTTP operations are:
 | `POST /v1/conversations/{id}/turns` | Submit one nonempty `message` and receive an NDJSON event stream. Concurrent turns return `conversation_busy`. |
 | `POST /v1/conversations/{id}/turns/{turn_id}/cancel` | Cooperatively cancel only the matching active turn. |
 | `POST /v1/permissions/{id}` | Resolve a pending request with one of the choices advertised in its event. |
+| `GET /v1/grants`, `DELETE /v1/grants/{id}` | Inspect durable grants or revoke one exact grant. |
+| `GET /v1/settings`, `PATCH /v1/settings` | Read or save `default_model` and credential-free `backend_host` preferences. |
 
 Every event carries `api_version`, stable `conversation_id` and `turn_id`, and a
 monotonic per-turn `sequence`. Event types are `turn_started`, `assistant_text`,
-`tool_call`, `tool_result`, `permission_request`, `failure`, `interruption`, and
+`tool_call`, `tool_result`, `permission_request`, `permission_receipt`, `permission_grant`, `failure`, `interruption`, and
 `completion`. Tool calls and results share a stable `tool_call_id`; permission
 requests have a stable `permission_request_id` and omit raw tool arguments. A
 disconnected stream requests cooperative cancellation, while completed tool

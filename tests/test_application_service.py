@@ -6,10 +6,12 @@ from pathlib import Path
 import tempfile
 from threading import Event
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from harness_prototype.agent_loop import AgentRuntime, RuntimeInterrupted
-from harness_prototype.application_service import DesktopServiceHost, MAX_REQUEST_BYTES, TurnEventStream
+from harness_prototype.application_service import (
+    DesktopServiceHost, MAX_REQUEST_BYTES, PermissionBroker, TurnEventStream, _permission_action_summary,
+)
 from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.locations import get_location
 
@@ -197,6 +199,104 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual((status, listed["grants"]), (200, []))
         status, missing = self.request("DELETE", "/v1/grants/grant-1")
         self.assertEqual((status, missing["error"]["code"]), (404, "grant_not_found"))
+
+    def test_settings_validate_persist_and_select_default_model(self) -> None:
+        """Save safe preferences without changing existing conversation selections."""
+        preferences = {"default_model": "other-model", "backend_host": "http://localhost:11435"}
+        status, saved = self.request("PATCH", "/v1/settings", preferences)
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["default_model"], "other-model")
+        status, created = self.request("POST", "/v1/conversations", {})
+        self.assertEqual(created["model"], "other-model")
+        for host in ("http://user:secret@localhost", "http://localhost?token=secret", "file:///private", "http://localhost:bad"):
+            status, rejected = self.request("PATCH", "/v1/settings", {**preferences, "backend_host": host})
+            self.assertEqual(status, 400)
+            self.assertNotIn("secret", json.dumps(rejected))
+        self.assertEqual(self.host.server.registry.grants.state.get("desktop", "preferences"), preferences)
+        with patch("harness_prototype.application_service.Client") as client:
+            restarted = DesktopServiceHost(workspace=self.workspace, models=("test-model", "other-model"),
+                                           state_database_path=self.workspace / "state.sqlite3")
+            self.addCleanup(restarted.stop)
+            restarted.server.registry.runtime_factory("other-model", self.workspace)
+            client.assert_called_once_with(host="http://localhost:11435")
+        self.request("PATCH", "/v1/settings", {**preferences, "default_model": "test-model"})
+        status, current = self.request("GET", f"/v1/conversations/{created['conversation_id']}")
+        self.assertEqual(current["model"], "other-model")
+
+    def test_gui_permission_scopes_reuse_and_revocation(self) -> None:
+        """Complete allowed and denied tool turns with exact scope reuse and revocation."""
+        outcomes = []
+
+        def permission_turn(**kwargs: object) -> str:
+            """Simulate a sensitive request while exposing only its approval result."""
+            decision = kwargs["on_approval"](ApprovalRequest(
+                "fetch_documentation", {"url": "https://example.com/?credential=private-secret"}, ToolCategory.NETWORK,
+            ))
+            outcomes.append(bool(decision))
+            return "success"
+
+        def factory(model: str, workspace: Path) -> AgentRuntime:
+            """Build a deterministic runtime for GUI approval integration."""
+            return AgentRuntime(object(), model, workspace, turn_runner=permission_turn)
+
+        self.host.server.registry.runtime_factory = factory
+        _, created = self.request("POST", "/v1/conversations", {})
+        owner = created["conversation_id"]
+        for choice in ("allow_once", "deny", "allow_durable"):
+            connection, response, _ = self.open_turn_stream(owner, choice)
+            self.addCleanup(connection.close)
+            request = json.loads(response.fp.readline())
+            self.assertEqual(request["type"], "permission_request")
+            self.assertNotIn("private-secret", json.dumps(request))
+            self.assertEqual(request["scope"], "All operations in risk category: network")
+            status, _ = self.request("POST", f"/v1/permissions/{request['permission_request_id']}", {"decision": choice})
+            self.assertEqual(status, 200)
+            events = [json.loads(line) for line in response.read().splitlines()]
+            connection.close()
+            self.assertEqual(next(event for event in events if event["type"] == "permission_receipt")["decision"], choice)
+        self.assertEqual(outcomes, [True, False, True])
+        _, reused = self.request("POST", f"/v1/conversations/{owner}/turns", {"message": "reuse"})
+        self.assertNotIn("permission_request", [event["type"] for event in reused])
+        _, grants = self.request("GET", "/v1/grants")
+        self.request("DELETE", f"/v1/grants/{grants['grants'][0]['grant_id']}")
+        connection, response, _ = self.open_turn_stream(owner, "after revoke")
+        self.addCleanup(connection.close)
+        requested = json.loads(response.fp.readline())
+        self.assertEqual(requested["type"], "permission_request")
+        self.request("POST", f"/v1/permissions/{requested['permission_request_id']}", {"decision": "allow_session"})
+        response.read()
+        connection.close()
+        _, reused = self.request("POST", f"/v1/conversations/{owner}/turns", {"message": "session reuse"})
+        self.assertTrue(any(event["type"] == "permission_grant" and event["lifetime"] == "session" for event in reused))
+
+    def test_cancellation_denies_pending_permission_promptly(self) -> None:
+        """Interrupt a waiting permission without allowing its tool or waiting for timeout."""
+        outcomes = []
+
+        def permission_turn(**kwargs: object) -> str:
+            """Wait on the backend approval callback and record whether it allowed."""
+            decision = kwargs["on_approval"](ApprovalRequest("fetch_documentation", {}, ToolCategory.NETWORK))
+            outcomes.append(bool(decision))
+            if kwargs["is_interrupted"]():
+                raise RuntimeInterrupted
+            return "success"
+
+        def factory(model: str, workspace: Path) -> AgentRuntime:
+            """Build a cancellation-aware simulated approval workflow."""
+            return AgentRuntime(object(), model, workspace, turn_runner=permission_turn)
+
+        self.host.server.registry.runtime_factory = factory
+        _, created = self.request("POST", "/v1/conversations", {})
+        owner = created["conversation_id"]
+        connection, response, started = self.open_turn_stream(owner, "cancel approval")
+        self.addCleanup(connection.close)
+        requested = json.loads(response.fp.readline())
+        self.request("POST", f"/v1/conversations/{owner}/turns/{started['turn_id']}/cancel", {})
+        events = [json.loads(line) for line in response.read().splitlines()]
+        self.assertEqual(outcomes, [False])
+        self.assertEqual(events[-1]["outcome"], "cancelled")
+        status, _ = self.request("POST", f"/v1/permissions/{requested['permission_request_id']}", {"decision": "allow_once"})
+        self.assertEqual(status, 404)
 
     def test_durable_tool_grant_suppresses_matching_prompt_after_restart(self) -> None:
         """Reuse only a matching durable tool scope after reopening application state."""
@@ -492,6 +592,53 @@ class ApplicationServiceTests(unittest.TestCase):
         runtime = self.host.server.registry.get(conversation_id)
         self.assertNotIn("abandoned", [message.get("content") for message in runtime.messages])
         self.assertEqual(self.host.server.registry._active_turns, {})
+
+
+class PermissionBrokerTests(unittest.TestCase):
+    """Exercise decision validation and cancellation without network timing races."""
+
+    def test_file_action_summary_omits_contents_and_revisions(self) -> None:
+        """Show counts and actions while keeping write payloads private."""
+        summary = _permission_action_summary(ApprovalRequest("apply_file_changes", {"changes": [
+            {"action": "overwrite", "content": "private-secret", "expected_revision": "private-secret"},
+            {"action": "append", "content": "private-secret"},
+        ]}, ToolCategory.WRITE))
+        self.assertIn("2 file changes", summary)
+        self.assertIn("overwrite: 1", summary)
+        self.assertIn("append: 1", summary)
+        self.assertNotIn("private-secret", summary)
+
+    def test_only_advertised_first_decision_can_resolve(self) -> None:
+        """Reject broader choices and repeat resolutions for the same request."""
+        broker = PermissionBroker()
+        events = []
+
+        def emit(kind: str, fields: dict) -> None:
+            """Resolve during publication so the outcome is deterministic."""
+            events.append((kind, fields))
+            if kind == "permission_request":
+                request_id = fields["permission_request_id"]
+                self.assertFalse(broker.resolve(request_id, "allow_durable"))
+                self.assertTrue(broker.resolve(request_id, "deny"))
+                self.assertFalse(broker.resolve(request_id, "allow_once"))
+
+        self.assertEqual(broker.request({"choices": ["allow_once", "deny"]}, emit, lambda: False), "deny")
+        self.assertEqual(events[-1][0], "permission_receipt")
+
+    def test_disconnect_wins_over_concurrent_allow(self) -> None:
+        """Never return an allow when the owning stream has been disconnected."""
+        broker = PermissionBroker()
+        cancelled = Event()
+
+        def emit(kind: str, fields: dict) -> None:
+            """Simulate disconnection just after a racing approval submission."""
+            if kind == "permission_request":
+                broker.resolve(fields["permission_request_id"], "allow_once")
+                cancelled.set()
+            else:
+                self.assertEqual(fields["decision"], "deny")
+
+        self.assertIsNone(broker.request({"choices": ["allow_once", "deny"]}, emit, cancelled.is_set))
 
 
 if __name__ == "__main__":
