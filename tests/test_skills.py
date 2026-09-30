@@ -64,6 +64,22 @@ class SkillTests(unittest.TestCase):
         self.assertIn("Resource guide.txt:\nProject conventions.", state.context())
         self.assertEqual(catalog.metadata()[0]["source"], "application")
 
+    def test_provenance_is_bounded_metadata_and_detects_content_changes(self) -> None:
+        """Persist source identity and a fingerprint without copying loaded instructions."""
+        path = self.write_skill(self.application)
+        catalog = discover_skills(self.workspace, self.application, self.bundled)
+        state = SkillState(catalog)
+        state.activate(["review.focused"], {"workspace_inspection"}, {"read_file"})
+        original = state.provenance()
+        self.assertEqual(original[0]["manifest_path"], str(path.resolve()))
+        self.assertEqual(original[0]["format_version"], 1)
+        self.assertEqual(len(original[0]["sha256"]), 64)
+        self.assertNotIn("Review focused changes.", json.dumps(original))
+        (path.parent / "instructions.md").write_text("Changed instructions.", encoding="utf-8")
+        reloaded = SkillState(discover_skills(self.workspace, self.application, self.bundled))
+        reloaded.activate(["review.focused"], {"workspace_inspection"}, {"read_file"})
+        self.assertNotEqual(original[0]["sha256"], reloaded.provenance()[0]["sha256"])
+
     def test_rejects_traversal_and_unsupported_version(self) -> None:
         """Report unsafe paths and unsupported formats instead of loading them."""
         self.write_skill(self.application, instructions="../outside.md")

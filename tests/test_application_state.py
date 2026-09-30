@@ -59,6 +59,25 @@ class ApplicationStateTests(unittest.TestCase):
             self.assertEqual(store.get("portable", "fixture"), {"kept": True})
             store.set("portable", "new", "value")
 
+    def test_version_four_conversation_migrates_with_empty_provenance(self) -> None:
+        """Add bounded source metadata while preserving legacy messages and selections."""
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            path = workspace / "state.sqlite3"
+            state = StateStore(path)
+            conversations = ConversationStore(state)
+            conversations.create("legacy", "Legacy", "test-model", workspace,
+                                 [{"role": "system", "content": "Retained context"}],
+                                 active_skills=["pirate"])
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("ALTER TABLE conversations DROP COLUMN skill_provenance_json")
+                connection.execute("PRAGMA user_version = 4")
+                connection.commit()
+            migrated = ConversationStore(StateStore(path)).load("legacy")
+            self.assertEqual(migrated["active_skills"], ["pirate"])
+            self.assertEqual(migrated["skill_provenance"], [])
+            self.assertEqual(migrated["messages"][0]["content"], "Retained context")
+
     def test_failed_transaction_rolls_back_every_mutation(self) -> None:
         """Leave no partial records when a caller fails during a transaction."""
         with tempfile.TemporaryDirectory() as temporary:

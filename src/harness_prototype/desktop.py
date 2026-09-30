@@ -10,7 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from .application_service import DesktopServiceHost
@@ -81,10 +81,28 @@ class DesktopApiClient:
         """Return current metadata for one conversation."""
         return self._request("GET", f"/conversations/{quote(conversation_id, safe='')}")
 
-    def create_conversation(self, model: str, workspace: Path) -> dict[str, Any]:
+    def skills(self, workspace: Path, conversation_id: str | None = None) -> dict[str, Any]:
+        """Discover metadata or inspect the exact active conversation selection."""
+        path = (f"/conversations/{quote(conversation_id, safe='')}/skills" if conversation_id
+                else "/skills?" + urlencode({"workspace": str(workspace)}))
+        return self._request("GET", path)
+
+    def select_skills(self, conversation_id: str, identifiers: list[str], confirmed: bool) -> dict[str, Any]:
+        """Apply dynamic activation, optionally requesting an explicit context reset."""
+        return self._request("PATCH", f"/conversations/{quote(conversation_id, safe='')}/skills",
+                             {"active_skills": identifiers, "confirm_context_reset": confirmed})
+
+    def save_skill_preferences(self, workspace: Path, identifiers: list[str]) -> dict[str, Any]:
+        """Persist workspace defaults as identifiers rather than instruction contents."""
+        return self._request("PATCH", "/skill-preferences", {"workspace": str(workspace), "active_skills": identifiers})
+
+    def create_conversation(self, model: str, workspace: Path, active_skills: list[str] | None = None) -> dict[str, Any]:
         """Create one backend-owned durable conversation."""
+        body = {"model": model, "workspace": str(workspace)}
+        if active_skills is not None:
+            body["active_skills"] = active_skills
         return self._request(
-            "POST", "/conversations", {"model": model, "workspace": str(workspace)}
+            "POST", "/conversations", body
         )
 
     def update_conversation(
@@ -421,6 +439,106 @@ class PermissionView:
             self.window.destroy()
 
 
+class SkillPanel:
+    """Inspect and toggle conversation skills inline without a modal decision."""
+
+    def __init__(
+        self, parent: ttk.Frame, catalog: dict[str, Any],
+        activate: Callable[[list[str]], None], close: Callable[[], None],
+    ) -> None:
+        """Build labelled metadata controls with direct keyboard activation."""
+        self.activate = activate
+        self.selected = set(catalog.get("active_skills", []))
+        self.entries = list(catalog.get("skills", []))
+        known = {item["id"] for item in self.entries}
+        for identifier in sorted(self.selected - known):
+            self.entries.append({"id": identifier, "name": identifier, "available": False,
+                                 "error": "Saved skill is missing or invalid. Disable it or restore its source."})
+        for diagnostic in catalog.get("diagnostics", []):
+            self.entries.append({"name": "Invalid skill", "available": False,
+                                 "manifest_path": diagnostic["path"], "error": diagnostic["error"]})
+        self.frame = ttk.Frame(parent, padding=8)
+        self.frame.columnconfigure(1, weight=1)
+        ttk.Label(self.frame, text="Skills · Up/Down to inspect · Space or Enter to toggle").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.options = tk.Listbox(self.frame, width=25, height=5, exportselection=False, takefocus=True)
+        self.options.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        for item in self.entries:
+            status = "Active" if item.get("id") in self.selected else "Inactive"
+            if not item.get("available"):
+                status += " · Unavailable"
+            self.options.insert(tk.END, f"{status} · {item.get('id', item['name'])}")
+        self.options.bind("<<ListboxSelect>>", self.inspect)
+        self.options.bind("<Up>", lambda _event: self.move(-1))
+        self.options.bind("<Down>", lambda _event: self.move(1))
+        self.options.bind("<space>", lambda _event: self.choose_option())
+        self.options.bind("<Return>", lambda _event: self.choose_option())
+        review = ttk.Frame(self.frame)
+        review.grid(row=1, column=1, sticky="nsew")
+        self.details = tk.Text(review, width=45, height=5, wrap="word", takefocus=True)
+        self.details.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(review, command=self.details.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.details.configure(yscrollcommand=scrollbar.set)
+        self.notice = tk.StringVar(value=(catalog.get("skill_error") or {}).get("error", ""))
+        ttk.Label(self.frame, textvariable=self.notice, wraplength=650).grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Button(self.frame, text="Close skills", command=close).grid(row=3, column=0, sticky="w")
+        self.limits = catalog.get("limits", {})
+        self.roots = catalog.get("roots", [])
+        self.provenance = catalog.get("skill_provenance", [])
+        if self.entries:
+            self.options.selection_set(0)
+        self.inspect()
+
+    def move(self, step: int) -> str:
+        """Move the metadata selection without changing active skills."""
+        current = self.options.curselection()
+        index = max(0, min(len(self.entries) - 1, (current[0] if current else 0) + step))
+        self.options.selection_clear(0, tk.END)
+        if self.entries:
+            self.options.selection_set(index)
+            self.options.activate(index)
+            self.options.see(index)
+        self.inspect()
+        return "break"
+
+    def inspect(self, _event: object = None) -> None:
+        """Display bounded source metadata, requirements, diagnostics, and loading limits."""
+        selection = self.options.curselection()
+        item = self.entries[selection[0]] if selection else {}
+        text = "\n".join(f"{label}: {item.get(key, 'Not available')}" for label, key in (
+            ("Name", "name"), ("Description", "description"), ("Source", "source"),
+            ("Manifest location", "manifest_path"), ("Format version", "format_version"),
+            ("Required capabilities", "required_capabilities"), ("Required tools", "required_tools"),
+            ("Validation state", "validation_state"), ("Explanation", "error"),
+        )) if item else "No installed skills. Install a local skill and run /skills again."
+        text += "\nLoading limits: " + str(self.limits) + "\nDiscovery roots: " + "; ".join(self.roots)
+        for record in self.provenance:
+            if record["id"] == item.get("id"):
+                text += f"\nSaved active source: {record['manifest_path']}\nContent fingerprint: {record['sha256']}"
+        self.details.configure(state="normal")
+        self.details.delete("1.0", tk.END)
+        self.details.insert("1.0", text)
+        self.details.configure(state="disabled")
+
+    def choose_option(self) -> str:
+        """Request an immediate atomic toggle without granting tools or permissions."""
+        selection = self.options.curselection()
+        if selection:
+            item = self.entries[selection[0]]
+            identifier = item.get("id")
+            identifiers = set(self.selected)
+            if identifier in identifiers:
+                identifiers.remove(identifier)
+            elif item.get("available"):
+                identifiers.add(identifier)
+            else:
+                self.notice.set(item.get("error", "This skill is unavailable."))
+                return "break"
+            self.activate(sorted(identifiers))
+        return "break"
+
+
 class FluxDesktop:
     """Render a responsive native shell over the private backend API."""
 
@@ -445,12 +563,18 @@ class FluxDesktop:
         self._permissions: dict[str, tuple[str, str, PermissionView]] = {}
         self._decided_permissions: set[str] = set()
         self._backend_stopped = Event()
+        self._skill_panel: SkillPanel | None = None
+        self._skill_changing: set[str] = set()
+        self._skill_panel_request: object | None = None
+        self._skill_metadata: dict[str, dict[str, Any]] = {}
+        self._skill_requests: dict[str, object] = {}
         self._ui_callbacks: SimpleQueue[Callable[[], None]] = SimpleQueue()
 
         self.status_text = tk.StringVar(value="Starting local backend…")
         self.detail_text = tk.StringVar(value="Connecting to FLUX")
         self.model_text = tk.StringVar()
         self.workspace_text = tk.StringVar(value=str(self.workspace))
+        self.skills_text = tk.StringVar(value="Active skills · None")
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(25, self._drain_ui_callbacks)
@@ -517,6 +641,10 @@ class FluxDesktop:
         ttk.Label(controls, textvariable=self.workspace_text, style="Muted.TLabel").grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(8, 0)
         )
+        ttk.Label(controls, textvariable=self.skills_text, wraplength=500).grid(row=2, column=0, columnspan=2, sticky="w", pady=8)
+        ttk.Button(controls, text="Skills…", command=self.open_skills).grid(row=2, column=2)
+
+        self._skill_container = controls
 
         transcript = ttk.Frame(workspace)
         transcript.grid(row=2, column=0, sticky="nsew")
@@ -534,7 +662,7 @@ class FluxDesktop:
         composer = ttk.Frame(workspace)
         composer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         composer.columnconfigure(0, weight=1)
-        ttk.Label(composer, text="Message (Ctrl+Enter to send)").grid(row=0, column=0, sticky="w")
+        ttk.Label(composer, text="Message or /skills, /skill id[,id] (Ctrl+Enter to send)").grid(row=0, column=0, sticky="w")
         self.message_input = tk.Text(composer, height=4, wrap="word")
         self.message_input.grid(row=1, column=0, sticky="ew", rowspan=3, padx=(0, 10))
         self.message_input.bind("<Control-Return>", self._send_key)
@@ -549,6 +677,7 @@ class FluxDesktop:
 
     def _run_task(
         self, work: Callable[[], Any], complete: Callable[[Any], None] | None = None,
+        failed: Callable[[Exception], None] | None = None,
     ) -> None:
         """Run backend I/O off the Tk event loop and marshal its result safely."""
         def runner() -> None:
@@ -557,7 +686,7 @@ class FluxDesktop:
                 result = work()
             except (DesktopApiError, OSError, ValueError) as error:
                 if not self._closing:
-                    self._ui_callbacks.put(lambda error=error: self._show_error(error))
+                    self._ui_callbacks.put(lambda error=error: (failed or self._show_error)(error))
             else:
                 if complete is not None and not self._closing:
                     self._ui_callbacks.put(lambda: complete(result))
@@ -621,13 +750,30 @@ class FluxDesktop:
 
     def _select_conversation(self, conversation: dict[str, Any]) -> None:
         """Display one conversation's backend-owned selections."""
+        if self.active_conversation_id != conversation["conversation_id"]:
+            self.close_skills()
         self.active_conversation_id = conversation["conversation_id"]
         self.detail_text.set(conversation.get("title", "New conversation"))
         self.model_text.set(conversation.get("model", ""))
         self.workspace_text.set(conversation.get("workspace", str(self.workspace)))
+        self._skill_metadata[self.active_conversation_id] = conversation
+        self._render_skills()
         self.views.setdefault(self.active_conversation_id, ConversationView())
         self._render_conversation()
         self._load_history(self.active_conversation_id)
+        conversation_id = self.active_conversation_id
+        request_token = object()
+        self._skill_requests[conversation_id] = request_token
+
+        def loaded(metadata: dict[str, Any]) -> None:
+            """Refresh restart diagnostics without changing the selected conversation."""
+            if self._skill_requests.get(conversation_id) is not request_token:
+                return
+            self._skill_metadata[conversation_id] = metadata
+            if self.active_conversation_id == conversation_id:
+                self._render_skills()
+
+        self._run_task(lambda: self.client.get_conversation(conversation_id), loaded)
 
     def _load_history(self, conversation_id: str) -> None:
         """Recover durable events without blocking or duplicating a stream."""
@@ -683,7 +829,7 @@ class FluxDesktop:
         self.transcript.configure(state="disabled")
         if bottom:
             self.transcript.see(tk.END)
-        busy = bool(view and (not view.history_loaded or view.sending or view.transport_active or view.active_turn_id))
+        busy = self.active_conversation_id in self._skill_changing or bool(view and (not view.history_loaded or view.sending or view.transport_active or view.active_turn_id))
         self.send_button.configure(state="normal" if view and not busy and not view.error else "disabled")
         self.cancel_button.configure(state="normal" if view and view.active_turn_id else "disabled")
         self.retry_turn_button.configure(state="normal" if view and self._retry_message(view) else "disabled")
@@ -703,10 +849,23 @@ class FluxDesktop:
         if not conversation_id:
             return
         view = self.views[conversation_id]
-        if not view.history_loaded or view.sending or view.transport_active or view.active_turn_id or view.error:
+        if conversation_id in self._skill_changing or not view.history_loaded or view.sending or view.transport_active or view.active_turn_id:
             return
         message = message if message is not None else self.message_input.get("1.0", "end-1c")
         if not message.strip():
+            return
+        command = message.strip()
+        normalized = command.lower()
+        if normalized == "/skills":
+            self.message_input.delete("1.0", tk.END)
+            self.open_skills()
+            return
+        if normalized == "/skill" or normalized.startswith("/skill "):
+            identifiers = [item.strip() for item in command[6:].strip().split(",") if item.strip()]
+            self.message_input.delete("1.0", tk.END)
+            self.activate_skills(conversation_id, identifiers)
+            return
+        if view.error:
             return
         view.sending = True
         view.transport_active = True
@@ -765,6 +924,8 @@ class FluxDesktop:
         view.transport_active = False
         view.sending = False
         self._dismiss_permissions(conversation_id, deny=True)
+        if isinstance(error, DesktopApiError) and error.code == "backend_unavailable":
+            self.close_skills()
         if self.active_conversation_id == conversation_id:
             self._render_conversation()
 
@@ -902,16 +1063,104 @@ class FluxDesktop:
                 self.send_turn(message)
 
     def create_conversation(self) -> None:
-        """Create a durable conversation using the current selections."""
+        """Create a normal conversation with no preselected skills or picker."""
         if not self.models:
             self._show_error(DesktopApiError("No Ollama models are configured."))
             return
         workspace = Path(self.workspace_text.get())
-        self.status_text.set("Creating conversation…")
+
+        def created(metadata: dict[str, Any]) -> None:
+            """Select the new conversation after creation without opening skill controls."""
+            self.active_conversation_id = metadata["conversation_id"]
+            self.close_skills()
+            self.refresh()
+
         self._run_task(
-            lambda: self.client.create_conversation(self.client.settings()["default_model"], workspace),
-            lambda _created: self.refresh(),
+            lambda: self.client.create_conversation(self.client.settings()["default_model"], workspace, []),
+            created,
         )
+
+    def _render_skills(self) -> None:
+        """Keep active identifiers and restoration failures visible in the conversation."""
+        metadata = self._skill_metadata.get(self.active_conversation_id, {})
+        label = "Active skills · " + (", ".join(metadata.get("active_skills", [])) or "None")
+        if metadata.get("skill_error"):
+            label += " · Unavailable: " + metadata["skill_error"]["error"]
+        self.skills_text.set(label)
+
+    def close_skills(self) -> None:
+        """Close the inline inspector and restore composer focus."""
+        self._skill_panel_request = None
+        if self._skill_panel:
+            self._skill_panel.frame.destroy()
+            self._skill_panel = None
+        self.message_input.focus_set()
+
+    def open_skills(self) -> None:
+        """Rediscover and inspect the selected conversation's skills inline."""
+        conversation_id = self.active_conversation_id
+        if not conversation_id:
+            self.status_text.set("Create a conversation before using /skills.")
+            return
+        workspace = Path(self.workspace_text.get())
+        request_token = object()
+        self._skill_panel_request = request_token
+
+        def loaded(catalog: dict[str, Any]) -> None:
+            """Render only the captured conversation and keep navigation responsive."""
+            if self.active_conversation_id != conversation_id or self._skill_panel_request is not request_token:
+                return
+            focused_index = 0
+            if self._skill_panel:
+                selection = self._skill_panel.options.curselection()
+                focused_index = selection[0] if selection else 0
+                self._skill_panel.frame.destroy()
+            self._skill_metadata[conversation_id] = catalog
+            self._render_skills()
+            self._skill_panel = SkillPanel(self._skill_container, catalog,
+                                          lambda identifiers: self.activate_skills(conversation_id, identifiers),
+                                          self.close_skills)
+            self._skill_panel.frame.grid(row=3, column=0, columnspan=3, sticky="ew")
+            self._skill_panel.move(focused_index)
+            self._skill_panel.options.focus_set()
+
+        self._run_task(lambda: self.client.skills(workspace, conversation_id), loaded)
+
+    def activate_skills(self, conversation_id: str, identifiers: list[str]) -> None:
+        """Apply slash-command or keyboard activation without discarding retained context."""
+        view = self.views[conversation_id]
+        if conversation_id in self._skill_changing or view.sending or view.transport_active or view.active_turn_id or not view.history_loaded:
+            self.status_text.set("Wait for this conversation's pending operation before changing skills.")
+            return
+        self._skill_changing.add(conversation_id)
+        if self.active_conversation_id == conversation_id:
+            self._skill_panel_request = None
+        self._render_conversation()
+
+        def applied(metadata: dict[str, Any]) -> None:
+            """Update only the captured chat after backend validation and persistence."""
+            self._skill_changing.discard(conversation_id)
+            self._skill_requests[conversation_id] = object()
+            self._skill_metadata[conversation_id] = metadata
+            if view.error:
+                self._load_history(conversation_id)
+            if self.active_conversation_id == conversation_id:
+                self._render_skills()
+                self._render_conversation()
+                self.status_text.set("Skills updated · Conversation context retained")
+                if self._skill_panel:
+                    self.open_skills()
+
+        def failed(error: Exception) -> None:
+            """Keep the prior set and show failures without automatically retrying changes."""
+            self._skill_changing.discard(conversation_id)
+            if self.active_conversation_id == conversation_id:
+                self._render_conversation()
+                self._show_error(error)
+                if self._skill_panel:
+                    self._skill_panel.notice.set(str(error))
+
+        self._run_task(lambda: self.client.select_skills(conversation_id, identifiers, False), applied, failed)
 
     def choose_workspace(self) -> None:
         """Choose an existing directory and update the active conversation if present."""
@@ -950,6 +1199,7 @@ class FluxDesktop:
         self.status_text.set("Needs attention")
         if isinstance(error, DesktopApiError) and error.code == "backend_unavailable":
             self._dismiss_permissions(deny=True)
+            self.close_skills()
         self.detail_text.set(str(error))
         self.retry_button.grid(row=4, column=0, sticky="w", pady=8)
 
@@ -958,6 +1208,8 @@ class FluxDesktop:
         if self._closing:
             return
         self._dismiss_permissions(deny=True)
+        if self._skill_panel:
+            self.close_skills()
         self._closing = True
         self.root.withdraw()
 

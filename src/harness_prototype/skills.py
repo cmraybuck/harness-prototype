@@ -1,6 +1,7 @@
 """Discover and activate bounded, untrusted local agent skills."""
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -58,6 +59,7 @@ class SkillCatalog:
                 "name": skill.name,
                 "description": skill.description,
                 "source": skill.source,
+                "format_version": SKILL_FORMAT_VERSION,
                 "manifest_path": str(skill.manifest_path),
                 "required_capabilities": list(skill.required_capabilities),
                 "required_tools": list(skill.required_tools),
@@ -244,6 +246,20 @@ class SkillState:
 
     catalog: SkillCatalog
     active_ids: tuple[str, ...] = field(default_factory=tuple)
+
+    def provenance(self) -> list[dict]:
+        """Identify activated sources and contents without storing skill text."""
+        records = []
+        for identifier in self.active_ids:
+            skill = self.catalog.skills[identifier]
+            fingerprint = hashlib.sha256(json.dumps(
+                [skill.instructions, skill.resources, skill.required_capabilities, skill.required_tools],
+                ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            records.append({"id": identifier, "source": skill.source,
+                            "manifest_path": str(skill.manifest_path),
+                            "format_version": SKILL_FORMAT_VERSION, "sha256": fingerprint})
+        return records
 
     def activate(self, identifiers: object, capabilities: set[str], tools: set[str]) -> dict:
         """Atomically replace active skills after validating every requirement."""
