@@ -31,7 +31,10 @@ from .config import (
 from .interaction_log import InteractionLogger, TurnLog
 from .loop_guard import ToolLoopGuard, ToolLoopStop
 from .runtime_context import conversation_context
-from .skills import SkillState, discover_skills
+from .skills import (
+    MAX_SKILLS, MAX_MANIFEST_BYTES, MAX_INSTRUCTIONS_BYTES, MAX_RESOURCES,
+    MAX_RESOURCE_BYTES, MAX_RESOURCE_TOTAL_BYTES, SkillState, discover_skills,
+)
 from .tools import (
     AVAILABLE_TOOLS,
     CAPABILITY_GROUPS,
@@ -1715,14 +1718,31 @@ class AgentRuntime:
 
     def list_skills(self) -> dict:
         """Return available skill metadata and explicit discovery diagnostics."""
+        metadata = self.skill_catalog.metadata()
+        for item in metadata:
+            candidate = SkillState(self.skill_catalog)
+            validation = candidate.activate([item["id"]], set(CAPABILITY_GROUPS), set(TOOL_SPECS))
+            if validation["ok"]:
+                try:
+                    check_context_budget(new_conversation(self.workspace), skill_state=candidate)
+                except ContextBudgetError as error:
+                    validation = {"ok": False, "status": "skill_context_limit", "error": str(error)}
+            item.update(available=validation["ok"], validation_state=validation["status"],
+                        error=validation.get("error"))
         return {
-            "skills": self.skill_catalog.metadata(),
+            "skills": metadata,
             "diagnostics": [
                 {"path": str(item.path), "error": item.error}
                 for item in self.skill_catalog.diagnostics
             ],
             "roots": [str(root) for root in self.skill_catalog.roots],
             "active_skills": list(self.skill_state.active_ids),
+            "skill_provenance": self.skill_state.provenance(),
+            "limits": {"max_skills": MAX_SKILLS, "max_manifest_bytes": MAX_MANIFEST_BYTES,
+                       "max_instructions_bytes": MAX_INSTRUCTIONS_BYTES, "max_resources": MAX_RESOURCES,
+                       "max_resource_bytes": MAX_RESOURCE_BYTES,
+                       "max_resource_total_bytes": MAX_RESOURCE_TOTAL_BYTES,
+                       "context_length": CONTEXT_LENGTH},
         }
 
     def activate_skills(self, identifiers: list[str]) -> dict:

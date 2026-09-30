@@ -2,9 +2,10 @@
 
 import http.client
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
-from threading import Event
+from threading import Barrier, Event
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -100,6 +101,222 @@ class ApplicationServiceTests(unittest.TestCase):
         response = connection.getresponse()
         first_event = json.loads(response.fp.readline().decode("utf-8"))
         return connection, response, first_event
+
+    def write_skill(self, identifier: str = "fixture.review", **updates: object) -> Path:
+        """Install a bounded workspace fixture without changing application skills."""
+        directory = self.workspace / ".flux" / "skills" / identifier
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "instructions.md").write_text("Review focused changes.", encoding="utf-8")
+        manifest = {"version": 1, "id": identifier, "name": "Fixture review",
+                    "description": "Review a fixture.", "instructions": "instructions.md"}
+        manifest.update(updates)
+        path = directory / "skill.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def restart_host(self) -> None:
+        """Restart the isolated backend using the same durable database and factory."""
+        factory = self.host.server.registry.runtime_factory
+        self.host.stop()
+        self.host = DesktopServiceHost(workspace=self.workspace, models=("test-model", "other-model"),
+                                       runtime_factory=factory, ollama_status=lambda: {"status": "available"},
+                                       state_database_path=self.workspace / "state.sqlite3")
+        self.host.start()
+
+    def test_skill_discovery_defaults_activation_and_restart(self) -> None:
+        """Discover metadata, persist only selections, and isolate durable chat activation."""
+        path = self.write_skill()
+        status, catalog = self.request("GET", "/v1/skills")
+        self.assertEqual(status, 200)
+        fixture = next(item for item in catalog["skills"] if item["id"] == "fixture.review")
+        self.assertTrue(fixture["available"])
+        self.assertEqual((fixture["format_version"], fixture["source"]), (1, "workspace"))
+        self.assertEqual(Path(fixture["manifest_path"]), path)
+        self.assertIn("max_resource_bytes", catalog["limits"])
+        self.assertNotIn("Review focused changes.", json.dumps(catalog))
+        status, _ = self.request("PATCH", "/v1/skill-preferences",
+                                 {"workspace": str(self.workspace), "active_skills": ["fixture.review"]})
+        self.assertEqual(status, 200)
+        _, first = self.request("POST", "/v1/conversations", {})
+        _, second = self.request("POST", "/v1/conversations", {"active_skills": []})
+        self.assertEqual(first["active_skills"], ["fixture.review"])
+        self.assertEqual(second["active_skills"], [])
+        runtime = self.host.server.registry.get(first["conversation_id"])
+        self.assertIn("Review focused changes.", runtime.skill_state.context())
+        self.assertEqual(first["skill_provenance"][0]["manifest_path"], str(path))
+        self.restart_host()
+        _, restored = self.request("GET", f"/v1/conversations/{first['conversation_id']}")
+        self.assertEqual(restored["active_skills"], ["fixture.review"])
+        self.assertEqual(restored["skill_provenance"], first["skill_provenance"])
+        self.assertIsNone(restored["skill_error"])
+        _, catalog = self.request("GET", "/v1/skills")
+        self.assertEqual(catalog["preferred_skills"], ["fixture.review"])
+        _, restored_second = self.request("GET", f"/v1/conversations/{second['conversation_id']}")
+        self.assertEqual(restored_second["active_skills"], [])
+
+    def test_explicit_skill_reset_validates_confirmation_and_retains_history_and_grants(self) -> None:
+        """Validate explicit reset inputs and preserve context on failure."""
+        self.write_skill()
+        _, created = self.request("POST", "/v1/conversations", {})
+        identifier = created["conversation_id"]
+        self.request("POST", f"/v1/conversations/{identifier}/turns", {"message": "hello"})
+        runtime = self.host.server.registry.get(identifier)
+        original = list(runtime.messages)
+        original_access = runtime.access
+        path = f"/v1/conversations/{identifier}/skills"
+        status, error = self.request("PATCH", path, {"active_skills": ["fixture.review"], "confirm_context_reset": "false"})
+        self.assertEqual((status, error["error"]["code"]), (400, "invalid_request"))
+        self.assertEqual(runtime.messages, original)
+        status, _ = self.request("PATCH", path, {"active_skills": ["absent"], "confirm_context_reset": True})
+        self.assertEqual(status, 409)
+        self.assertEqual(runtime.messages, original)
+        with patch.object(self.host.server.registry.store, "save_runtime", side_effect=OSError("disk full")):
+            status, _ = self.request("PATCH", path, {"active_skills": ["fixture.review"], "confirm_context_reset": True})
+        self.assertEqual(status, 503)
+        self.assertEqual(runtime.messages, original)
+        self.assertEqual(runtime.skill_state.active_ids, ())
+        status, changed = self.request("PATCH", path, {"active_skills": ["fixture.review"], "confirm_context_reset": True})
+        self.assertEqual((status, changed["active_skills"]), (200, ["fixture.review"]))
+        self.assertEqual(len(runtime.messages), 1)
+        self.assertIs(runtime.access, original_access)
+        _, history = self.request("GET", f"/v1/conversations/{identifier}/history")
+        self.assertEqual(history["turns"][0]["user_prompt"], "hello")
+
+    def test_dynamic_skill_activation_and_clear_retain_context_and_capabilities(self) -> None:
+        """Match terminal activation without dropping history, capability state, or access."""
+        self.write_skill()
+        _, created = self.request("POST", "/v1/conversations", {"active_skills": []})
+        identifier = created["conversation_id"]
+        runtime = self.host.server.registry.get(identifier)
+        runtime.capability_state.active_groups.add("workspace_inspection")
+        self.request("POST", f"/v1/conversations/{identifier}/turns", {"message": "retained exchange"})
+        messages = runtime.messages
+        original = list(messages)
+        capabilities = runtime.capability_state
+        access = runtime.access
+        path = f"/v1/conversations/{identifier}/skills"
+        status, activated = self.request("PATCH", path,
+                                         {"active_skills": ["fixture.review"], "confirm_context_reset": False})
+        self.assertEqual((status, activated["active_skills"]), (200, ["fixture.review"]))
+        self.assertIs(runtime.messages, messages)
+        self.assertEqual(runtime.messages, original)
+        self.assertIs(runtime.capability_state, capabilities)
+        self.assertIs(runtime.access, access)
+        status, _ = self.request("PATCH", path, {"active_skills": ["missing"], "confirm_context_reset": False})
+        self.assertEqual(status, 409)
+        self.assertEqual(runtime.skill_state.active_ids, ("fixture.review",))
+        with patch("harness_prototype.agent_loop.CONTEXT_LENGTH", 1):
+            status, error = self.request("PATCH", path, {"active_skills": [], "confirm_context_reset": False})
+        self.assertEqual((status, error["error"]["code"]), (409, "skill_context_limit"))
+        self.assertEqual(runtime.messages, original)
+        self.assertEqual(runtime.skill_state.active_ids, ("fixture.review",))
+        status, cleared = self.request("PATCH", path, {"active_skills": [], "confirm_context_reset": False})
+        self.assertEqual((status, cleared["active_skills"]), (200, []))
+        self.assertEqual(runtime.messages, original)
+        self.assertEqual(runtime.capability_state.active_groups, {"workspace_inspection"})
+
+    def test_unavailable_skills_and_context_budget_are_actionable_and_atomic(self) -> None:
+        """Expose invalid versions and missing requirements, never partial activation."""
+        self.write_skill("fixture.future", version=99)
+        self.write_skill("fixture.missing", requires={"capabilities": ["not_configured"], "tools": ["absent_tool"]})
+        self.write_skill()
+        _, catalog = self.request("GET", "/v1/skills")
+        self.assertTrue(any("Unsupported" in item["error"] for item in catalog["diagnostics"]))
+        missing = next(item for item in catalog["skills"] if item["id"] == "fixture.missing")
+        self.assertFalse(missing["available"])
+        self.assertIn("absent_tool", missing["error"])
+        _, created = self.request("POST", "/v1/conversations", {"active_skills": ["fixture.review"]})
+        path = f"/v1/conversations/{created['conversation_id']}/skills"
+        status, _ = self.request("PATCH", path, {"active_skills": ["fixture.review", "fixture.missing"], "confirm_context_reset": True})
+        self.assertEqual(status, 409)
+        with patch("harness_prototype.agent_loop.CONTEXT_LENGTH", 1):
+            status, error = self.request("PATCH", path, {"active_skills": ["fixture.review"], "confirm_context_reset": True})
+        self.assertEqual((status, error["error"]["code"]), (409, "skill_context_limit"))
+        _, current = self.request("GET", path)
+        self.assertEqual(current["active_skills"], ["fixture.review"])
+        for invalid in (None, True, "fixture.review", [True], ["fixture.review", "fixture.review"]):
+            status, _ = self.request("POST", "/v1/conversations", {"active_skills": invalid})
+            self.assertIn(status, (400, 409))
+
+    def test_missing_or_changed_active_source_blocks_turn_after_restart(self) -> None:
+        """Retain persisted provenance and require explicit recovery after source changes."""
+        path = self.write_skill()
+        _, created = self.request("POST", "/v1/conversations", {"active_skills": ["fixture.review"]})
+        identifier = created["conversation_id"]
+        (path.parent / "instructions.md").write_text("Changed instructions.", encoding="utf-8")
+        self.restart_host()
+        _, current = self.request("GET", f"/v1/conversations/{identifier}")
+        self.assertEqual(current["skill_error"]["status"], "skill_source_changed")
+        self.assertEqual(current["skill_provenance"], created["skill_provenance"])
+        status, _ = self.request("POST", f"/v1/conversations/{identifier}/turns", {"message": "blocked"})
+        self.assertEqual(status, 409)
+        status, _ = self.request("PATCH", f"/v1/conversations/{identifier}/skills",
+                                 {"active_skills": ["fixture.review"], "confirm_context_reset": True})
+        self.assertEqual(status, 200)
+        path.unlink()
+        self.restart_host()
+        _, current = self.request("GET", f"/v1/conversations/{identifier}")
+        self.assertEqual(current["active_skills"], ["fixture.review"])
+        self.assertEqual(current["skill_error"]["status"], "skill_unavailable")
+        status, _ = self.request("PATCH", f"/v1/conversations/{identifier}/skills",
+                                 {"active_skills": [], "confirm_context_reset": True})
+        self.assertEqual(status, 200)
+
+    def test_skill_selection_cannot_race_an_active_turn_or_grant_authority(self) -> None:
+        """Activation leaves policy/access intact and cannot alter a running conversation."""
+        self.write_skill(requires={"capabilities": ["command_execution"], "tools": ["run_command"]})
+        _, created = self.request("POST", "/v1/conversations", {"active_skills": ["fixture.review"]})
+        identifier = created["conversation_id"]
+        runtime = self.host.server.registry.get(identifier)
+        self.assertNotIn("command_execution", runtime.capability_state.active_groups)
+        self.assertFalse(self.host.server.registry.session_tool_grants)
+        self.assertFalse(self.host.server.registry.grants.list())
+        self.turn_started["waiting"] = Event()
+        self.turn_release["waiting"] = Event()
+        connection, response, first = self.open_turn_stream(identifier, "waiting")
+        self.assertTrue(self.turn_started["waiting"].wait(2))
+        status, error = self.request("PATCH", f"/v1/conversations/{identifier}/skills",
+                                     {"active_skills": [], "confirm_context_reset": True})
+        self.assertEqual((status, error["error"]["code"]), (409, "conversation_busy"))
+        self.request("POST", f"/v1/conversations/{identifier}/turns/{first['turn_id']}/cancel", {})
+        response.read()
+        connection.close()
+
+    def test_concurrent_reads_share_restored_skill_runtime(self) -> None:
+        """Hydrate simultaneous history/metadata requests into one conversation state."""
+        self.write_skill()
+        _, created = self.request("POST", "/v1/conversations", {"active_skills": ["fixture.review"]})
+        registry = self.host.server.registry
+        identifier = created["conversation_id"]
+        registry._runtimes.clear()
+        original_factory = registry.runtime_factory
+        ready = Barrier(2)
+
+        def factory(model: str, workspace: Path) -> AgentRuntime:
+            """Force both readers to finish construction before either retains a runtime."""
+            runtime = original_factory(model, workspace)
+            ready.wait(timeout=5)
+            return runtime
+
+        with patch.object(registry, "runtime_factory", factory):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(registry.get, identifier) for _ in range(2)]
+                first, second = [future.result(timeout=5) for future in futures]
+        self.assertIs(first, second)
+        self.assertEqual(first.skill_state.active_ids, ("fixture.review",))
+
+    def test_existing_skill_view_rediscovers_installed_sources_without_changing_context(self) -> None:
+        """Find newly installed skills while retaining the loaded conversation snapshot."""
+        _, created = self.request("POST", "/v1/conversations", {})
+        identifier = created["conversation_id"]
+        runtime = self.host.server.registry.get(identifier)
+        previous_messages = list(runtime.messages)
+        self.write_skill()
+        _, catalog = self.request("GET", f"/v1/conversations/{identifier}/skills")
+        self.assertTrue(any(item["id"] == "fixture.review" for item in catalog["skills"]))
+        self.assertEqual(catalog["active_skills"], [])
+        self.assertEqual(runtime.messages, previous_messages)
+        self.assertNotIn("fixture.review", runtime.skill_catalog.skills)
 
     def test_health_capabilities_and_loopback_policy(self) -> None:
         """Expose readiness and reject accidental non-loopback listeners."""
@@ -240,7 +457,8 @@ class ApplicationServiceTests(unittest.TestCase):
             return AgentRuntime(object(), model, workspace, turn_runner=permission_turn)
 
         self.host.server.registry.runtime_factory = factory
-        _, created = self.request("POST", "/v1/conversations", {})
+        self.write_skill(requires={"capabilities": ["documentation"], "tools": ["fetch_documentation"]})
+        _, created = self.request("POST", "/v1/conversations", {"active_skills": ["fixture.review"]})
         owner = created["conversation_id"]
         for choice in ("allow_once", "deny", "allow_durable"):
             connection, response, _ = self.open_turn_stream(owner, choice)

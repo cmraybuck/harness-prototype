@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 from harness_prototype.desktop import (
-    ConversationView, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, desktop_main,
+    ConversationView, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
 )
 
 
@@ -35,6 +35,23 @@ class ResponseFixture:
 
 class DesktopApiClientTests(unittest.TestCase):
     """Cover portable GUI-to-backend requests and recovery errors."""
+
+    @patch.object(DesktopApiClient, "_request")
+    def test_skill_operations_send_only_ids_and_explicit_confirmation(self, request: MagicMock) -> None:
+        """Use workspace discovery and conversation-bound skill changes without raw contents."""
+        client = DesktopApiClient(("127.0.0.1", 4321))
+        client.skills(Path("workspace with spaces"))
+        self.assertIn("workspace+with+spaces", request.call_args.args[1])
+        client.skills(Path("."), "chat/one")
+        request.assert_called_with("GET", "/conversations/chat%2Fone/skills")
+        client.select_skills("one", ["pirate"], True)
+        request.assert_called_with("PATCH", "/conversations/one/skills",
+                                   {"active_skills": ["pirate"], "confirm_context_reset": True})
+        client.save_skill_preferences(Path("."), [])
+        request.assert_called_with("PATCH", "/skill-preferences", {"workspace": ".", "active_skills": []})
+        client.create_conversation("model", Path("."), ["pirate"])
+        request.assert_called_with("POST", "/conversations",
+                                   {"model": "model", "workspace": ".", "active_skills": ["pirate"]})
 
     @patch("harness_prototype.desktop.urlopen")
     def test_conversation_operations_use_versioned_backend_contract(
@@ -273,6 +290,119 @@ class DesktopTurnClientTests(unittest.TestCase):
         response.readline.return_value = b"x" * (2 * 1024 * 1024 + 1)
         with self.assertRaisesRegex(DesktopApiError, "transport limit"):
             DesktopApiClient(("127.0.0.1", 4321)).stream_turn("one", "Hello", lambda event: None)
+
+
+class DynamicSkillWidgetTests(unittest.TestCase):
+    """Cover lightweight inline selection and slash-command routing without a model."""
+
+    def setUp(self) -> None:
+        """Create an isolated native fixture and prevent backend worker execution."""
+        try:
+            self.root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        self.addCleanup(self.destroy_root)
+        self.tasks = patch.object(FluxDesktop, "_run_task").start()
+        self.addCleanup(patch.stopall)
+        self.history = patch.object(FluxDesktop, "_load_history").start()
+        self.client = MagicMock()
+        self.desktop = FluxDesktop(self.root, self.client, lambda: None, Path.cwd())
+        self.desktop.models = ["test-model"]
+        self.desktop._select_conversation({"conversation_id": "one", "active_skills": []})
+        self.desktop.views["one"].recover([])
+        self.catalog = {"conversation_id": "one", "active_skills": [], "skills": [
+            {"id": "fixture.valid", "name": "Fixture", "description": "Harmless fixture",
+             "format_version": 1, "manifest_path": "fixture/skill.json", "available": True},
+            {"id": "fixture.missing", "name": "Missing", "available": False,
+             "error": "Unavailable capabilities: absent."}], "limits": {"max_instructions_bytes": 32768}}
+
+    def destroy_root(self) -> None:
+        """Release scheduled callbacks before destroying the fixture interpreter."""
+        self.root.update_idletasks()
+        for callback in self.root.tk.call("after", "info"):
+            self.root.after_cancel(callback)
+        self.root.destroy()
+
+    def test_new_conversation_skips_picker_and_ignores_skill_defaults(self) -> None:
+        """Create normally with an explicit empty skill list and no popup window."""
+        self.client.settings.return_value = {"default_model": "test-model"}
+        self.desktop.create_conversation()
+        self.tasks.call_args.args[0]()
+        self.client.create_conversation.assert_called_once_with("test-model", Path.cwd(), [])
+        self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in self.root.winfo_children()))
+        self.assertIsNone(self.desktop._skill_panel)
+
+    def test_slash_activation_and_clear_preserve_view_and_never_reach_model(self) -> None:
+        """Route /skill commands locally and apply an exact set without resetting context."""
+        view = self.desktop.views["one"]
+        self.desktop.send_turn("/skill fixture.valid, another")
+        work, complete, _failed = self.tasks.call_args.args
+        self.client.select_skills.return_value = {"conversation_id": "one", "active_skills": ["fixture.valid", "another"]}
+        complete(work())
+        self.client.select_skills.assert_called_once_with("one", ["fixture.valid", "another"], False)
+        self.assertIs(self.desktop.views["one"], view)
+        self.assertIn("fixture.valid", self.desktop.skills_text.get())
+        self.desktop.send_turn("/skill")
+        self.tasks.call_args.args[0]()
+        self.client.select_skills.assert_called_with("one", [], False)
+        self.client.stream_turn.assert_not_called()
+
+    def test_inline_keyboard_selection_metadata_and_close_restore_focus(self) -> None:
+        """Inspect with arrows and toggle using Space without opening a selection popup."""
+        self.desktop.send_turn("/skills")
+        self.tasks.call_args.args[1](self.catalog)
+        panel = self.desktop._skill_panel
+        self.assertIsInstance(panel, SkillPanel)
+        self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in self.root.winfo_children()))
+        self.assertIn("Format version: 1", panel.details.get("1.0", tk.END))
+        self.root.update()
+        panel.options.focus_force()
+        self.root.update()
+        panel.options.event_generate("<space>")
+        self.root.update()
+        self.tasks.call_args.args[0]()
+        self.client.select_skills.assert_called_once_with("one", ["fixture.valid"], False)
+        panel.options.event_generate("<Down>")
+        self.root.update()
+        self.assertIn("Unavailable capabilities", panel.details.get("1.0", tk.END))
+        panel.options.event_generate("<Return>")
+        self.root.update()
+        self.assertIn("Unavailable capabilities", panel.notice.get())
+        self.desktop.close_skills()
+        self.root.update()
+        self.assertIsNone(self.desktop._skill_panel)
+        self.assertEqual(self.root.focus_get(), self.desktop.message_input)
+
+    def test_activation_keeps_owner_and_failure_never_retries(self) -> None:
+        """Keep activation bound to the originating chat after navigation or disconnect."""
+        self.desktop.send_turn("/skill fixture.valid")
+        work, complete, failed = self.tasks.call_args.args
+        self.desktop._select_conversation({"conversation_id": "two", "active_skills": []})
+        self.desktop.views["two"].recover([])
+        self.client.select_skills.return_value = {"conversation_id": "one", "active_skills": ["fixture.valid"]}
+        complete(work())
+        self.assertEqual(self.desktop.active_conversation_id, "two")
+        self.assertEqual(self.desktop.skills_text.get(), "Active skills · None")
+        self.desktop.send_turn("/skill fixture.valid")
+        failed = self.tasks.call_args.args[2]
+        failed(DesktopApiError("Backend unavailable. Reconnect to inspect saved skills."))
+        self.assertFalse(self.desktop._skill_changing)
+        self.assertIn("Reconnect", self.desktop.detail_text.get())
+        self.assertEqual(self.client.select_skills.call_count, 1)
+        self.client.stream_turn.assert_not_called()
+
+    def test_busy_activation_and_late_inspector_responses_are_ignored(self) -> None:
+        """Prevent racing turns and keep closed inline controls from reopening asynchronously."""
+        self.desktop.open_skills()
+        loaded = self.tasks.call_args.args[1]
+        self.desktop.close_skills()
+        loaded(self.catalog)
+        self.assertIsNone(self.desktop._skill_panel)
+        self.tasks.reset_mock()
+        self.desktop.views["one"].active_turn_id = "turn"
+        self.desktop.send_turn("/skill fixture.valid")
+        self.tasks.assert_not_called()
+        self.client.select_skills.assert_not_called()
 
 
 class DesktopWidgetTests(unittest.TestCase):

@@ -172,8 +172,9 @@ class ConversationRegistry:
         self._runtimes: dict[str, AgentRuntime] = {}
         self._active_turns: dict[str, tuple[str, AgentRuntime]] = {}
         self._shutting_down = False
+        self.skill_failures: dict[str, dict[str, Any]] = {}
 
-    def create(self, model: str, workspace: Path) -> AgentRuntime:
+    def create(self, model: str, workspace: Path, active_skills: object = None) -> AgentRuntime:
         """Create and retain one conversation runtime."""
         if not self.models:
             raise ProtocolError(
@@ -190,7 +191,13 @@ class ConversationRegistry:
                 "invalid_workspace", "Workspace must be an existing directory.", HTTPStatus.BAD_REQUEST
             )
         runtime = self.runtime_factory(model, resolved)
-        self.store.create(runtime.conversation_id, "New conversation", model, resolved, runtime.messages)
+        self._validate_activation(runtime, [] if active_skills is None else active_skills)
+        try:
+            self.store.create(runtime.conversation_id, "New conversation", model, resolved, runtime.messages,
+                              active_skills=list(runtime.skill_state.active_ids),
+                              skill_provenance=runtime.skill_state.provenance())
+        except (sqlite3.Error, StateStoreError, ValueError, OSError):
+            raise ProtocolError("skills_unavailable", "Skill selections could not be saved. Try again.", HTTPStatus.SERVICE_UNAVAILABLE) from None
         with self._lock:
             self._runtimes[runtime.conversation_id] = runtime
         return runtime
@@ -213,16 +220,87 @@ class ConversationRegistry:
                 runtime.conversation_id = persisted["conversation_id"]
                 runtime.messages = persisted["messages"]
                 runtime.capability_state.active_groups = set(persisted["capability_groups"])
+                failure = None
                 if persisted["active_skills"]:
                     activation = runtime.activate_skills(persisted["active_skills"])
+                    provenance = persisted.get("skill_provenance", [])
+                    if activation["ok"] and provenance and runtime.skill_state.provenance() != provenance:
+                        activation = {"ok": False, "status": "skill_source_changed",
+                                      "error": "Active skill sources changed. Review Skills and confirm a context reset before continuing."}
                     if not activation["ok"]:
                         runtime.skill_state.active_ids = ()
+                        failure = activation
                 with self._lock:
-                    self._runtimes[conversation_id] = runtime
+                    # Concurrent history and metadata reads must share one restored runtime.
+                    retained = self._runtimes.setdefault(conversation_id, runtime)
+                    if retained is runtime and failure:
+                        self.skill_failures[conversation_id] = failure
+                    runtime = retained
         if runtime is None:
             raise ProtocolError(
                 "conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND
             )
+        return runtime
+
+    def skill_catalog(self, workspace: Path) -> dict[str, Any]:
+        """Discover a workspace's skills and saved defaults without creating a chat."""
+        resolved = workspace.expanduser().resolve()
+        if not resolved.is_dir():
+            raise ProtocolError("invalid_workspace", "Workspace must be an existing directory.", HTTPStatus.BAD_REQUEST)
+        runtime = self.runtime_factory(self.models[0] if self.models else "", resolved)
+        result = runtime.list_skills()
+        result["preferred_skills"] = self.grants.state.get("skill_preferences", self._skill_key(resolved), [])
+        result["workspace"] = str(resolved)
+        return result
+
+    @staticmethod
+    def _skill_key(workspace: Path) -> str:
+        """Use a bounded key for canonical workspace preferences."""
+        return hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()
+
+    def save_skill_preferences(self, workspace: Path, identifiers: object) -> dict[str, Any]:
+        """Validate future-chat defaults once and persist bounded identifiers only."""
+        resolved = workspace.expanduser().resolve()
+        if not resolved.is_dir():
+            raise ProtocolError("invalid_workspace", "Workspace must be an existing directory.", HTTPStatus.BAD_REQUEST)
+        runtime = self.runtime_factory(self.models[0] if self.models else "", resolved)
+        self._validate_activation(runtime, identifiers)
+        selected = list(runtime.skill_state.active_ids)
+        try:
+            self.grants.state.set("skill_preferences", self._skill_key(resolved), selected)
+        except (sqlite3.Error, StateStoreError, ValueError, OSError):
+            raise ProtocolError("skills_unavailable", "Skill preferences could not be saved. Try again.", HTTPStatus.SERVICE_UNAVAILABLE) from None
+        return {"preferred_skills": selected}
+
+    @staticmethod
+    def _validate_activation(runtime: AgentRuntime, identifiers: object) -> None:
+        """Translate atomic runtime validation into actionable protocol failures."""
+        result = runtime.activate_skills(identifiers)
+        if not result["ok"]:
+            raise ProtocolError(result["status"], result["error"], HTTPStatus.CONFLICT)
+
+    def select_skills(self, conversation_id: str, identifiers: object, confirmed: object) -> AgentRuntime:
+        """Persist dynamic activation, resetting context only when explicitly requested."""
+        runtime = self.get(conversation_id)
+        with self._lock:
+            if conversation_id in self._active_turns:
+                raise ProtocolError("conversation_busy", "Conversation already has an active turn.", HTTPStatus.CONFLICT)
+            if not isinstance(confirmed, bool):
+                raise ProtocolError("invalid_request", "confirm_context_reset must be a boolean.", HTTPStatus.BAD_REQUEST)
+            candidate = self.runtime_factory(runtime.model, runtime.workspace)
+            if not confirmed:
+                candidate.messages = runtime.messages
+                candidate.capability_state = runtime.capability_state
+            self._validate_activation(candidate, identifiers)
+            previous = runtime.messages, runtime.capability_state, runtime.skill_state, runtime.skill_catalog
+            runtime.messages, runtime.capability_state, runtime.skill_state = candidate.messages, candidate.capability_state, candidate.skill_state
+            runtime.skill_catalog = candidate.skill_catalog
+            try:
+                self.store.save_runtime(runtime)
+            except (sqlite3.Error, StateStoreError, ValueError, OSError):
+                runtime.messages, runtime.capability_state, runtime.skill_state, runtime.skill_catalog = previous
+                raise ProtocolError("skills_unavailable", "Skill selections could not be saved. Context is retained. Try again.", HTTPStatus.SERVICE_UNAVAILABLE) from None
+            self.skill_failures.pop(conversation_id, None)
         return runtime
 
     def list(self, limit: int, after: str | None) -> tuple[list[dict[str, Any]], str | None]:
@@ -252,6 +330,9 @@ class ConversationRegistry:
         """Prepare and reserve one conversation for an identified turn."""
         runtime = self.get(conversation_id)
         with self._lock:
+            failure = self.skill_failures.get(conversation_id)
+            if failure:
+                raise ProtocolError(failure["status"], failure["error"], HTTPStatus.CONFLICT)
             if self._shutting_down:
                 raise ProtocolError(
                     "service_stopping", "The application service is stopping.",
@@ -400,6 +481,16 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, self._capabilities())
             elif parts == [API_VERSION, "settings"]:
                 self._json(HTTPStatus.OK, self._settings())
+            elif parts == [API_VERSION, "skills"]:
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                if set(query) - {"workspace"} or len(query.get("workspace", [])) > 1:
+                    raise ProtocolError("invalid_request", "Expected one workspace query parameter.", HTTPStatus.BAD_REQUEST)
+                workspace = Path(query.get("workspace", [str(self.server.default_workspace)])[0])
+                self._json(HTTPStatus.OK, self.server.registry.skill_catalog(workspace))
+            elif len(parts) == 4 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "skills":
+                runtime = self.server.registry.get(parts[2])
+                self._json(HTTPStatus.OK, {**self.server.registry.skill_catalog(runtime.workspace),
+                                           **self._conversation(runtime)})
             elif parts == [API_VERSION, "conversations"]:
                 limit, after = self._paging_query(text_cursor=True)
                 conversations, next_cursor = self.server.registry.list(limit, after)
@@ -461,6 +552,19 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         """Rename or select a configured model or workspace for a conversation."""
         try:
             parts = self._path_parts()
+            if parts == [API_VERSION, "skill-preferences"]:
+                body = self._read_json()
+                if set(body) != {"workspace", "active_skills"} or not isinstance(body["workspace"], str):
+                    raise ProtocolError("invalid_request", "Expected workspace and active_skills.", HTTPStatus.BAD_REQUEST)
+                self._json(HTTPStatus.OK, self.server.registry.save_skill_preferences(Path(body["workspace"]), body["active_skills"]))
+                return
+            if len(parts) == 4 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "skills":
+                body = self._read_json()
+                if set(body) != {"active_skills", "confirm_context_reset"}:
+                    raise ProtocolError("invalid_request", "Expected active_skills and confirm_context_reset.", HTTPStatus.BAD_REQUEST)
+                runtime = self.server.registry.select_skills(parts[2], body["active_skills"], body["confirm_context_reset"])
+                self._json(HTTPStatus.OK, self._conversation(runtime))
+                return
             if parts == [API_VERSION, "settings"]:
                 body = self._read_json()
                 if set(body) != {"default_model", "backend_host"}:
@@ -500,12 +604,14 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 if body["model"] not in self.server.registry.models:
                     raise ProtocolError("invalid_model", "Model is not configured.", HTTPStatus.BAD_REQUEST)
                 runtime.change_model(body["model"])
+                self.server.registry.skill_failures.pop(parts[2], None)
                 self.server.registry.store.save_runtime(runtime)
             elif set(body) == {"workspace"} and isinstance(body["workspace"], str):
                 workspace = Path(body["workspace"]).expanduser().resolve()
                 if not workspace.is_dir():
                     raise ProtocolError("invalid_workspace", "Workspace must be an existing directory.", HTTPStatus.BAD_REQUEST)
                 runtime.change_workspace(workspace)
+                self.server.registry.skill_failures.pop(parts[2], None)
                 self.server.registry.store.save_runtime(runtime)
             elif set(body) != {"title"}:
                 raise ProtocolError("invalid_request", "Expected one model or workspace string.", HTTPStatus.BAD_REQUEST)
@@ -533,7 +639,7 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
 
     def _create_conversation(self, body: dict[str, Any]) -> None:
         """Validate creation input and return stable conversation metadata."""
-        if set(body) - {"model", "workspace"}:
+        if set(body) - {"model", "workspace", "active_skills"}:
             raise ProtocolError("invalid_request", "Request contains unsupported fields.", HTTPStatus.BAD_REQUEST)
         configured_models = self.server.registry.models
         if not configured_models:
@@ -547,7 +653,12 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
         workspace = body.get("workspace", str(self.server.default_workspace))
         if not isinstance(model, str) or not isinstance(workspace, str):
             raise ProtocolError("invalid_request", "Model and workspace must be strings.", HTTPStatus.BAD_REQUEST)
-        runtime = self.server.registry.create(model, Path(workspace))
+        selections = body.get("active_skills", self.server.registry.grants.state.get(
+            "skill_preferences", self.server.registry._skill_key(Path(workspace).expanduser().resolve()), [],
+        ))
+        if selections is None:
+            raise ProtocolError("invalid_skill_activation", "Skill ids must be a list of strings.", HTTPStatus.BAD_REQUEST)
+        runtime = self.server.registry.create(model, Path(workspace), selections)
         self._json(HTTPStatus.CREATED, self._conversation(runtime))
 
     def _run_turn(self, conversation_id: str, body: dict[str, Any]) -> None:
@@ -788,7 +899,7 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "models": list(self.server.registry.models),
             "tools": sorted(TOOL_SPECS),
-            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "settings", "model_selection", "workspace_selection"],
+            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "settings", "model_selection", "workspace_selection", "skills", "skill_preferences", "skill_selection"],
             "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "permission_receipt", "permission_grant", "failure", "interruption", "completion"],
             "limits": {"max_request_bytes": MAX_REQUEST_BYTES},
         }
@@ -813,6 +924,9 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "title": persisted.get("title", "New conversation"),
             "model": runtime.model,
             "workspace": str(runtime.workspace),
+            "active_skills": persisted.get("active_skills", []),
+            "skill_provenance": persisted.get("skill_provenance", []),
+            "skill_error": self.server.registry.skill_failures.get(runtime.conversation_id),
             "created_at": persisted.get("created_at"),
             "updated_at": persisted.get("updated_at"),
         }

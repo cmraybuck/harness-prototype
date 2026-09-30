@@ -341,6 +341,32 @@ code during activation, or bypass system instructions, capability activation,
 tool approval, filesystem access, context limits, or execution policy. FLUX does
 not download skills or synchronize them between devices.
 
+Desktop conversations start normally with no active skills. Use the composer
+commands `/skills` to discover and inspect installed skills, `/skill id[,id]` to
+replace the active set, and `/skill` to clear it, matching the terminal commands.
+These commands are handled locally rather than sent to Ollama. **Skills…** also
+opens the inline inspector; it never opens a skill-selection popup. Up/Down
+inspects metadata, requirements, validation explanations, source provenance, and
+loading limits; Space or Enter directly toggles the focused skill. Closing the
+inspector restores composer focus. Active IDs remain visible beside the composer.
+
+Activation is atomic and retains conversation history and active capability
+groups, just like the terminal. A failed activation preserves the previous set;
+invalid manifests, missing requirements, and context-budget failures have explicit
+textual explanations. Apply skill changes between conversation turns.
+Selections are isolated per conversation and survive restart. Version-five
+application state stores bounded provenance (IDs, source locations, versions, and
+content fingerprints) without copying skill contents. Missing or changed sources
+on restart remain visible and block turns until resolved through `/skill` or the
+inline controls. Backend disconnection never automatically retries activation;
+reconnect to inspect the saved active set when an outcome is uncertain.
+
+Workspace defaults remain available through the backend API, but the desktop
+explicitly starts with an empty set instead of applying them. The API can also
+perform an explicitly requested context reset; normal GUI activation never needs
+one. Skills add untrusted context only and cannot grant tools, filesystem access,
+execution authority, or bypass permission prompts and policies.
+
 The legacy `clear`, `quit`, and `exit` inputs remain supported. Ctrl+C during a
 response cancels the turn. ANSI color is used only in an interactive terminal; set
 `NO_COLOR` to disable color styling.
@@ -820,6 +846,16 @@ The version-one HTTP operations are:
 | `POST /v1/permissions/{id}` | Resolve a pending request with one of the choices advertised in its event. |
 | `GET /v1/grants`, `DELETE /v1/grants/{id}` | Inspect durable grants or revoke one exact grant. |
 | `GET /v1/settings`, `PATCH /v1/settings` | Read or save `default_model` and credential-free `backend_host` preferences. |
+| `GET /v1/skills?workspace={path}` | Discover bounded installed skill metadata, diagnostics, loading limits, and saved workspace defaults. |
+| `PATCH /v1/skill-preferences` | Validate and persist `workspace` and an `active_skills` ID list as defaults for future conversations. |
+| `GET /v1/conversations/{id}/skills` | Inspect the conversation's catalog, active IDs, saved provenance, and restoration failures. |
+| `PATCH /v1/conversations/{id}/skills` | Atomically validate and persist `active_skills`; `confirm_context_reset: false` retains context, while an explicit `true` resets it. |
+
+Conversation creation also accepts an optional `active_skills` ID list. Omission
+uses workspace defaults; an explicit empty list disables all skills. Conversation
+metadata and listings include active IDs and bounded provenance, and individual
+metadata includes `skill_error` for a blocked restoration. Activation errors use
+the ordinary structured API error contract.
 
 Every event carries `api_version`, stable `conversation_id` and `turn_id`, and a
 monotonic per-turn `sequence`. Event types are `turn_started`, `assistant_text`,

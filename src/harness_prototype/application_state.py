@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 MAX_VALUE_BYTES = 64 * 1024
 MAX_SCOPE_LENGTH = 100
 MAX_KEY_LENGTH = 200
@@ -327,6 +327,11 @@ def _apply_migration(connection: sqlite3.Connection, version: int) -> None:
             """,
         ):
             connection.execute(statement)
+    elif version == 5:
+        connection.execute(
+            "ALTER TABLE conversations ADD COLUMN skill_provenance_json TEXT NOT NULL "
+            "DEFAULT '[]' CHECK(json_valid(skill_provenance_json))"
+        )
     else:
         raise StateStoreError(f"No migration is defined for schema {version}.")
 
@@ -578,6 +583,9 @@ class ConversationStore:
         model: str,
         workspace: Path,
         messages: list[dict[str, Any]],
+        *,
+        active_skills: list[str] | None = None,
+        skill_provenance: list[dict[str, Any]] | None = None,
     ) -> None:
         """Create one conversation and its initial ordered model history."""
         timestamp = _utc_timestamp()
@@ -587,10 +595,12 @@ class ConversationStore:
                 connection.execute(
                     """
                     INSERT INTO conversations(
-                        conversation_id, title, model, workspace, created_at_utc, updated_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        conversation_id, title, model, workspace, created_at_utc, updated_at_utc,
+                        active_skills_json, skill_provenance_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (conversation_id, title, model, str(workspace), timestamp, timestamp),
+                    (conversation_id, title, model, str(workspace), timestamp, timestamp,
+                     _encode_value(active_skills or []), _encode_value(skill_provenance or [])),
                 )
                 self._replace_messages(connection, conversation_id, messages)
                 connection.commit()
@@ -605,7 +615,7 @@ class ConversationStore:
                 """
                 SELECT conversation_id, title, model, workspace,
                        capability_groups_json, active_skills_json,
-                       created_at_utc, updated_at_utc
+                       created_at_utc, updated_at_utc, skill_provenance_json
                 FROM conversations WHERE conversation_id = ?
                 """,
                 (conversation_id,),
@@ -627,6 +637,7 @@ class ConversationStore:
             "workspace": row[3], "capability_groups": json.loads(row[4]),
             "active_skills": json.loads(row[5]), "created_at": row[6],
             "updated_at": row[7], "messages": messages,
+            "skill_provenance": json.loads(row[8]),
         }
 
     def list_conversations(
@@ -650,7 +661,8 @@ class ConversationStore:
             arguments.append(limit + 1)
             rows = connection.execute(
                 f"""
-                SELECT conversation_id, title, model, workspace, created_at_utc, updated_at_utc
+                SELECT conversation_id, title, model, workspace, created_at_utc, updated_at_utc,
+                       active_skills_json, skill_provenance_json
                 FROM conversations {where}
                 ORDER BY created_at_utc DESC, conversation_id DESC LIMIT ?
                 """,
@@ -660,7 +672,8 @@ class ConversationStore:
         rows = rows[:limit]
         items = [
             {"conversation_id": row[0], "title": row[1], "model": row[2],
-             "workspace": row[3], "created_at": row[4], "updated_at": row[5]}
+             "workspace": row[3], "created_at": row[4], "updated_at": row[5],
+             "active_skills": json.loads(row[6]), "skill_provenance": json.loads(row[7])}
             for row in rows
         ]
         return items, items[-1]["conversation_id"] if has_more else None
@@ -695,12 +708,14 @@ class ConversationStore:
                 connection.execute(
                     """
                     UPDATE conversations SET model = ?, workspace = ?,
-                        capability_groups_json = ?, active_skills_json = ?, updated_at_utc = ?
+                        capability_groups_json = ?, active_skills_json = ?, updated_at_utc = ?,
+                        skill_provenance_json = ?
                     WHERE conversation_id = ?
                     """,
                     (runtime.model, str(runtime.workspace),
                      json.dumps(sorted(runtime.capability_state.active_groups)),
                      json.dumps(list(runtime.skill_state.active_ids)), _utc_timestamp(),
+                     _encode_value(runtime.skill_state.provenance()),
                      runtime.conversation_id),
                 )
                 self._replace_messages(connection, runtime.conversation_id, runtime.messages)
@@ -766,12 +781,14 @@ class ConversationStore:
                 connection.execute(
                     """
                     UPDATE conversations SET model = ?, workspace = ?,
-                        capability_groups_json = ?, active_skills_json = ?, updated_at_utc = ?
+                        capability_groups_json = ?, active_skills_json = ?, updated_at_utc = ?,
+                        skill_provenance_json = ?
                     WHERE conversation_id = ?
                     """,
                     (runtime.model, str(runtime.workspace),
                      json.dumps(sorted(runtime.capability_state.active_groups)),
                      json.dumps(list(runtime.skill_state.active_ids)), _utc_timestamp(),
+                     _encode_value(runtime.skill_state.provenance()),
                      runtime.conversation_id),
                 )
                 self._replace_messages(connection, runtime.conversation_id, runtime.messages)
