@@ -29,9 +29,10 @@ uv run flux-desktop
 and starts a private loopback backend on an OS-assigned port. The shell lists and
 creates durable conversations and lets users select configured Ollama models and
 existing workspace directories. It reports backend and Ollama availability with
-retry guidance; users never need to open or configure a localhost page. Turn
-rendering and permission decisions remain in a later GUI milestone, so use
-`uv run flux` for active agent turns in this release.
+retry guidance; users never need to open or configure a localhost page. Select a
+conversation, enter a message, and press Send or Ctrl+Enter to stream a turn.
+Permission decision controls remain a later GUI milestone; use `uv run flux`
+for workflows that require interactive approval.
 
 The script uses Windows Package Manager (`winget`) to install Ollama and `uv` when
 needed, installs Python 3.12 and the dependencies pinned by `uv.lock`, and starts
@@ -729,6 +730,35 @@ worker threads before results are marshalled back with `after`. The frontend own
 only presentation state; conversations, selections, tools, model calls, and
 durability remain backend-owned.
 
+The conversation surface shows user messages, streamed FLUX text, working tool
+names, structured result summaries, permission waits, and terminal outcomes in
+event order. Text is selectable with keyboard focus and a scrollbar; fenced code
+and structured summaries use a fixed-width font. Result summaries display success,
+completeness, truncation, counts, and available paging values such as `next_line`
+or `next_offset`. Ask FLUX to use those continuation values for another page.
+Raw tool arguments, file contents, revisions, command output, and permission
+payloads are not dumped into the transcript. Display summaries are capped at
+12,000 characters and individual streamed events at 2 MiB.
+
+Each conversation has its own active turn and presentation state. Navigation and
+other conversations remain usable while a turn streams. Cancel turn captures
+both conversation and turn IDs, so switching conversations cannot redirect a
+cancellation. Model/workspace selection is disabled for the active conversation
+during its turn. Interruption and tool-round exhaustion show explicit recovery
+guidance; send a follow-up to continue with retained tool results. Retry failed turn
+is offered only for a failed/model-error turn with no observed tools or permission
+requests; turns with possible side effects require an explicit follow-up.
+
+Reconnect reloads durable history, including active turns, without submitting a
+second request. Public display events have stable per-turn sequences and are
+deduplicated against streamed events. Recovered active turns are polled once per
+second until completion or interruption; disconnects request cooperative backend
+cancellation and never automatically retry a prompt. Restarted backend turns show
+their persisted interruption status. Older histories without public display events
+show available assistant responses and outcome labels. Permission waits are visible
+through the point of approval, but this GUI cannot decide them yet: cancel the
+turn or wait for the backend's five-minute automatic denial.
+
 Tk is available with the supported Windows Python installation. For a distributable
 Windows build, package the `harness_prototype.desktop:desktop_main` GUI entry point
 with a Python freezer and include Tcl/Tk; installer production is intentionally
@@ -775,6 +805,9 @@ capped at 64 KiB. Unanswered permissions deny after five minutes. Protocol failu
 conversation usable, and backend failures stream `failure` then `completion` so a
 client can reconnect and continue. Conversations own independent runtime history,
 context accounting, capability and skill state, workspace access, and cancellation.
+Public stream events are also retained in turn history's `public_events` array,
+including assistant chunks and terminal events, so a client can recover the same
+ordered display after a disconnect without replaying tool actions.
 Different conversations may run concurrently, but a second turn in the same
 conversation returns `conversation_busy`. Cancellation requires both stable IDs,
 so a stale request cannot interrupt a later turn. Service shutdown interrupts and

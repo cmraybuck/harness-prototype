@@ -6,9 +6,10 @@ from pathlib import Path
 import tempfile
 from threading import Event
 import unittest
+from unittest.mock import MagicMock
 
 from harness_prototype.agent_loop import AgentRuntime, RuntimeInterrupted
-from harness_prototype.application_service import DesktopServiceHost, MAX_REQUEST_BYTES
+from harness_prototype.application_service import DesktopServiceHost, MAX_REQUEST_BYTES, TurnEventStream
 from harness_prototype.approval import ApprovalRequest, ToolCategory
 from harness_prototype.locations import get_location
 
@@ -130,6 +131,36 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(events[2]["tool_call_id"], events[3]["tool_call_id"])
         self.assertTrue(all(event["conversation_id"] == conversation_id for event in events))
         self.assertEqual(len({event["turn_id"] for event in events}), 1)
+
+    def test_history_recovers_exact_public_stream_without_raw_arguments(self) -> None:
+        """Persist the complete display sequence for reconnecting GUI clients."""
+        _, conversation = self.request(
+            "POST", "/v1/conversations", {"model": "test-model", "workspace": str(self.workspace)}
+        )
+        conversation_id = conversation["conversation_id"]
+        _, events = self.request(
+            "POST", f"/v1/conversations/{conversation_id}/turns", {"message": "Inspect files"}
+        )
+        _, history = self.request("GET", f"/v1/conversations/{conversation_id}/history")
+        recovered = history["turns"][0]["public_events"]
+        self.assertEqual(recovered, events)
+        self.assertEqual(history["turns"][0]["user_prompt"], "Inspect files")
+        self.assertNotIn("arguments", recovered[2])
+
+    def test_disconnected_stream_retains_terminal_events_for_recovery(self) -> None:
+        """Persist interruption and completion even after a failed socket write."""
+        handler, runtime = MagicMock(), MagicMock()
+        runtime.conversation_id = "one"
+        handler.wfile.write.side_effect = BrokenPipeError
+        stream = TurnEventStream(handler, runtime, "turn")
+        stream.emit("turn_started")
+        stream.emit("interruption", {"message": "Cancelled"})
+        stream.emit("completion", {"outcome": "cancelled"})
+        runtime.interrupt.assert_called_once_with()
+        events = [call.args[2]["public_event"] for call in
+                  handler.server.registry.store.save_turn_event.call_args_list]
+        self.assertEqual([event["sequence"] for event in events], [1, 2, 3])
+        self.assertEqual(events[-1]["type"], "completion")
 
     def test_invalid_requests_are_structured_and_recoverable(self) -> None:
         """Return bounded protocol errors without damaging later requests."""
