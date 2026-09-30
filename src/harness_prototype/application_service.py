@@ -306,8 +306,6 @@ class TurnEventStream:
 
     def emit(self, event_type: str, fields: dict[str, Any] | None = None) -> None:
         """Write and flush one ordered event, cancelling after disconnect."""
-        if self.disconnected:
-            return
         self.sequence += 1
         event = {
             "api_version": API_VERSION,
@@ -317,6 +315,12 @@ class TurnEventStream:
             "type": event_type,
             **(fields or {}),
         }
+        # Retain the public projection even after disconnect for desktop recovery.
+        self.handler.server.registry.store.save_turn_event(
+            self.runtime.conversation_id, self.turn_id, {"public_event": event}
+        )
+        if self.disconnected:
+            return
         try:
             self.handler.wfile.write(
                 (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -380,6 +384,10 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 self.server.registry.get(parts[2])
                 limit, after = self._paging_query(text_cursor=False)
                 turns, next_cursor = self.server.registry.store.history(parts[2], limit, int(after or 0))
+                for turn in turns:
+                    turn["public_events"] = [event["public_event"] for event in turn["events"]
+                                             if "public_event" in event]
+                    turn["events"] = [event for event in turn["events"] if "public_event" not in event]
                 self._json(HTTPStatus.OK, {"api_version": API_VERSION, "conversation_id": parts[2], "turns": turns, "next_cursor": next_cursor})
             elif len(parts) == 3 and parts[:2] == [API_VERSION, "conversations"]:
                 runtime = self.server.registry.get(parts[2])
