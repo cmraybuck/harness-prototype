@@ -807,6 +807,25 @@ integration, and training are future work.
 The charcoal desktop has a collapsible/resizable sidebar of separate conversation
 cards, rounded user
 bubbles, Markdown responses, collapsible Working per turn, and a growing composer.
+Empty chats open with a centered welcome composition, a smaller FLUX mark,
+quiet charcoal-to-teal gradient, and optional starting prompts. Choosing a prompt
+fills an empty composer without sending it or replacing an existing draft.
+The welcome gradient runs to the workspace edges and continues beneath the
+composer. Its rounded input surround is blended with the backdrop; native text
+controls use a matching opaque tint because Tk does not support text-widget alpha.
+The gradient continues through the session heading, welcome screen, and populated
+chats to the composer. Native text rows use matching local background colors;
+empty space and fixed padding show the dithered bitmap. Scroll commands update
+row colors before returning, without per-line overlay windows.
+Message bubbles and Working use shared rounded theme assets; the prompt surround
+composites the gradient. Header and composer backdrops paint separately at frame
+cadence; resizing reflows visible widgets without forcing a full-history layout.
+The heading shows only the selected session title and clears when that session is deleted.
+Responses use the shared app font, aligned headings,
+and the FLUX mark beside the response; send and stop share a smaller input action control.
+A compact downward arrow beside Send jumps to the latest response without changing
+the reading area size. Working appears for tool activity in a subdued rounded disclosure. Streaming updates
+preserve the user bubble and finish layout without flushing intermediate window paints.
 Enter sends, Shift+Enter inserts a newline, and the cyan arrow becomes a stop square
 during work. Hovering or focusing the control identifies its action.
 Drafting remains available during turns; no message is queued. Code offers Copy
@@ -842,6 +861,10 @@ icon, and the live hamburger hint names the Side Panel. The window controls
 use flat Windows-style caption buttons with standard minimize, maximize/restore,
 and close glyphs, including a red close hover. The window and taskbar use the
 FLUX geometric mark instead of the default Tk icon.
+
+FLUX opens on the startup screen after each launch; saved sessions remain in the sidebar.
+Sending a prompt there creates a new session with the selected model and workspace,
+then submits the prompt. Failed creation keeps the draft available to retry.
 
 Sessions support deterministic first-prompt titles, rename, pin, archive, and confirmed
 permanent deletion. Pinned groups precede recent sessions, ordered by message activity.

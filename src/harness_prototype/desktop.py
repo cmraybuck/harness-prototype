@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from .application_service import DesktopServiceHost
 from .application_state import StateStoreError
-from .desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, MOTION, TEXT_SIZES, CommandPalette, ContextHint, DialogBody, DropdownButton, DropdownMenu, FluxTheme, SessionList, SessionSearch, draw_mark, markdown_blocks, set_application_icon
+from .desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, MOTION, TEXT_SIZES, ChatSurface, CommandPalette, ContextHint, DialogBody, DropdownButton, DropdownMenu, FluxTheme, GlassComposer, ChatTranscript, SessionList, SessionSearch, draw_mark, markdown_blocks, set_application_icon
 from .desktop_platform import WindowFrame, display_bounds, open_link, system_reduced_motion, dark_dialog_frame
 from .main import COMMAND_DESCRIPTIONS
 
@@ -738,6 +738,7 @@ class FluxDesktop:
         self.models: list[str] = []
         self.conversations: list[dict[str, Any]] = []
         self.active_conversation_id: str | None = None
+        self._creating_conversation = False
         self.views: dict[str, ConversationView] = {}
         self._history_loading: set[str] = set()
         self._closing = False
@@ -865,34 +866,50 @@ class FluxDesktop:
         self.archive_button = ttk.Button(self.navigation_content, text="Archived sessions", style="Sidebar.TButton", command=self.toggle_archived)
         self.archive_button.grid(row=5, column=0, sticky="ew", pady=4)
         ttk.Button(self.navigation_content, text="Settings", style="Sidebar.TButton", command=self.open_settings).grid(row=6, column=0, sticky="ew", pady=(12, 0))
-        self.workspace_surface = ttk.Frame(self.panes, padding=(24, 16))
+        self.workspace_surface = ttk.Frame(self.panes, padding=0)
         workspace = self.workspace_surface
         self.root._flux_decision_parent = workspace
         self.panes.add(workspace, weight=1)
         workspace.columnconfigure(0, weight=1)
         workspace.rowconfigure(2, weight=1)
-        ttk.Label(workspace, textvariable=self.detail_text, style="Title.TLabel", wraplength=600).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        self.workspace_heading = ttk.Label(workspace, textvariable=self.detail_text,
+                                           style="Workspace.Title.TLabel", wraplength=600)
+        self.workspace_heading.grid(row=0, column=0, sticky="w", padx=24, pady=(16, 12))
         self.notice_text = tk.StringVar()
         self.notice_button = ttk.Button(workspace, textvariable=self.notice_text, command=self._present_next_permission)
-        self.transcript = tk.Text(workspace, wrap="word", state="disabled", takefocus=True,
-                                  padx=12, pady=16, spacing3=8, highlightthickness=0)
+        self.chat_surface = ChatSurface(workspace)
+        self.chat_surface.configure(width=1, height=1)
+        self.chat_surface.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.chat_surface.footer = tk.Canvas(workspace, background=COLORS["canvas"], width=1, height=1,
+                                             highlightthickness=0, borderwidth=0, takefocus=False)
+        self.chat_surface.footer.grid(row=5, column=0, columnspan=2, sticky="nsew")
+        self.chat_surface.footer.bind("<Configure>", self.chat_surface.queue_redraw, add=True)
+        self.chat_surface.bind("<<GradientChanged>>", self._refresh_workspace_tint, add=True)
+        tk.Misc.lift(self.workspace_heading)
+        self.transcript = ChatTranscript(workspace, self.chat_surface, wrap="word", state="disabled", takefocus=True,
+                                  background=COLORS["canvas"], foreground=COLORS["text"],
+                                  font="TkDefaultFont", padx=0, pady=16, spacing2=4, spacing3=10, highlightthickness=0)
         self.transcript.grid(row=2, column=0, sticky="nsew")
+        self.welcome_surface = ChatSurface(workspace, self._start_from_welcome, self.transcript.winfo_height, source=self.chat_surface)
         self.chat_scrollbar = ttk.Scrollbar(workspace, orient=tk.VERTICAL, style="Chat.Vertical.TScrollbar", command=self.transcript.yview)
         self.chat_scrollbar.grid(row=2, column=1, sticky="ns", padx=(8, 0))
         self.transcript.configure(yscrollcommand=self._scrolled)
-        self.transcript.bind("<Configure>", self._queue_layout)
+        self.transcript.bind("<Configure>", self._queue_layout, add=True)
+        self.transcript.bind("<Configure>", lambda _event: self.welcome_surface.redraw() if self.welcome_surface.winfo_ismapped() else None, add=True)
         self.transcript.tag_configure("user", justify="right", foreground=COLORS["text"], rmargin=8, spacing3=16)
-        self.transcript.tag_configure("assistant", foreground=COLORS["text"], spacing3=6)
+        self.transcript.tag_configure("assistant", foreground=COLORS["text"], lmargin1=24, lmargin2=24, rmargin=24, spacing3=10)
+        self.transcript.tag_configure("paragraph_break", font=(FONT_FAMILY, 2), spacing1=0, spacing2=0, spacing3=8)
+        self.transcript.tag_configure("assistant_label", font=(FONT_FAMILY, 10, "bold"), foreground=COLORS["accent"], lmargin1=24, lmargin2=24, spacing1=16, spacing3=8)
         self.transcript.tag_configure("status", foreground=COLORS["muted"], lmargin1=12, lmargin2=12)
         self.transcript.tag_configure("failure", foreground=COLORS["failure"])
         self.transcript.tag_configure("success", foreground=COLORS["success"])
-        self.transcript.tag_configure("heading", foreground=COLORS["accent"], font=(FONT_FAMILY, 14, "bold"), spacing1=12)
+        self.transcript.tag_configure("heading", lmargin1=24, lmargin2=24, rmargin=24, foreground=COLORS["accent"], font=(FONT_FAMILY, 14, "bold"), spacing1=12)
         self.transcript.tag_configure("bold", font=(FONT_FAMILY, 11, "bold"))
         self.transcript.tag_configure("italic", font=(FONT_FAMILY, 11, "italic"))
         self.transcript.tag_configure("code", font="TkFixedFont", background=COLORS["surface"])
-        self.jump_button = ttk.Button(workspace, text="Jump to latest ↓", command=self.jump_to_latest)
-        composer = ttk.Frame(workspace, style="Surface.TFrame", padding=12)
-        composer.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(12, 4))
+        composer = GlassComposer(workspace, self.chat_surface, self._tint_composer)
+        self.composer_surface = composer
+        composer.grid(row=5, column=0, columnspan=2, sticky="ew", padx=16, pady=(12, 16))
         composer.columnconfigure(0, weight=1)
         self.message_input = tk.Text(composer, height=2, wrap="word", background=COLORS["surface"],
                                     highlightthickness=0, padx=8, pady=8, undo=True)
@@ -908,11 +925,11 @@ class FluxDesktop:
         self.message_input.bind("<Shift-Return>", self._newline_key)
         self.message_input.bind("<Control-Return>", self._send_key)
         self.message_input.bind("<<Modified>>", self._draft_modified)
-        self.composer_placeholder = ttk.Label(composer, text="Message FLUX…", style="Surface.TLabel", takefocus=False)
+        self.composer_placeholder = ttk.Label(composer, text="Message FLUX…", style="Composer.Placeholder.TLabel", takefocus=False)
         self.composer_placeholder.bind("<Button-1>", lambda _event: self.message_input.focus_set())
         self.message_input.bind("<FocusIn>", self._update_composer_placeholder)
         self.message_input.bind("<FocusOut>", self._update_composer_placeholder)
-        controls = ttk.Frame(composer, style="Inset.TFrame")
+        controls = ttk.Frame(composer, style="Composer.Controls.TFrame")
         controls.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         self.model_selector = DropdownButton(controls, self.model_text, lambda: self.models,
                                              lambda _value: self._model_selected(None), width=18, style="Inset.TButton")
@@ -927,8 +944,12 @@ class FluxDesktop:
         self._skill_container = ttk.Frame(workspace)
         self._skill_container.columnconfigure(0, weight=1)
         self._skill_container.rowconfigure(0, weight=1)
-        self.send_button = ttk.Button(composer, text="↑", width=2, style="Send.TButton", command=self.send_turn)
-        self.send_button.grid(row=1, column=1, sticky="e", padx=(12, 0))
+        self.jump_button = ttk.Button(composer, text="↓", width=1, style="Inset.TButton",
+                                      command=self.jump_to_latest, state="disabled")
+        self.jump_button.grid(row=1, column=1, sticky="e", padx=(8, 0))
+        ContextHint(self.jump_button, lambda: "Jump to latest response")
+        self.send_button = ttk.Button(composer, text="↑", width=1, style="Send.TButton", command=self.send_turn)
+        self.send_button.grid(row=1, column=2, sticky="e", padx=(12, 0))
         ContextHint(self.send_button, lambda: "Stop active turn" if self.views.get(self.active_conversation_id) and self.views[self.active_conversation_id].active_turn_id else "Send message · Enter")
         # Retain the cancellation seam while the visible action becomes Stop during work.
         self.cancel_button = ttk.Button(composer, text="Stop", command=self.cancel_turn)
@@ -967,11 +988,13 @@ class FluxDesktop:
         """Apply consistent text-size preferences to shared fonts and Markdown tags."""
         size = self._presentation["text_size"]
         self.theme.set_text_size(size)
+        self.welcome_surface.redraw()
         self.command_menu.redraw()
         points = round(TEXT_SIZES[size] * getattr(self, "_zoom_percent", 100) / 100)
         for tag, weight in (("bold", "bold"), ("italic", "italic")):
             self.transcript.tag_configure(tag, font=(FONT_FAMILY, points, weight))
-        self.transcript.tag_configure("heading", font=(FONT_FAMILY, round((TEXT_SIZES[size] + 3) * getattr(self, "_zoom_percent", 100) / 100), "bold"))
+        self.transcript.tag_configure("assistant_label", font=(FONT_FAMILY, max(9, points - 1), "bold"))
+        self.transcript.tag_configure("heading", lmargin1=24, lmargin2=24, rmargin=24, font=(FONT_FAMILY, round((TEXT_SIZES[size] + 3) * getattr(self, "_zoom_percent", 100) / 100), "bold"))
 
     def _zoom_wheel(self, event: tk.Event) -> str:
         """Consume Ctrl-wheel for interface zoom before text or session scrolling."""
@@ -1024,6 +1047,8 @@ class FluxDesktop:
 
     def _scale_widget_tree(self, widget: tk.Misc) -> None:
         """Scale pixel spacing and icons from original values without accumulating rounding."""
+        if getattr(widget, "_flux_gradient_layer", False):
+            return
         if not hasattr(self, "_zoom_widgets"):
             return
         tags = widget.bindtags()
@@ -1174,13 +1199,11 @@ class FluxDesktop:
             self._layout_timer = self.root.after(MOTION["frame_ms"], self._layout_changed)
 
     def _layout_changed(self) -> None:
-        """Reflow existing selectable text in place instead of rebuilding conversation widgets."""
+        """Reflow visible widgets while native text keeps its viewport anchor during resizing."""
         self._layout_timer = None
         if self._closing:
             return
-        position = self._viewport_pixels()
         self._reflow_embedded()
-        self._restore_viewport_pixels(position)
 
     def _viewport_pixels(self) -> int:
         """Capture the vertical offset, including partially clipped embedded bubbles."""
@@ -1190,7 +1213,6 @@ class FluxDesktop:
 
     def _restore_viewport_pixels(self, position: int) -> None:
         """Restore the offset after embedded widget geometry settles, without following output."""
-        self.transcript.update_idletasks()
         height = self.transcript.count("1.0", tk.END, "update", "ypixels")
         total = height if isinstance(height, int) else height[0] if height else 0
         # Avoid another scrollbar/layout callback when geometry did not move the view.
@@ -1426,15 +1448,14 @@ class FluxDesktop:
         if not hasattr(self, "jump_button"):
             return
         view = self.views.get(self.active_conversation_id)
-        if view and view.turns and not self._skill_panel and float(last) < 0.97:
-            self.jump_button.grid(row=3, column=0, sticky="e", pady=4)
-        else:
-            self.jump_button.grid_remove()
+        enabled = bool(view and view.turns and not self._skill_panel and float(last) < 0.97)
+        if self.jump_button.instate(["disabled"]) == enabled:
+            self.jump_button.state(["!disabled"] if enabled else ["disabled"])
 
     def jump_to_latest(self) -> None:
         """Move to the current end only when the user requests it."""
         self.transcript.see(tk.END)
-        self.jump_button.grid_remove()
+        self.jump_button.state(["disabled"])
 
     def _run_task(
         self, work: Callable[[], Any], complete: Callable[[Any], None] | None = None,
@@ -1482,7 +1503,10 @@ class FluxDesktop:
         """Populate controls and render ready, empty, or Ollama recovery state."""
         health, capabilities, conversations = result
         self.models = list(capabilities.get("models", []))
-        self._replace_conversations(conversations)
+        self._replace_conversations(conversations, select=False)
+        if self.active_conversation_id is None and self.models and not self.model_text.get():
+            self.model_text.set(self.models[0])
+        self._render_conversation()
         ollama = health.get("ollama", {})
         if ollama.get("status") == "available":
             self.status_text.set("Backend connected · Ollama available")
@@ -1493,8 +1517,8 @@ class FluxDesktop:
             self.retry_button.grid(row=4, column=0, sticky="w", pady=8)
         if not self.models:
             self.detail_text.set("Configure HARNESS_MODELS, then restart FLUX")
-        elif not conversations and ollama.get("status") == "available":
-            self.detail_text.set("Start a new conversation")
+        elif self.active_conversation_id is None and ollama.get("status") == "available":
+            self.detail_text.set("Send a prompt to start a new conversation")
 
     def _replace_conversations(self, conversations: list[dict[str, Any]], *, select: bool = True) -> None:
         """Replace navigation items while keeping backend identifiers out of labels."""
@@ -1506,6 +1530,9 @@ class FluxDesktop:
         self.conversation_list.replace(conversations, self.active_conversation_id, pending)
         selected = next((item for item in conversations if item["conversation_id"] == self.active_conversation_id), None)
         view = self.views.get(self.active_conversation_id)
+        if selected:
+            self._skill_metadata.setdefault(self.active_conversation_id, {})["title"] = selected.get("title", "New session")
+        self._refresh_session_heading()
         if selected and not (view and view.error) and self.status_text.get() != "Needs attention":
             self.detail_text.set(selected.get("title", "New session"))
         if conversations and select and (self.active_conversation_id is None or selected):
@@ -1636,6 +1663,7 @@ class FluxDesktop:
             self._render_pending = True
             return
         view = self.views.get(self.active_conversation_id)
+        self._refresh_session_heading()
         position = self._viewport_pixels()
         layout = (self.active_conversation_id, self._presentation["text_size"])
         grouped: dict[str, list[dict[str, Any]]] = {}
@@ -1655,6 +1683,14 @@ class FluxDesktop:
                              view.tool_activity_mode, view.active_turn_id == turn_id, turn_id in view.expanded_working,
                              tuple(sorted(item for item in view.expanded_operations if item[0] == turn_id)),
                              tuple(sorted(item for item in view.expanded_content if item.startswith(("user:" + turn_id, turn_id + ":")))))
+                blocks.append(((layout, turn_id, turn.get("user_prompt", ""),
+                                "user:" + turn_id in view.expanded_content), "turn_user", turn_id))
+                activity_events = [event for event in events if event["type"] in {"tool_call", "tool_result"}]
+                if activity_events:
+                    activity_signature = (layout, turn_id, "activity", tuple((event["sequence"], id(event)) for event in activity_events),
+                                          view.tool_activity_mode, view.active_turn_id == turn_id, turn_id in view.expanded_working,
+                                          tuple(sorted(item for item in view.expanded_operations if item[0] == turn_id)))
+                    blocks.append((activity_signature, "activity", turn_id))
                 blocks.append((signature, "turn", turn_id))
             if view.pending_message:
                 blocks.append(((layout, "pending", view.pending_message, "pending" in view.expanded_content), "pending", None))
@@ -1662,7 +1698,7 @@ class FluxDesktop:
                 blocks.append(((layout, "error", view.error), "error", None))
             for index, (command, output) in enumerate(view.command_results):
                 command_position = view.command_positions[index]
-                following = [offset for offset, block in enumerate(blocks) if block[1] == "turn"]
+                following = [offset for offset, block in enumerate(blocks) if block[1] == "turn_user"]
                 offset = following[command_position] if command_position < len(following) else len(blocks)
                 blocks.insert(offset, ((layout, "command", index, command, output, tuple(sorted(view.expanded_content))), "command", str(index)))
         common = 0
@@ -1693,12 +1729,10 @@ class FluxDesktop:
             self.transcript.mark_set(mark, "end-1c")
             self.transcript.mark_gravity(mark, tk.LEFT)
             first_widget = len(self._transcript_widgets)
-            if kind == "welcome":
-                logo = tk.Canvas(self.transcript, width=96, height=96, background=COLORS["canvas"], highlightthickness=0)
-                draw_mark(logo, 96)
-                self._embed(logo, "welcome")
-                self.transcript.tag_configure("welcome", justify="center", spacing1=16, spacing3=12)
-                self.transcript.insert(tk.END, "What are we doing today?\n", "welcome")
+            if kind == "turn_user":
+                self._user_bubble(view.turns[turn_id].get("user_prompt", ""), "user:" + turn_id, view)
+            elif kind == "activity":
+                self._render_activity(view, turn_id, view.turns[turn_id], grouped[turn_id])
             elif kind == "turn":
                 self._render_turn(view, turn_id, view.turns[turn_id], grouped[turn_id])
             elif kind == "command":
@@ -1707,16 +1741,35 @@ class FluxDesktop:
                 self._markdown(output, "command:" + turn_id, view)
             elif kind == "pending":
                 self._user_bubble(view.pending_message, "pending", view)
-            else:
+            elif kind == "error":
                 self.transcript.insert(tk.END, "\n" + view.error + "\n", "failure")
             self._rendered_blocks.append((signature, mark, self._transcript_widgets[first_widget:]))
         self.transcript.configure(state="disabled")
+        if any(kind == "welcome" for _signature, kind, _turn_id in blocks):
+            self.welcome_surface.place(in_=self.transcript, x=0, y=0, relwidth=1, relheight=1, bordermode="outside")
+            self.chat_scrollbar.grid_remove()
+            tk.Misc.lift(self.welcome_surface)
+            tk.Misc.lift(self.composer_surface)
+            tk.Misc.lift(self.workspace_heading)
+            self.welcome_surface.redraw()
+        else:
+            self.welcome_surface.place_forget()
+            self.chat_scrollbar.grid()
         self._reflow_embedded()
         self._restore_viewport_pixels(position)
-        busy = self.active_conversation_id in self._skill_changing or bool(view and (not view.history_loaded or view.sending or view.transport_active or view.active_turn_id))
+        self.composer_surface.redraw()
+        self.transcript.paint_rows()
+        if getattr(self, "_conversation_settle_timer", None) is not None:
+            self.root.after_cancel(self._conversation_settle_timer)
+        self._conversation_settle_timer = self.root.after_idle(lambda: self._settle_conversation(position))
+        busy = self._creating_conversation or self.active_conversation_id in self._skill_changing or bool(view and (not view.history_loaded or view.sending or view.transport_active or view.active_turn_id))
         active = bool(view and view.active_turn_id)
-        self.send_button.configure(text="■" if active else "↑", command=self.cancel_turn if active else self.send_turn,
-                                   state="normal" if active or view and not busy and not view.error and not self._selected_archived else "disabled")
+        can_send = not busy and (
+            bool(view and not view.error and not self._selected_archived)
+            or view is None and bool(self.models)
+        )
+        self.send_button.configure(text="■" if active else "↑", style="Stop.TButton" if active else "Send.TButton", command=self.cancel_turn if active else self.send_turn,
+                                   state="normal" if active or can_send else "disabled")
         self.cancel_button.configure(state="normal" if active else "disabled")
         if view and self._retry_message(view):
             self.retry_turn_button.grid(row=4, column=0, sticky="w", pady=4)
@@ -1731,6 +1784,45 @@ class FluxDesktop:
         self._update_composer_placeholder()
         self._update_commands()
 
+    def _refresh_session_heading(self) -> None:
+        """Show only the active session title, independently of connection status text."""
+        owner = self.active_conversation_id
+        title = self._skill_metadata.get(owner, {}).get("title", "New conversation") if owner in self.views else ""
+        if self.workspace_heading.cget("textvariable") or self.workspace_heading.cget("text") != title:
+            self.workspace_heading.configure(textvariable="", text=title)
+        if owner in self.views:
+            if self.workspace_heading.winfo_manager() != "grid":
+                self.workspace_heading.grid()
+        else:
+            self.workspace_heading.grid_remove()
+
+    def _refresh_workspace_tint(self, _event: object = None) -> None:
+        """Match the session heading to the shared gradient after workspace geometry settles."""
+        if not hasattr(self.chat_surface, "gradient_bitmap"):
+            return
+        y = max(0, self.workspace_heading.winfo_rooty() - self.chat_surface.winfo_rooty())
+        pixel = self.chat_surface.gradient_bitmap.getpixel((0, min(y, self.chat_surface.gradient_bitmap.height - 1)))
+        style = ttk.Style(self.root)
+        color = "#" + "".join(f"{channel:02x}" for channel in pixel)
+        if style.lookup("Workspace.Title.TLabel", "background") != color:
+            style.configure("Workspace.Title.TLabel", background=color)
+
+    def _tint_composer(self, color: str) -> None:
+        """Match opaque native text and control backgrounds to the blended input surface."""
+        style = ttk.Style(self.root)
+        if style.lookup("Composer.Controls.TFrame", "background") != color:
+            style.configure("Composer.Controls.TFrame", background=color)
+        if style.lookup("Composer.Placeholder.TLabel", "background") != color:
+            style.configure("Composer.Placeholder.TLabel", background=color, foreground=COLORS["muted"])
+        if hasattr(self, "message_input") and self.message_input.cget("background") != color:
+            self.message_input.configure(background=color)
+
+    def _start_from_welcome(self, prompt: str) -> None:
+        """Offer a starting draft without submitting it or replacing the user's writing."""
+        if not self.message_input.get("1.0", "end-1c").strip():
+            self.message_input.insert("1.0", prompt)
+        self.message_input.focus_set()
+
     def _update_composer_placeholder(self, _event: object = None) -> None:
         """Show a visual prompt hint without inserting it into drafts or submitted messages."""
         if not self.message_input.get("1.0", "end-1c") and self.message_input.focus_get() is not self.message_input:
@@ -1740,18 +1832,29 @@ class FluxDesktop:
             self.composer_placeholder.place_forget()
 
 
-    def _render_turn(self, view: ConversationView, turn_id: str, turn: dict[str, Any], events: list[dict[str, Any]]) -> None:
-        """Render one changed turn while keeping preceding selectable content alive."""
-        self._user_bubble(turn.get("user_prompt", ""), "user:" + turn_id, view)
+    def _settle_conversation(self, position: int) -> None:
+        """Restore the viewport after native embedded geometry settles without flushing paints."""
+        self._conversation_settle_timer = None
+        if self._closing:
+            return
+        self._restore_viewport_pixels(position)
+        self.transcript.paint_rows(force=True)
+
+    def _render_activity(self, view: ConversationView, turn_id: str, turn: dict[str, Any], events: list[dict[str, Any]]) -> None:
+        """Update tool disclosures independently of streamed assistant text."""
         subset = ConversationView()
         subset.turns = {turn_id: turn}
-        subset.events = {(turn_id, event["sequence"]): event for event in events}
+        subset.events = {(turn_id, event["sequence"]): event for event in events
+                         if event["type"] in {"tool_call", "tool_result"}}
         activity = [(tag, text) for tag, text in subset.render()
-                    if (tag == "status" and "Working" in text) or (tag == "code" and text.startswith("Result ·"))]
+                    if (tag == "status" and "Working" in text and "Thinking" not in text) or (tag == "code" and text.startswith("Result ·"))]
         if view.tool_activity_mode == "hidden":
             activity = [(tag, text) for tag, text in activity if tag == "code" and '"error"' in text]
         if activity:
             self._working_section(view, turn_id, activity)
+
+    def _render_turn(self, view: ConversationView, turn_id: str, turn: dict[str, Any], events: list[dict[str, Any]]) -> None:
+        """Render one changed turn while keeping preceding selectable content alive."""
         # Preserve interleaved assistant, permission receipt, and terminal event order.
         assistant = ""
         part = 0
@@ -1849,7 +1952,7 @@ class FluxDesktop:
         """Render one collapsed Working section with independently expandable safe details."""
         expanded = view.tool_activity_mode == "full" or turn_id in view.expanded_working
         count = sum(text.startswith("Result ·") for _, text in rows)
-        frame = ttk.Frame(self.transcript, style="Surface.TFrame", padding=8)
+        frame = ttk.Frame(self.transcript, style="Surface.TFrame", padding=(12, 8))
         def toggle() -> None:
             """Keep the user's Working expansion through later streamed events."""
             if turn_id in view.expanded_working:
@@ -1857,10 +1960,10 @@ class FluxDesktop:
             else:
                 view.expanded_working.add(turn_id)
             self._render_conversation()
-        label = ("⌄" if expanded else "›") + f"  Working · {count} completed operations"
+        label = ("⌄" if expanded else "›") + f"  Working · {count} completed"
         if view.active_turn_id == turn_id:
             label += " · In progress"
-        ttk.Button(frame, text=label, style="Accent.TButton" if view.active_turn_id == turn_id else "Success.TButton", command=toggle).pack(anchor="w")
+        ttk.Button(frame, text=label, style="Inset.TButton", command=toggle).pack(anchor="w")
         if expanded:
             for index, (tag, text) in enumerate(rows):
                 identity = (turn_id, index)
@@ -1885,9 +1988,10 @@ class FluxDesktop:
 
     def _markdown(self, text: str, identity: str, view: ConversationView) -> None:
         """Render Markdown with bounded expansion and inert resources and HTML."""
-        logo = tk.Canvas(self.transcript, width=22, height=22, background=COLORS["canvas"], highlightthickness=0)
-        draw_mark(logo, 22)
-        self._embed(logo, "assistant", newline=False)
+        mark = tk.Canvas(self.transcript, width=24, height=24, background=COLORS["canvas"],
+                         borderwidth=0, highlightthickness=0, takefocus=False)
+        draw_mark(mark, 24)
+        self._embed(mark, newline=False)
         for index, block in enumerate(markdown_blocks(text)):
             key = f"{identity}:{index}"
             full = block.text[:DISPLAY_TEXT_LIMIT]
@@ -1920,7 +2024,10 @@ class FluxDesktop:
                     ttk.Label(frame, text="Display and copy capped at 12,000 characters", style="Surface.TLabel").pack(anchor="w")
                 self._embed(frame)
             else:
-                self._inline_markdown(display, "heading" if block.kind == "heading" else "code" if block.kind == "table" else "assistant")
+                if display.strip():
+                    self._inline_markdown(display, "heading" if block.kind == "heading" else "code" if block.kind == "table" else "assistant")
+                else:
+                    self.transcript.insert(tk.END, "\n", "paragraph_break")
                 if long:
                     button = ttk.Button(self.transcript, text="Show less" if key in view.expanded_content else "Show more", command=lambda key=key: self._toggle_content(key, view))
                     self._embed(button)
@@ -2093,6 +2200,9 @@ class FluxDesktop:
         """Reserve only the selected conversation and stream on its own worker."""
         conversation_id = self.active_conversation_id
         if not conversation_id:
+            prompt = message if message is not None else self.message_input.get("1.0", "end-1c")
+            if prompt.strip():
+                self.create_conversation(prompt)
             return
         view = self.views[conversation_id]
         if self._selected_archived or conversation_id in self._skill_changing or not view.history_loaded or view.sending or view.transport_active or view.active_turn_id:
@@ -2393,24 +2503,45 @@ class FluxDesktop:
             if message:
                 self.send_turn(message)
 
-    def create_conversation(self) -> None:
-        """Create a normal conversation with no preselected skills or picker."""
+    def create_conversation(self, initial_message: str | None = None) -> None:
+        """Create a session, optionally submitting a startup prompt after success."""
+        if self._creating_conversation:
+            return
         if not self.models:
             self._show_error(DesktopApiError("No Ollama models are configured."))
             return
         workspace = Path(self.workspace_text.get())
+        model = self.model_text.get() if initial_message is not None else ""
+        self._creating_conversation = True
+        self._render_conversation()
 
         def created(metadata: dict[str, Any]) -> None:
             """Select the new conversation after creation without opening skill controls."""
+            self._creating_conversation = False
+            draft = self.message_input.get("1.0", "end-1c")
             self._archived_view = False
             self.search_text.set("")
             self.archive_button.configure(text="Archived sessions")
+            if initial_message is not None:
+                view = self.views.setdefault(metadata["conversation_id"], ConversationView())
+                view.recover([])
             self._select_conversation(metadata)
+            if initial_message is not None:
+                self.message_input.delete("1.0", tk.END)
+                if draft != initial_message:
+                    self.message_input.insert("1.0", draft)
+                self.send_turn(initial_message)
             self.refresh()
 
+        def failed(error: Exception) -> None:
+            """Release creation controls while keeping the unsent startup draft."""
+            self._creating_conversation = False
+            self._render_conversation()
+            self._show_error(error)
+
         self._run_task(
-            lambda: self.client.create_conversation(self.client.settings()["default_model"], workspace, []),
-            created,
+            lambda: self.client.create_conversation(model or self.client.settings()["default_model"], workspace, []),
+            created, failed,
         )
 
     def _render_skills(self) -> None:
@@ -2462,7 +2593,7 @@ class FluxDesktop:
             self._skill_container.place(in_=self.transcript, relx=0.5, rely=1, anchor="s",
                                         width=min(640, max(240, self.transcript.winfo_width() - 24)))
             self._skill_container.lift()
-            self.jump_button.grid_remove()
+            self.jump_button.state(["disabled"])
             self._skill_panel.move(focused_index)
             self._skill_panel.canvas.focus_set()
 

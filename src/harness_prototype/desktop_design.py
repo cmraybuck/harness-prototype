@@ -129,8 +129,11 @@ class FluxTheme:
         self._rounded("Flux.send", COLORS["accent"], RADII["control"], interactive=True, corner=COLORS["surface"], emphasized=True)
         self.style.layout("Send.TButton", [("Flux.send", {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
-        self.style.configure("Send.TButton", foreground=COLORS["canvas"], padding=(6, 3), font=(FONT_FAMILY, round(21 * self.zoom), "bold"))
+        self.style.configure("Send.TButton", foreground=COLORS["canvas"], padding=(4, 2), font=(FONT_FAMILY, round(14 * self.zoom), "bold"))
         self.style.map("Send.TButton", foreground=[("disabled", COLORS["disabled"])])
+        self.style.layout("Stop.TButton", self.style.layout("Send.TButton"))
+        self.style.configure("Stop.TButton", foreground=COLORS["canvas"], padding=(4, 2),
+                             font=(FONT_FAMILY, round(14 * self.zoom)))
         for prefix, fill in (("Session", COLORS["surface"]), ("SelectedSession", COLORS["selected"])):
             element = f"Flux.{prefix.lower()}"
             self._rounded(element, fill, RADII["control"], corner=COLORS["sidebar"])
@@ -144,6 +147,7 @@ class FluxTheme:
             self.style.configure("Pinned." + prefix + "Action.TButton", foreground=COLORS["accent"])
         self.style.configure("Focus.Session.TLabel", background=COLORS["hover"], foreground=COLORS["text"], borderwidth=1, relief="solid")
         self._rounded("Flux.surface", COLORS["surface"], RADII["container"])
+        self._rounded("Flux.chat_surface", COLORS["surface"], RADII["container"])
         self.style.layout("Surface.TFrame", [("Flux.surface", {"sticky": "nsew"})])
         self._rounded("Flux.entry", COLORS["surface"], RADII["control"], interactive=True)
         self.style.layout("TEntry", [("Flux.entry", {"sticky": "nsew", "children": [
@@ -193,7 +197,8 @@ class FluxTheme:
                        ("active", COLORS["success"] if emphasized else COLORS["hover"], COLORS["border"])]
         assets = []
         for state, color, outline in states:
-            image = Image.new("RGBA", (size * 3, size * 3), corner or COLORS["canvas"])
+            background = (0, 0, 0, 0) if name == "Flux.chat_surface" else corner or COLORS["canvas"]
+            image = Image.new("RGBA", (size * 3, size * 3), background)
             draw = ImageDraw.Draw(image)
             draw.rounded_rectangle((1, 1, size * 3 - 2, size * 3 - 2), radius=border * 3,
                                    fill=color, outline=outline, width=3)
@@ -247,6 +252,415 @@ def set_application_icon(root: tk.Tk) -> None:
         images.append(ImageTk.PhotoImage(image.resize((size, size), Image.Resampling.LANCZOS), master=root))
     root.iconphoto(True, *images)
     root._flux_icons = images
+
+
+class ChatSurface(tk.Canvas):
+    """Paint a quiet palette gradient and an optional responsive welcome composition."""
+
+    def __init__(
+        self, parent: tk.Widget, start: Callable[[str], None] | None = None,
+        content_height: Callable[[], int] | None = None,
+        source: "ChatSurface | None" = None,
+    ) -> None:
+        """Keep decorative pixels separate from selectable conversation content."""
+        super().__init__(parent, background=COLORS["canvas"], highlightthickness=0, borderwidth=0)
+        self.start = start
+        self.content_height = content_height
+        self.source = source
+        self.footer: tk.Canvas | None = None
+        self.reading_area: tk.Text | None = None
+        self.buttons: list[ttk.Button] = []
+        self.heading_font = font.Font(root=self, font="TkDefaultFont")
+        self.caption_font = font.Font(root=self, font="TkDefaultFont")
+        if start:
+            for label, prompt in (("Explore code", "Help me understand this codebase."),
+                                  ("Find a bug", "Help me investigate a bug."),
+                                  ("Plan a change", "Help me plan a change to this project.")):
+                self.buttons.append(ttk.Button(self, text=label, style="Inset.TButton",
+                                               command=lambda prompt=prompt: start(prompt)))
+        self.redraw_timer: str | None = None
+        self.redraw_owner = self._root()
+        self.bind("<Configure>", self.queue_redraw)
+        self.bind("<Destroy>", self._cancel_redraw, add=True)
+        if source:
+            source.bind("<<GradientChanged>>", self.queue_redraw, add=True)
+
+    def queue_redraw(self, _event: object = None) -> None:
+        """Combine backdrop geometry changes into one paint after native layout settles."""
+        if not self.winfo_exists():
+            return
+        if self.redraw_timer is None:
+            if self.source or not hasattr(self, "gradient_bitmap"):
+                self.redraw_timer = self.redraw_owner.after_idle(self._run_redraw)
+            else:
+                self.redraw_timer = self.redraw_owner.after(MOTION["frame_ms"], self._run_redraw)
+
+    def _run_redraw(self) -> None:
+        """Clear the executing timer before painting to avoid canceling its Tcl callback."""
+        self.redraw_timer = None
+        self.redraw()
+
+    def _cancel_redraw(self, event: tk.Event) -> None:
+        """Release a queued backdrop paint with its owning widget."""
+        if event.widget is self and self.redraw_timer is not None:
+            self.redraw_owner.after_cancel(self.redraw_timer)
+            self.redraw_timer = None
+
+    def redraw(self) -> None:
+        """Blend dark charcoal and teal, with centered typography that fits narrow panes."""
+        if not self.winfo_exists():
+            return
+        if self.redraw_timer is not None:
+            self.redraw_owner.after_cancel(self.redraw_timer)
+            self.redraw_timer = None
+        if self.start and not self.winfo_ismapped():
+            return
+        footer = self.footer
+        extent = self.master if footer else self
+        width, height = max(1, extent.winfo_width()), max(1, extent.winfo_height())
+        reading_area = self.reading_area
+        bounds = None
+        if reading_area and reading_area.winfo_exists():
+            top = max(1, reading_area.winfo_y())
+            bounds = (top, min(height, top + reading_area.winfo_height()))
+        signature = (width, height, bounds, id(getattr(self.source, "gradient_bitmap", None)),
+                     self.winfo_rootx() if self.source else 0,
+                     self.winfo_rooty() if self.source else 0)
+        if not self.start and signature == getattr(self, "paint_signature", None):
+            return
+        self.paint_signature = signature
+        base = tuple(int(COLORS["canvas"][index:index + 2], 16) for index in (1, 3, 5))
+        teal = tuple(int(COLORS["selected"][index:index + 2], 16) for index in (1, 3, 5))
+        charcoal = tuple(int(COLORS["titlebar"][index:index + 2], 16) for index in (1, 3, 5))
+        if self.source and hasattr(self.source, "gradient_bitmap"):
+            left = max(0, self.winfo_rootx() - self.source.winfo_rootx())
+            top = max(0, self.winfo_rooty() - self.source.winfo_rooty())
+            self.gradient_bitmap = self.source.gradient_bitmap.crop((left, top, left + width, top + height))
+        else:
+            # Ordered sub-channel dithering avoids large flat bands on dark 8-bit displays.
+            thresholds = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+            tile = Image.new("RGB", (4, height))
+            pixels = []
+            for y in range(height):
+                fraction = 1 - y / max(1, height - 1)
+                if bounds:
+                    # Keep native display-row color steps imperceptible while retaining
+                    # the teal wash through the entire conversation and composer.
+                    fraction = 0.35 + fraction * 0.35
+                glow, shade = fraction ** 1.6 * 0.45, fraction * 0.2
+                channels = tuple(base[channel] * (1 - glow - shade)
+                                 + teal[channel] * glow + charcoal[channel] * shade for channel in range(3))
+                for x in range(4):
+                    threshold = (thresholds[y % 4][x] + 0.5) / 16
+                    pixels.append(tuple(int(value + threshold) for value in channels))
+            tile.putdata(pixels)
+            raw = tile.tobytes()
+            rows = ((raw[y * 12:(y + 1) * 12] * ((width + 3) // 4))[:width * 3] for y in range(height))
+            self.gradient_bitmap = Image.frombytes("RGB", (width, height), b"".join(rows))
+        if bounds and not self.start and not self.source:
+            top, bottom = bounds
+            self._gradient_image = ImageTk.PhotoImage(self.gradient_bitmap.crop((0, 0, width, top)), master=self)
+            self._gradient_bottom_image = ImageTk.PhotoImage(
+                self.gradient_bitmap.crop((0, bottom, width, max(bottom + 1, height))), master=self)
+            lower_canvas = footer or self
+            offset = bottom - footer.winfo_y() if footer else bottom
+            if lower_canvas.find_withtag("gradient_bottom"):
+                lower_canvas.itemconfigure("gradient_bottom", image=self._gradient_bottom_image)
+                lower_canvas.coords("gradient_bottom", 0, offset)
+            else:
+                lower_canvas.create_image(0, offset, image=self._gradient_bottom_image, anchor="nw", tags="gradient_bottom")
+        else:
+            self._gradient_image = ImageTk.PhotoImage(self.gradient_bitmap, master=self)
+            self.delete("gradient_bottom")
+        if not self.start and self.find_withtag("gradient"):
+            self.itemconfigure("gradient", image=self._gradient_image)
+        else:
+            if self.start:
+                self.delete("all")
+            self.create_image(0, 0, image=self._gradient_image, anchor="nw", tags="gradient")
+        self.event_generate("<<GradientChanged>>")
+        if not self.start:
+            return
+        if self.content_height:
+            height = min(height, max(1, self.content_height()))
+        shared = font.nametofont("TkDefaultFont", root=self)
+        self.heading_font.configure(**shared.actual())
+        compact = height < shared.metrics("linespace") * 16
+        self.heading_font.configure(size=round(shared.actual("size") * (1.6 if compact else 2)), weight="bold")
+        self.caption_font.configure(**shared.actual())
+        self.caption_font.configure(size=max(9, shared.actual("size") - 1))
+        scale = max(0.75, shared.metrics("linespace") / 20)
+        center = width / 2
+        top = max(16, height * (0.12 if compact else 0.24) - 32 * scale)
+        logo_size = round((32 if compact else 52) * scale)
+        mark = Image.new("RGBA", (logo_size * 4, logo_size * 4))
+        draw = ImageDraw.Draw(mark)
+        ratio = logo_size * 4 / 32
+        for points, color in MARK_PATHS:
+            draw.polygon([(points[index] * ratio, points[index + 1] * ratio)
+                          for index in range(0, len(points), 2)], fill=color)
+        self._welcome_mark = ImageTk.PhotoImage(mark.resize((logo_size, logo_size), Image.Resampling.LANCZOS), master=self)
+        self.create_image(center, top, image=self._welcome_mark, anchor="n", tags="welcome-mark")
+        title = self.create_text(center, top + logo_size + 24 * scale, text="What are we doing today?",
+                                 font=self.heading_font, fill=COLORS["text"], width=max(120, width - 64),
+                                 justify="center", anchor="n", tags="welcome-title")
+        bottom = self.bbox(title)[3]
+        subtitle = self.create_text(center, bottom + 12 * scale,
+                                    text="A question, a bug, or your next idea. Let's work on it.",
+                                    font="TkDefaultFont", fill=COLORS["muted"], width=max(120, width - 64),
+                                    justify="center", anchor="n", tags="welcome-subtitle")
+        bottom = self.bbox(subtitle)[3] + 24 * scale
+        gap = round(8 * scale)
+        widths = [button.winfo_reqwidth() for button in self.buttons]
+        horizontal = sum(widths) + gap * 2 < width - 48
+        controls_height = max(button.winfo_reqheight() for button in self.buttons) if horizontal else sum(
+            button.winfo_reqheight() + gap for button in self.buttons)
+        if bottom + controls_height > height - 24:
+            if bottom < height - 24:
+                self.create_text(center, bottom, text="Start below, or type / for commands",
+                                 font=self.caption_font, fill=COLORS["muted"], anchor="n", tags="welcome-hint")
+            return
+        if horizontal:
+            left = (width - sum(widths) - gap * 2) / 2
+            for button, button_width in zip(self.buttons, widths):
+                self.create_window(left, bottom, window=button, anchor="nw")
+                left += button_width + gap
+            bottom += max(button.winfo_reqheight() for button in self.buttons)
+        else:
+            for button in self.buttons:
+                self.create_window(center, bottom, window=button, anchor="n")
+                bottom += button.winfo_reqheight() + gap
+        if bottom + 32 * scale < height:
+            self.create_text(center, bottom + 24 * scale, text="Start below, or type / for commands",
+                             font=self.caption_font, fill=COLORS["muted"], anchor="n", tags="welcome-hint")
+
+
+class ChatTranscript(tk.Text):
+    """Match native text backgrounds without per-row overlay windows."""
+
+    def __init__(self, parent: tk.Widget, backdrop: ChatSurface, **kwargs: Any) -> None:
+        """Keep selection native and repaint row colors before scroll commands return."""
+        super().__init__(parent, **kwargs)
+        self.backdrop = backdrop
+        backdrop.reading_area = self
+        self.gradient_tags: set[str] = set()
+        self.surface_styles: set[str] = set()
+        self.painting = False
+        self.paint_timer: str | None = None
+        self.paint_signature: tuple | None = None
+        self.revision = 0
+        self.empty_surface = tk.Canvas(self, background=COLORS["canvas"], borderwidth=0,
+                                       highlightthickness=0, takefocus=False)
+        self.padding_surfaces = [tk.Canvas(self, background=COLORS["canvas"], borderwidth=0,
+                                          highlightthickness=0, takefocus=False) for _ in range(2)]
+        self.padding_signature: tuple | None = None
+        for canvas in (self.empty_surface, *self.padding_surfaces):
+            canvas._flux_gradient_layer = True
+            canvas.bind("<MouseWheel>", self._wheel)
+            canvas.bind("<Button-1>", lambda _event: self.focus_set())
+        self.paint_owner = self._root()
+        self.native_command = self._w + "_native"
+        self.tk.call("rename", self._w, self.native_command)
+        self.tk.createcommand(self._w, self._dispatch)
+        self.bind("<Configure>", self._configured, add=True)
+        self.bind("<Destroy>", self._destroy_paint, add=True)
+        backdrop.bind("<<GradientChanged>>", self._queue_paint, add=True)
+
+    def _wheel(self, event: tk.Event) -> str:
+        """Route wheel input over empty background through the native scroll command."""
+        units = -round(event.delta / 120 * 3) or (-1 if event.delta > 0 else 1)
+        self.yview_scroll(units, "units")
+        return "break"
+
+    def _dispatch(self, *args: str) -> Any:
+        """Recolor native scroll results before Tk displays the changed viewport."""
+        result = self.tk.call(self.native_command, *args)
+        if args and not self.painting:
+            if args[0] in {"yview", "see"} and len(args) > 1:
+                self.paint_rows()
+            elif args[0] in {"insert", "delete"}:
+                self.revision += 1
+                self._queue_paint()
+        return result
+
+    def _configured(self, _event: object = None) -> None:
+        """Coalesce native geometry and backdrop changes after layout."""
+        self.backdrop.queue_redraw()
+        self._queue_paint()
+
+    def _queue_paint(self, _event: object = None) -> None:
+        """Schedule one row-color update for a batch of content or geometry changes."""
+        if self.winfo_exists() and self.paint_timer is None:
+            self.paint_timer = self.paint_owner.after_idle(self._run_paint)
+
+    def _run_paint(self) -> None:
+        """Release the executing callback before updating native row backgrounds."""
+        self.paint_timer = None
+        self.paint_rows()
+
+    def _destroy_paint(self, event: tk.Event) -> None:
+        """Release pending painting and the scroll proxy when the native text closes."""
+        if event.widget is self:
+            if self.paint_timer is not None:
+                self.paint_owner.after_cancel(self.paint_timer)
+                self.paint_timer = None
+            self.tk.deletecommand(self._w)
+
+    def paint_rows(self, *, force: bool = False) -> None:
+        """Tint only visible display rows using the shared background's local colors."""
+        if self.painting or not self.winfo_exists() or not self.backdrop.winfo_exists() or not hasattr(self.backdrop, "gradient_bitmap"):
+            return
+        image = self.backdrop.gradient_bitmap
+        left = max(0, self.winfo_rootx() - self.backdrop.winfo_rootx())
+        top = max(0, self.winfo_rooty() - self.backdrop.winfo_rooty())
+        if image.width < left + self.winfo_width() or image.height < top + self.winfo_height():
+            self.backdrop.redraw()
+            image = self.backdrop.gradient_bitmap
+        signature = (id(image), self.revision, self.yview(), self.winfo_width(), self.winfo_height(),
+                     self.tk.call("font", "metrics", self.cget("font"), "-linespace"))
+        if not force and signature == self.paint_signature:
+            return
+        self.paint_signature = signature
+        self.painting = True
+        try:
+            top = self.winfo_rooty() - self.backdrop.winfo_rooty()
+            color = "#" + "".join(f"{channel:02x}" for channel in image.getpixel((0, max(0, min(image.height - 1, top)))))
+            if self.cget("background") != color:
+                self.configure(background=color)
+            for tag in self.gradient_tags:
+                self.tag_remove(tag, "1.0", tk.END)
+            index = self.index("@0,0 display linestart")
+            for _ in range(256):
+                info = self.dlineinfo(index)
+                if not info or info[1] >= self.winfo_height():
+                    break
+                following = self.index(index + " +1 display lines")
+                if self.compare(following, "<=", index):
+                    following = self.index(tk.END)
+                y = min(image.height - 1, max(0, top + info[1] + info[3] // 2))
+                color = "#" + "".join(f"{channel:02x}" for channel in image.getpixel((0, y)))
+                tag = "gradient_" + color[1:]
+                if tag not in self.gradient_tags:
+                    self.tag_configure(tag, background=color)
+                    self.tag_lower(tag)
+                    self.gradient_tags.add(tag)
+                self.tag_add(tag, index, following)
+                if self.compare(following, ">=", "end-1c"):
+                    break
+                index = following
+            last = self.dlineinfo("end-1c")
+            width, height = self.winfo_width(), self.winfo_height()
+            left = max(0, self.winfo_rootx() - self.backdrop.winfo_rootx())
+            padding = int(self.cget("pady"))
+            padding_signature = (id(image), width, height, top, left, padding)
+            if padding_signature != self.padding_signature:
+                self.padding_signature = padding_signature
+                for canvas, offset in zip(self.padding_surfaces, (0, max(0, height - padding))):
+                    crop = image.crop((left, top + offset, left + width, top + offset + padding))
+                    canvas._gradient_asset = ImageTk.PhotoImage(crop, master=self)
+                    if canvas.find_withtag("gradient"):
+                        canvas.itemconfigure("gradient", image=canvas._gradient_asset)
+                    else:
+                        canvas.create_image(0, 0, image=canvas._gradient_asset, anchor="nw", tags="gradient")
+                    canvas.place(x=0, y=offset, relwidth=1, height=padding, bordermode="outside")
+            if last and last[1] + last[3] < height:
+                # Tk includes a blank terminal display line after a trailing newline.
+                # Cover that unused line too, rather than exposing the widget's top tint.
+                terminal_blank = self.get("end-2c", "end-1c") == "\n"
+                offset = max(0, last[1] if terminal_blank else last[1] + last[3])
+                if getattr(self, "empty_bitmap", None) is not image:
+                    self.empty_bitmap = image
+                    self.empty_asset = ImageTk.PhotoImage(image, master=self)
+                if self.empty_surface.find_withtag("gradient"):
+                    self.empty_surface.itemconfigure("gradient", image=self.empty_asset)
+                    self.empty_surface.coords("gradient", -left, -top - offset)
+                else:
+                    self.empty_surface.create_image(-left, -top - offset, image=self.empty_asset, anchor="nw", tags="gradient")
+                self.empty_surface.place(x=0, y=offset, relwidth=1, height=height - offset, bordermode="outside")
+            else:
+                self.empty_surface.place_forget()
+            for name in self.window_names():
+                widget = self.nametowidget(name)
+                if not widget.winfo_ismapped():
+                    continue
+                index = self.index(name)
+                tags = [tag for tag in self.tag_names(index) if tag in self.gradient_tags]
+                if tags:
+                    color = self.tag_cget(tags[0], "background")
+                    if hasattr(widget, "_flux_mark_size"):
+                        if widget.cget("background") != color:
+                            widget.configure(background=color)
+                            draw_mark(widget, widget._flux_mark_size)
+                    elif isinstance(widget, ttk.Frame) and str(widget.cget("style")).endswith("Surface.TFrame"):
+                        style = ttk.Style(self)
+                        style_name = "Gradient" + color[1:] + style.theme_use() + ".Surface.TFrame"
+                        if style_name not in self.surface_styles:
+                            style.configure(style_name, background=color)
+                            style.layout(style_name, [("Flux.chat_surface", {"sticky": "nsew"})])
+                            self.surface_styles.add(style_name)
+                        if widget.cget("style") != style_name:
+                            widget.configure(style=style_name)
+        finally:
+            self.painting = False
+
+
+class GlassComposer(ttk.Frame):
+    """Composite the rounded prompt surface over the workspace gradient."""
+
+    def __init__(self, parent: tk.Widget, backdrop: ChatSurface, tint: Callable[[str], None]) -> None:
+        """Retain native input widgets while painting their rounded blended surround."""
+        self.backdrop = backdrop
+        self.tint = tint
+        super().__init__(parent, padding=12)
+        self.asset = tk.PhotoImage(master=parent, width=1, height=1)
+        self.element_name = "Flux.glass" + self._w
+        self.style_name = "Glass" + self._w + ".TFrame"
+        self.paint_theme: str | None = None
+        self._install_style()
+        self.bind("<Configure>", lambda _event: self.redraw())
+        self.gradient_binding = backdrop.bind("<<GradientChanged>>", lambda _event: self.redraw(), add=True)
+        self.bind("<Destroy>", self._release_gradient, add=True)
+
+    def _install_style(self) -> None:
+        """Retain the composited surface when interface zoom switches the ttk theme."""
+        style = ttk.Style(self)
+        current = style.theme_use()
+        if current == self.paint_theme:
+            return
+        if self.element_name not in style.element_names():
+            style.element_create(self.element_name, "image", self.asset, width=1, height=1, sticky="nsew")
+        style.layout(self.style_name, [(self.element_name, {"sticky": "nsew", "children": [
+            ("Frame.padding", {"sticky": "nsew"})]})])
+        self.paint_theme = current
+        self.configure(style=self.style_name)
+
+    def _release_gradient(self, event: tk.Event) -> None:
+        """Release the shared-backdrop listener when a message or composer surface closes."""
+        if event.widget is self and self.backdrop.winfo_exists():
+            self.backdrop.unbind("<<GradientChanged>>", self.gradient_binding)
+
+    def redraw(self) -> None:
+        """Blend the actual backdrop crop and match native controls to its middle tone."""
+        if not self.winfo_exists() or not self.backdrop.winfo_exists() or not self.winfo_ismapped() or not hasattr(self.backdrop, "gradient_bitmap"):
+            return
+        self._install_style()
+        width, height = max(1, self.winfo_width()), max(1, self.winfo_height())
+        left = max(0, self.winfo_rootx() - self.backdrop.winfo_rootx())
+        top = max(0, self.winfo_rooty() - self.backdrop.winfo_rooty())
+        signature = (id(self.backdrop.gradient_bitmap), width, height, left, top, self.paint_theme)
+        if signature == getattr(self, "paint_signature", None):
+            return
+        self.paint_signature = signature
+        background = self.backdrop.gradient_bitmap.crop((left, top, left + width, top + height))
+        self.blended_bitmap = Image.blend(background, Image.new("RGB", (width, height), COLORS["surface"]), 0.76)
+        mask = Image.new("L", (width, height))
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=RADII["container"], fill=255)
+        composed = Image.composite(self.blended_bitmap, background, mask)
+        image = ImageTk.PhotoImage(composed, master=self)
+        self.asset.configure(width=width, height=height)
+        self.tk.call(str(self.asset), "copy", str(image))
+        color = self.blended_bitmap.getpixel((width // 2, height // 3))
+        self.tint("#" + "".join(f"{channel:02x}" for channel in color))
 
 
 class CommandPalette(ttk.Frame):

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
-from harness_prototype.desktop_design import CAPTION_GLYPHS, COLORS, CommandPalette
+from harness_prototype.desktop_design import CAPTION_GLYPHS, COLORS, ChatSurface, CommandPalette
 from harness_prototype.desktop import (
     ConversationView, DecisionDialog, DecisionOptions, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
 )
@@ -328,6 +328,77 @@ class DynamicSkillWidgetTests(unittest.TestCase):
             {"id": "fixture.missing", "name": "Missing", "available": False,
              "error": "Unavailable capabilities: absent."}], "limits": {"max_instructions_bytes": 32768}}
 
+    def test_startup_keeps_saved_sessions_unselected(self) -> None:
+        """Show welcome and model controls without restoring the most recent session."""
+        self.desktop.active_conversation_id = None
+        self.desktop.model_text.set("")
+        self.desktop._application_loaded((
+            {"ollama": {"status": "available"}}, {"models": ["alpha", "beta"]},
+            [{"conversation_id": "saved", "title": "Previous session"}],
+        ))
+        self.assertIsNone(self.desktop.active_conversation_id)
+        self.assertEqual(self.desktop.model_text.get(), "alpha")
+        self.assertEqual(str(self.desktop.send_button.cget("state")), "normal")
+        self.assertEqual(self.desktop.conversations[0]["conversation_id"], "saved")
+        self.client.get_conversation.assert_not_called()
+
+    @patch("harness_prototype.desktop.Thread")
+    def test_startup_prompt_creates_and_submits_once(self, thread: MagicMock) -> None:
+        """Create with current selections and submit once even with repeated Send."""
+        self.desktop.active_conversation_id = None
+        self.desktop.model_text.set("chosen-model")
+        self.desktop.message_input.insert("1.0", "Hello startup")
+        self.desktop.send_turn()
+        work, complete, _failed = self.tasks.call_args.args
+        calls = self.tasks.call_count
+        self.desktop.send_turn()
+        self.desktop.create_conversation()
+        self.assertEqual(self.tasks.call_count, calls)
+        self.client.create_conversation.return_value = {
+            "conversation_id": "new", "model": "chosen-model",
+        }
+        complete(work())
+        self.client.create_conversation.assert_called_once_with("chosen-model", Path.cwd(), [])
+        thread.call_args.kwargs["target"]()
+        self.assertEqual(self.client.stream_turn.call_args.args[:2], ("new", "Hello startup"))
+        self.assertEqual(self.desktop.message_input.get("1.0", "end-1c"), "")
+        self.assertTrue(self.desktop.views["new"].sending)
+
+    @patch("harness_prototype.desktop.Thread")
+    def test_startup_creation_preserves_new_writing(self, thread: MagicMock) -> None:
+        """Submit the captured prompt while retaining edits made during creation."""
+        self.desktop.active_conversation_id = None
+        self.desktop.model_text.set("test-model")
+        self.desktop.message_input.insert("1.0", "First prompt")
+        self.desktop.send_turn()
+        work, complete, _failed = self.tasks.call_args.args
+        self.desktop.message_input.delete("1.0", tk.END)
+        self.desktop.message_input.insert("1.0", "Next draft")
+        self.client.create_conversation.return_value = {"conversation_id": "new", "model": "test-model"}
+        complete(work())
+        thread.call_args.kwargs["target"]()
+        self.assertEqual(self.client.stream_turn.call_args.args[:2], ("new", "First prompt"))
+        self.assertEqual(self.desktop.message_input.get("1.0", "end-1c"), "Next draft")
+
+    def test_startup_creation_failure_preserves_prompt_and_allows_retry(self) -> None:
+        """Keep failed creation recoverable without losing the unsent draft."""
+        self.desktop.active_conversation_id = None
+        self.desktop.message_input.insert("1.0", "Retry this")
+        self.desktop.send_turn()
+        self.tasks.call_args.args[2](DesktopApiError("Unavailable"))
+        self.assertIsNone(self.desktop.active_conversation_id)
+        self.assertEqual(self.desktop.message_input.get("1.0", "end-1c"), "Retry this")
+        self.assertFalse(self.desktop._creating_conversation)
+        self.desktop.send_turn()
+        self.assertTrue(self.desktop._creating_conversation)
+
+    def test_blank_startup_prompt_does_not_create_session(self) -> None:
+        """Ignore whitespace on startup rather than creating an empty session."""
+        self.desktop.active_conversation_id = None
+        self.tasks.reset_mock()
+        self.desktop.send_turn("   ")
+        self.tasks.assert_not_called()
+
     def destroy_root(self) -> None:
         """Release scheduled callbacks before destroying the fixture interpreter."""
         self.root.update_idletasks()
@@ -640,6 +711,248 @@ class DynamicSkillWidgetTests(unittest.TestCase):
 
 
 class DesktopWidgetTests(unittest.TestCase):
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_deleted_session_clears_heading_and_restores_visible_gradient(self, _history: MagicMock, tasks: MagicMock) -> None:
+        """Show a title only for the selected session and retain the welcome gradient."""
+        root = tk.Tk()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        root.geometry("1100x800")
+        desktop._select_conversation({"conversation_id": "one", "title": "First session"})
+        desktop.views["one"].recover([])
+        desktop._render_conversation()
+        root.update()
+        desktop._delete_session("one")
+        work, complete = tasks.call_args.args
+        complete(work())
+        root.update()
+        self.assertEqual(desktop.workspace_heading.winfo_manager(), "")
+        bitmap = desktop.welcome_surface.gradient_bitmap
+        self.assertNotEqual(bitmap.getpixel((0, 40)), bitmap.getpixel((0, bitmap.height - 40)))
+        desktop._select_conversation({"conversation_id": "two", "title": "Second session"})
+        root.update()
+        self.assertEqual(desktop.workspace_heading.winfo_manager(), "grid")
+        self.assertEqual(desktop.workspace_heading.cget("text"), "Second session")
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_welcome_prompts_preserve_drafts_and_hide_for_conversation(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Keep welcome actions local and remove the composition when chat content appears."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one"})
+        desktop.views["one"].recover([])
+        desktop._render_conversation()
+        root.update()
+        self.assertEqual(desktop.welcome_surface.winfo_manager(), "place")
+        desktop.welcome_surface.buttons[0].invoke()
+        self.assertIn("understand this codebase", desktop.message_input.get("1.0", "end-1c"))
+        desktop.welcome_surface.buttons[1].invoke()
+        self.assertIn("understand this codebase", desktop.message_input.get("1.0", "end-1c"))
+        desktop.client.stream_turn.assert_not_called()
+        desktop.views["one"].turns["first"] = {"user_prompt": "Hello", "status": "success", "events": []}
+        desktop._render_conversation()
+        root.update()
+        self.assertEqual(desktop.welcome_surface.winfo_manager(), "")
+        self.assertIn("Hello", desktop.views["one"].turns["first"]["user_prompt"])
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_gradient_extends_under_blended_composer_without_side_gutters(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Align the enlarged backdrop and blend the composer with its actual gradient crop."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        root.geometry("1100x800")
+        desktop._select_conversation({"conversation_id": "one"})
+        desktop.views["one"].recover([])
+        desktop._render_conversation()
+        root.update()
+        surface = desktop.chat_surface
+        composer = desktop.composer_surface
+        self.assertEqual(int(desktop.transcript.grid_info()["padx"]), 0)
+        self.assertEqual(int(desktop.transcript.grid_info()["pady"]), 0)
+        self.assertEqual(desktop.welcome_surface.winfo_width(), surface.winfo_width())
+        self.assertGreaterEqual(surface.winfo_rooty() + surface.gradient_bitmap.height,
+                                composer.winfo_rooty() + composer.winfo_height())
+        left = composer.winfo_rootx() - surface.winfo_rootx()
+        top = composer.winfo_rooty() - surface.winfo_rooty()
+        x, y = composer.winfo_width() // 2, composer.winfo_height() // 3
+        background = surface.gradient_bitmap.getpixel((left + x, top + y))
+        blended = composer.blended_bitmap.getpixel((x, y))
+        solid = tuple(int(COLORS["surface"][index:index + 2], 16) for index in (1, 3, 5))
+        for actual, behind, tint in zip(blended, background, solid):
+            self.assertAlmostEqual(actual, behind * 0.24 + tint * 0.76, delta=1)
+        self.assertNotEqual(blended, solid)
+        self.assertEqual(desktop.message_input.cget("background"),
+                         "#" + "".join(f"{channel:02x}" for channel in blended))
+        desktop.message_input.insert("1.0", "Keep this draft")
+        root.geometry("900x700")
+        root.update()
+        self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "Keep this draft")
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_chat_gradient_typography_and_composer_stay_consistent_across_sessions(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Keep the heading, native text, empty space, and composer on the same gradient."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        root.geometry("1100x800")
+        desktop._select_conversation({"conversation_id": "one"})
+        view = desktop.views["one"]
+        view.recover([])
+        view.turns["first"] = {"user_prompt": "Hello", "status": "success", "events": [
+            {"type": "model_response", "content": "## Heading\n\nA **clear** response with readable paragraphs."}]}
+        desktop._render_conversation()
+        root.update()
+        transcript = desktop.transcript
+        self.assertTrue(any(hasattr(widget, "_flux_mark_size") for widget in desktop._transcript_widgets))
+        self.assertEqual(transcript.cget("font"), "TkDefaultFont")
+        self.assertEqual(int(transcript.tag_cget("assistant", "lmargin1")), 24)
+        self.assertEqual(int(transcript.tag_cget("heading", "lmargin1")), 24)
+        self.assertTrue(transcript.gradient_tags)
+        self.assertEqual(int(desktop.chat_surface.grid_info()["row"]), 0)
+        self.assertEqual(int(desktop.send_button.cget("width")), 1)
+        self.assertLessEqual(desktop.send_button.winfo_height(), desktop.model_selector.winfo_height() + 8)
+        desktop.message_input.insert("1.0", "My draft")
+        for identifier in ("two", "one", "two", "one"):
+            desktop._select_conversation({"conversation_id": identifier})
+            desktop.views[identifier].recover([])
+            desktop._render_conversation()
+            root.update()
+            composer = desktop.composer_surface
+            color = composer.blended_bitmap.getpixel((composer.winfo_width() // 2, composer.winfo_height() // 3))
+            self.assertEqual(desktop.message_input.cget("background"),
+                             "#" + "".join(f"{channel:02x}" for channel in color))
+        self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "My draft")
+        view.active_turn_id = "active"
+        desktop._render_conversation()
+        root.update()
+        self.assertEqual(desktop.send_button.cget("style"), "Stop.TButton")
+        self.assertEqual(desktop.send_button.cget("text"), "■")
+        view.active_turn_id = None
+        desktop._render_conversation()
+        root.update()
+        self.assertEqual(desktop.send_button.cget("style"), "Send.TButton")
+        desktop._request_zoom(1)
+        root.update()
+        if desktop._zoom_timer is not None:
+            desktop._apply_zoom()
+        root.update()
+        self.assertIn(desktop.composer_surface.element_name, ttk.Style(root).element_names())
+        self.assertEqual(desktop.composer_surface.paint_theme, ttk.Style(root).theme_use())
+        transcript.tag_add(tk.SEL, "1.0", "1.4")
+        self.assertTrue(transcript.tag_ranges(tk.SEL))
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_native_reading_surface_stays_stable_during_scroll_resize_and_streaming(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Keep native scrolling synchronized with visible gradient rows and bounded decoration."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        root.geometry("1100x800")
+        desktop._select_conversation({"conversation_id": "one"})
+        view = desktop.views["one"]
+        view.recover([])
+        view.turns["first"] = {"user_prompt": "Hello", "status": "success", "events": [
+            {"type": "model_response", "content": "\n\n".join("Readable paragraph. " * 8 for _ in range(20))}]}
+        desktop._render_conversation()
+        root.update()
+        transcript = desktop.transcript
+        backdrop = desktop.chat_surface
+        image = backdrop._gradient_image
+        widgets = tuple(desktop._transcript_widgets)
+        reading_height = transcript.winfo_height()
+        theme_changes: list[tk.Event] = []
+        root.bind("<<ThemeChanged>>", theme_changes.append, add=True)
+        color = desktop.message_input.cget("background")
+        for _ in range(5):
+            desktop._refresh_workspace_tint()
+            desktop._tint_composer(color)
+        root.update()
+        self.assertFalse(theme_changes)
+        with patch.object(transcript, "count", wraps=transcript.count) as count:
+            desktop._layout_changed()
+            count.assert_not_called()
+        for fraction in (0.2, 0.8, 0.4, 0.0):
+            transcript.yview_moveto(fraction)
+            root.update()
+            self.assertIs(backdrop._gradient_image, image)
+            self.assertEqual(tuple(desktop._transcript_widgets), widgets)
+            self.assertLessEqual(sum(getattr(child, "_flux_gradient_layer", False)
+                                     for child in transcript.winfo_children()), 3)
+            transcript.paint_rows()
+            first = transcript.index("@0,0 display linestart")
+            info = transcript.dlineinfo(first)
+            y = max(0, min(backdrop.gradient_bitmap.height - 1, transcript.winfo_y() + info[1] + info[3] // 2))
+            expected_color = "#" + "".join(f"{channel:02x}" for channel in backdrop.gradient_bitmap.getpixel((0, y)))
+            self.assertTrue(any(transcript.tag_cget(tag, "background") == expected_color
+                                for tag in transcript.tag_names(first) if tag in transcript.gradient_tags))
+            self.assertEqual(transcript.winfo_height(), reading_height)
+        transcript.tag_add(tk.SEL, "1.0", "1.4")
+        root.update()
+        self.assertTrue(transcript.tag_ranges(tk.SEL))
+        for width, height in ((900, 650), (1200, 850), (1000, 720)):
+            root.geometry(f"{width}x{height}")
+            view.turns["first"]["events"][0]["content"] += "\n\nNew paragraph."
+            desktop._render_conversation()
+            root.update()
+            top = transcript.winfo_y()
+            bottom = top + transcript.winfo_height()
+            self.assertLessEqual(backdrop.bbox("gradient")[3], top + 1)
+            self.assertGreaterEqual(backdrop.footer.winfo_y() + backdrop.footer.bbox("gradient_bottom")[1], bottom - 1)
+            self.assertNotEqual(backdrop.gradient_bitmap.getpixel((0, top)),
+                                backdrop.gradient_bitmap.getpixel((0, bottom - 1)))
+            last = transcript.dlineinfo("end-1c")
+            if last and transcript.empty_surface.winfo_manager():
+                terminal_blank = transcript.get("end-2c", "end-1c") == "\n"
+                self.assertEqual(int(transcript.empty_surface.place_info()["y"]),
+                                 last[1] if terminal_blank else last[1] + last[3])
+        desktop._zoom_requested = 125
+        desktop._apply_zoom()
+        root.update()
+        self.assertTrue(transcript.gradient_tags)
+
+    def test_welcome_composition_fits_narrow_and_short_panes(self) -> None:
+        """Keep the heading, captions, and visible draft actions within the welcome surface."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        self.addCleanup(destroy_fixture_root, root)
+        for width, height in ((640, 480), (360, 480), (640, 220)):
+            with self.subTest(width=width, height=height):
+                root.geometry(f"{width}x{height}")
+                surface = ChatSurface(root, MagicMock())
+                surface.pack(fill=tk.BOTH, expand=True)
+                root.update()
+                surface.redraw()
+                for item in surface.find_all():
+                    if surface.type(item) not in ("text", "window"):
+                        continue
+                    left, top, right, bottom = surface.bbox(item)
+                    self.assertGreaterEqual(left, 0)
+                    self.assertGreaterEqual(top, 0)
+                    self.assertLessEqual(right, width)
+                    self.assertLessEqual(bottom, height)
+                surface.destroy()
+
     def test_viewport_accepts_scalar_and_tuple_tk_pixel_counts(self) -> None:
         """Handle Tkinter's scalar update counts as well as tuple and empty counts."""
         desktop = FluxDesktop.__new__(FluxDesktop)
@@ -787,6 +1100,7 @@ class DesktopWidgetTests(unittest.TestCase):
         desktop._select_conversation({"conversation_id": "one"})
         desktop.views["one"].recover([])
         desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 1, "type": "turn_started"})
+        bubble = desktop._transcript_widgets[0]
         for sequence, text in enumerate(("First ", "second ", "third."), start=2):
             event = {"conversation_id": "one", "turn_id": "turn", "sequence": sequence, "type": "assistant_text", "text": text}
             desktop._ui_callbacks.put(lambda event=event: desktop._turn_event("one", event))
@@ -794,6 +1108,7 @@ class DesktopWidgetTests(unittest.TestCase):
             desktop._drain_ui_callbacks()
             render.assert_called_once()
         self.assertIn("First second third.", desktop.transcript.get("1.0", tk.END))
+        self.assertIs(desktop._transcript_widgets[0], bubble)
 
     """Check native widgets and selected-view routing when Tk is available."""
 
@@ -1032,11 +1347,28 @@ class DesktopWidgetTests(unittest.TestCase):
         desktop._select_conversation({"conversation_id": "one"})
         self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "New unsent draft")
         desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 1, "type": "turn_started"})
+        with patch.object(desktop.transcript, "update_idletasks") as flush:
+            bubble = desktop._transcript_widgets[0]
+            desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 2,
+                                       "type": "assistant_text", "text": "A streamed response."})
+            flush.assert_not_called()
+        self.assertIs(desktop._transcript_widgets[0], bubble)
+        self.assertTrue(any(hasattr(widget, "_flux_mark_size") for widget in desktop._transcript_widgets))
+        self.assertFalse(any(isinstance(widget, ttk.Frame) and any(
+            isinstance(child, ttk.Button) and "Working" in str(child.cget("text"))
+            for child in widget.winfo_children()) for widget in desktop._transcript_widgets))
         desktop.views["one"].expanded_working.add("turn")
-        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 2, "type": "tool_result", "name": "read_file",
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 3, "type": "tool_result", "name": "read_file",
                                    "result": {"ok": True, "complete": False, "next_line": 10, "content": "hidden-private"}})
         self.assertIn("turn", desktop.views["one"].expanded_working)
         self.assertNotIn("hidden-private", desktop.transcript.get("1.0", tk.END))
+        working = next(widget for widget in desktop._transcript_widgets if isinstance(widget, ttk.Frame) and any(
+            isinstance(child, ttk.Button) and "Working" in str(child.cget("text"))
+            for child in widget.winfo_children()))
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 4,
+                                   "type": "assistant_text", "text": "More text after the tool."})
+        self.assertIn(working, desktop._transcript_widgets)
+        self.assertTrue(working.winfo_exists())
         desktop._send_key(None)
         self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "New unsent draft")
         desktop._newline_key(None)
