@@ -30,9 +30,10 @@ and starts a private loopback backend on an OS-assigned port. The shell lists an
 creates durable conversations and lets users select configured Ollama models and
 existing workspace directories. It reports backend and Ollama availability with
 retry guidance; users never need to open or configure a localhost page. Select a
-conversation, enter a message, and press Send or Ctrl+Enter to stream a turn.
-Permission decision controls remain a later GUI milestone; use `uv run flux`
-for workflows that require interactive approval.
+conversation, enter a message, and press the cyan arrow or Enter to stream a turn.
+Shift+Enter inserts a newline; Ctrl+Enter also sends.
+Temporary permission dialogs offer backend-advertised scoped decisions; unanswered,
+dismissed, expired, or interrupted requests deny access.
 
 The script uses Windows Package Manager (`winget`) to install Ollama and `uv` when
 needed, installs Python 3.12 and the dependencies pinned by `uv.lock`, and starts
@@ -702,7 +703,11 @@ before sharing them.
 | `src/harness_prototype/__main__.py` | Thin `python -m harness_prototype` adapter |
 | `src/harness_prototype/agent_loop.py` | Reusable conversation runtime, model streaming, context checks, tool exchanges, and recovery |
 | `src/harness_prototype/application_service.py` | Versioned loopback API, streamed turn events, permission coordination, and desktop-host lifecycle seam |
-| `src/harness_prototype/desktop.py` | Native Tk desktop shell, loopback API client, application navigation, and recoverable connection states |
+| `src/harness_prototype/desktop.py` | Native desktop shell, safe Markdown, sessions/drafts, API client, and recovery |
+| `src/harness_prototype/desktop_design.py` | Portable charcoal tokens, rounded components, mark, Markdown blocks, and contrast |
+| `src/harness_prototype/desktop_platform.py` | Windows frame, display geometry, system motion, and validated links |
+| `src/harness_prototype/assets/flux-mark.svg` | Portable vector FLUX mark |
+| `tests/desktop_fixtures.py` | Inert representative screens for visual review |
 | `src/harness_prototype/documentation.py` | HTTPS documentation retrieval, URL policy, bounds, and text extraction |
 | `src/harness_prototype/approval.py` | Tool risk categories, approval policies, decisions, and denial results |
 | `src/harness_prototype/loop_guard.py` | Turn-scoped repeated-call and consecutive-failure protection |
@@ -751,10 +756,65 @@ integration, and training are future work.
 
 ### Local application service
 
+The charcoal desktop has a collapsible/resizable sidebar of separate conversation
+cards, rounded user
+bubbles, Markdown responses, collapsible Working per turn, and a growing composer.
+Enter sends, Shift+Enter inserts a newline, and the cyan arrow becomes a stop square
+during work. Hovering or focusing the control identifies its action.
+Drafting remains available during turns; no message is queued. Code offers Copy
+and bounded Show more; scrolling up preserves reading position with Jump to latest.
+Each selected chat has a slim rounded scrollbar; wheel input over bubbles scrolls
+the same conversation. Completed turn widgets remain stable while a changed tail
+is rendered, and queued streaming events share one repaint per UI callback batch.
+Resizing reflows embedded text in place rather than deleting and rebuilding it.
+Offscreen text reflows when it enters view; rounded paint assets avoid tiny image
+tiles, and Windows limits native hooks and redundant full-client repainting.
+The sidebar opens/closes with a brief ease-out transition unless reduced motion is
+enabled. Its content stays at a fixed width while sliding.
+Automatic collapse/reopening uses separate width thresholds to prevent oscillation
+during resizing; automatic adjustments skip animation.
+A distinct blue-charcoal titlebar and matching left rail separate window controls
+from chat, and the compact search field shows an inline magnifier/placeholder when
+empty and unfocused.
+The sidebar toggle stays in a visible left rail when navigation is closed. The
+composer has an empty-state hint, and assistant responses use a small geometric
+mark. Controls and prose share Segoe UI, with monospace reserved for code.
+Model choices use rounded inline options and the same hover treatment as
+Workspace and Skills, with a muted rounded chevron at the trailing edge.
+Ctrl+scroll, Ctrl+plus (or Ctrl+equals), and Ctrl+minus zoom the entire interface
+from 75% to 150%. Ctrl+0 restores 100%. Zoom scales fonts, controls, icons, and
+spacing without clearing the conversation or draft, and survives restart.
+The larger send arrow uses a tighter control, the search magnifier is a drawn
+icon, and the live hamburger hint names the Side Panel. Windows maximize hover
+uses the same control state as the neighboring window buttons.
+
+Sessions support deterministic first-prompt titles, rename, pin, archive, and confirmed
+permanent deletion. Pinned groups precede recent sessions, ordered by message activity.
+Each card has a pin control and an inline three-dot dropdown for rename, archive/unarchive,
+and confirmed deletion, bound to that card even when another conversation is open.
+Archived sessions have a separate view and must be unarchived before sending. Search
+includes archived titles and submitted/displayed messages, with short snippets and
+archive labels; drafts and tool payloads are excluded. Queries are capped at 200
+characters. Navigation refreshes after submission/completion; activity changes during
+paging may require a refresh. Archive/deletion require idle sessions atomically.
+
+Drafts are separate per-session state with a 16,000-character persistence bound.
+Text size, reduced motion, sidebar layout, and usable window geometry survive restart.
+The minimum window is approximately 900 × 600; native Windows tracking can add frame
+extents. Sidebar auto-collapse accounts for Tk scaling (1040 pixels at 100%).
+Permissions are serialized without extending backend deadlines, with badges/notices
+for other sessions. Closing active work offers Keep working or Stop work and exit.
+A draft/settings save failure keeps the window available for recovery.
+
+The toolkit rationale, shared states/contrast targets, platform boundary, and fixture
+review matrix are in [docs/FLUX_DESIGN.md](docs/FLUX_DESIGN.md), with captured examples
+and verification limits in [docs/FLUX_VISUAL_REVIEW.md](docs/FLUX_VISUAL_REVIEW.md). Manual GUI checks and
+live Ollama evaluations require separate authorization.
+
 The desktop stack is Python's standard-library Tk/ttk toolkit over the existing
 loopback HTTP service. It keeps the prototype to one language and installed
 package, creates a real application window rather than a browser-hosted UI, and
-does not add a web runtime or duplicate backend behavior. Components use ttk,
+does not add a web runtime or duplicate backend behavior. Components use shared rounded ttk image elements and charcoal tokens,
 application state stays on the Tk thread, and all backend I/O runs on short-lived
 worker threads before results are marshalled back with `after`. The frontend owns
 only presentation state; conversations, selections, tools, model calls, and
@@ -814,8 +874,8 @@ is offered; request a smaller operation to review every target.
 Tk is available with the supported Windows Python installation. For a distributable
 Windows build, package the `harness_prototype.desktop:desktop_main` GUI entry point
 with a Python freezer and include Tcl/Tk; installer production is intentionally
-outside this prototype issue. The same module and backend contract have no
-Windows-only calls. A later macOS build can use a framework-enabled Python/Tk
+outside this prototype issue. Shared components and the backend have no Windows-only calls; custom frame and
+display integration are isolated in `desktop_platform.py`. A later macOS build can use a framework-enabled Python/Tk
 distribution and a macOS application bundle while retaining the API client and
 desktop components. This documents a packaging path, not current macOS support or
 testing. Platform-specific launch, bundle, and signing behavior belongs in a thin
@@ -836,16 +896,17 @@ The version-one HTTP operations are:
 | `GET /v1/health` | Report listener readiness and actionable Ollama availability. |
 | `GET /v1/capabilities` | List configured models, backend tools, operations, events, and request limits. |
 | `POST /v1/conversations` | Create a durable conversation with optional `model` and `workspace` strings. |
-| `GET /v1/conversations?limit=50&after={id}` | List conversations newest-first with a stable cursor and a 1–100 item bound. |
+| `GET /v1/conversations?limit=50&after={id}&archived=false&search={text}` | List pinned groups by message activity with a 1–100 item bound. Search includes archives regardless of that filter; omitted archive filter includes both views. |
 | `GET /v1/conversations/{id}` | Read the selected model and workspace. |
 | `GET /v1/conversations/{id}/history?limit=50&after={sequence}` | Read persisted turn outcomes and ordered tool events with stable append-only paging. |
-| `PATCH /v1/conversations/{id}` | Rename with `title`, or select one configured `model` or existing `workspace`; selection changes reset conversation context. |
+| `PATCH /v1/conversations/{id}` | Change one `title`, boolean `pinned`/`archived`, bounded `draft`, configured `model`, or existing `workspace`. Archive requires idleness; model/workspace changes reset context after GUI confirmation. |
 | `DELETE /v1/conversations/{id}` | Delete conversation records only; workspace files and interaction logs are retained. |
 | `POST /v1/conversations/{id}/turns` | Submit one nonempty `message` and receive an NDJSON event stream. Concurrent turns return `conversation_busy`. |
 | `POST /v1/conversations/{id}/turns/{turn_id}/cancel` | Cooperatively cancel only the matching active turn. |
 | `POST /v1/permissions/{id}` | Resolve a pending request with one of the choices advertised in its event. |
 | `GET /v1/grants`, `DELETE /v1/grants/{id}` | Inspect durable grants or revoke one exact grant. |
 | `GET /v1/settings`, `PATCH /v1/settings` | Read or save `default_model` and credential-free `backend_host` preferences. |
+| `GET /v1/presentation`, `PATCH /v1/presentation` | Read or merge validated `text_size`, `zoom_percent` (75, 90, 100, 110, 125, 150), `reduced_motion`, `sidebar_width`, `sidebar_collapsed`, and `window` preferences. |
 | `GET /v1/skills?workspace={path}` | Discover bounded installed skill metadata, diagnostics, loading limits, and saved workspace defaults. |
 | `PATCH /v1/skill-preferences` | Validate and persist `workspace` and an `active_skills` ID list as defaults for future conversations. |
 | `GET /v1/conversations/{id}/skills` | Inspect the conversation's catalog, active IDs, saved provenance, and restoration failures. |
@@ -861,7 +922,7 @@ Every event carries `api_version`, stable `conversation_id` and `turn_id`, and a
 monotonic per-turn `sequence`. Event types are `turn_started`, `assistant_text`,
 `tool_call`, `tool_result`, `permission_request`, `permission_receipt`, `permission_grant`, `failure`, `interruption`, and
 `completion`. Tool calls and results share a stable `tool_call_id`; permission
-requests have a stable `permission_request_id` and omit raw tool arguments. A
+requests have a stable `permission_request_id`, absolute `expires_at` deadline, and omit raw tool arguments. A
 disconnected stream requests cooperative cancellation, while completed tool
 outcomes retain the runtime's recovery behavior. Bodies are UTF-8 JSON objects
 capped at 64 KiB. Unanswered permissions deny after five minutes. Protocol failures use
