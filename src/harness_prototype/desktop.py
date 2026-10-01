@@ -562,9 +562,11 @@ class SkillPanel(CommandPalette):
     def __init__(
         self, parent: ttk.Frame, catalog: dict[str, Any],
         activate: Callable[[list[str]], None], close: Callable[[], None],
+        max_height: int | None = None,
     ) -> None:
         """Pair each skill's name and description with a colored status button."""
         self.activate = activate
+        self.max_height = max_height
         self.selected = set(catalog.get("active_skills", []))
         self.entries = list(catalog.get("skills", []))
         known = {item["id"] for item in self.entries}
@@ -575,12 +577,17 @@ class SkillPanel(CommandPalette):
         super().__init__(parent, self.choose_option)
         self.frame = self
         labels = [widget for widget in self.winfo_children() if isinstance(widget, ttk.Label)]
-        labels[0].configure(text="Skills", padding=(0, 4))
-        labels[0].pack_configure(pady=(4, 12))
+        labels[0].destroy()
+        heading = ttk.Frame(self, style="Titlebar.TFrame")
+        heading.pack(before=self.canvas, fill=tk.X, pady=(0, 8))
+        ttk.Label(heading, text="Skills", style="Titlebar.Title.TLabel").pack(side=tk.LEFT, padx=12)
+        self.close_button = ttk.Button(heading, text=CAPTION_GLYPHS["close"], width=0,
+                                       style="Close.Caption.TButton", command=close)
+        self.close_button.pack(side=tk.RIGHT)
+        self.close_button.bind("<Escape>", lambda _event: close())
+        ContextHint(self.close_button, "Close skills")
         self.footer_label = labels[1]
         self.footer_label.configure(text="↑ ↓ Browse    Space / Enter Toggle    Esc Dismiss")
-        self.close_button = ttk.Button(self, text="×", width=3, style="Inset.TButton", command=close)
-        self.close_button.place(relx=1, x=-10, y=4, anchor="ne")
         self.notice = tk.StringVar(value=(catalog.get("skill_error") or {}).get("error", ""))
         self.notice_label = ttk.Label(self, textvariable=self.notice, style="Surface.TLabel", wraplength=480)
         self.notice.trace_add("write", self._show_notice)
@@ -601,7 +608,8 @@ class SkillPanel(CommandPalette):
             button.bind("<Escape>", lambda _event: close())
             button.bind("<MouseWheel>", self._wheel)
             self.buttons.append(button)
-        self.canvas.configure(takefocus=True, width=500)
+        self.canvas.pack_configure(expand=False)
+        self.canvas.configure(takefocus=True, width=620)
         self.canvas.bind("<Up>", lambda _event: self.move(-1))
         self.canvas.bind("<Down>", lambda _event: self.move(1))
         self.canvas.bind("<Return>", lambda _event: self.choose_option())
@@ -620,6 +628,10 @@ class SkillPanel(CommandPalette):
     def redraw(self) -> None:
         """Reuse rounded command rows and bound descriptions to two readable lines."""
         super().redraw()
+        height = min(len(self.choices), 5) * self.row_height or self.row_height
+        if self.max_height is not None:
+            height = min(height, self.max_height)
+        self.canvas.configure(height=height)
         text_items = [item for item in self.canvas.find_all() if self.canvas.type(item) == "text"]
         width = max(120, self.canvas.winfo_width())
         self.footer_label.configure(wraplength=max(80, width - 16))
@@ -2444,10 +2456,11 @@ class FluxDesktop:
             self._render_skills()
             self._skill_panel = SkillPanel(self._skill_container, catalog,
                                           lambda identifiers: self.activate_skills(conversation_id, identifiers),
-                                          self.close_skills)
+                                          self.close_skills,
+                                          max_height=max(80, self.transcript.winfo_height() - 110))
             self._skill_panel.frame.grid(row=0, column=0, sticky="nsew")
             self._skill_container.place(in_=self.transcript, relx=0.5, rely=1, anchor="s",
-                                        width=min(560, max(240, self.transcript.winfo_width() - 24)))
+                                        width=min(640, max(240, self.transcript.winfo_width() - 24)))
             self._skill_container.lift()
             self.jump_button.grid_remove()
             self._skill_panel.move(focused_index)

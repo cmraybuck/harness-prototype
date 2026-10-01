@@ -383,9 +383,9 @@ opens a compact menu styled like the slash-command suggestions: rounded rows
 show only a skill's name, a description of up to two lines, and a clickable
 **INACTIVE** (palette red) or **ACTIVE** (palette green) status button. Up/Down
 browses rows; Space or Enter toggles the focused skill. Longer lists scroll with
-the mouse wheel without a scrollbar, and the menu shows at most four rows.
+the mouse wheel without a scrollbar, and the menu shows at most five rows, within the available conversation height.
 Unavailable skills cannot be enabled; saved missing skills can still be disabled.
-The **×** control or Escape closes the menu and restores composer focus.
+The standard window close icon or Escape closes the menu and restores composer focus.
 Active IDs remain visible beside the composer.
 
 Activation is atomic and retains conversation history and active capability

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
-from harness_prototype.desktop_design import COLORS, CommandPalette
+from harness_prototype.desktop_design import CAPTION_GLYPHS, COLORS, CommandPalette
 from harness_prototype.desktop import (
     ConversationView, DecisionDialog, DecisionOptions, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
 )
@@ -510,14 +510,15 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         self.assertEqual(panel.canvas.cget("background"), COLORS["surface"])
         self.assertEqual(panel.buttons[0].cget("style"), "Selected.Skill.Danger.TButton")
         self.assertEqual(panel.buttons[0].cget("text"), "INACTIVE")
-        self.assertEqual(panel.close_button.cget("text"), "×")
+        self.assertEqual(panel.close_button.cget("text"), CAPTION_GLYPHS["close"])
+        self.assertEqual(panel.close_button.cget("style"), "Close.Caption.TButton")
         text = "\n".join(panel.canvas.itemcget(item, "text") for item in panel.canvas.find_all()
                          if panel.canvas.type(item) == "text")
         self.assertIn("Fixture", text)
         self.assertIn("Harmless fixture", text)
         self.assertNotIn("manifest", text.lower())
         self.assertNotIn("Format version", text)
-        self.assertLessEqual(panel.canvas.winfo_reqheight(), panel.row_height * 4)
+        self.assertLessEqual(panel.canvas.winfo_reqheight(), panel.row_height * 5)
         self.assertFalse(any(isinstance(widget, ttk.Scrollbar) for widget in panel.winfo_children()))
         panel.buttons[0].invoke()
         activate.assert_called_once_with(["fixture.valid"])
@@ -541,7 +542,7 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         panel.destroy()
 
     def test_long_skill_descriptions_keep_menu_height_bounded(self) -> None:
-        """Keep large catalogs and descriptions within four compact visible rows."""
+        """Keep large catalogs and descriptions within five compact visible rows."""
         catalog = {"skills": [{"id": str(index), "name": "Skill", "available": True,
                                "description": "A long readable description. " * 100}
                               for index in range(8)]}
@@ -554,9 +555,28 @@ class DynamicSkillWidgetTests(unittest.TestCase):
                         if panel.canvas.type(item) == "text"][1::2]
         self.assertTrue(all(len(text.splitlines()) <= 2 for text in descriptions))
         self.assertTrue(all(text.endswith("…") for text in descriptions))
-        self.assertEqual(panel.canvas.winfo_reqheight(), panel.row_height * 4)
+        self.assertEqual(panel.canvas.winfo_reqheight(), panel.row_height * 5)
         panel.move(7)
         self.assertEqual(panel.index, 7)
+        self.assertGreater(panel.canvas.yview()[0], 0)
+        panel.destroy()
+
+    def test_skill_menu_respects_available_height_and_caption_hover(self) -> None:
+        """Keep a larger catalog within a short chat and reuse the app caption states."""
+        catalog = {"skills": [{"id": str(index), "name": "Skill", "available": True,
+                               "description": "A concise description."} for index in range(8)]}
+        panel = SkillPanel(self.root, catalog, MagicMock(), MagicMock(), max_height=160)
+        self.root.geometry("800x600")
+        panel.place(x=0, y=0, width=640)
+        self.root.update()
+        self.assertEqual(panel.canvas.winfo_height(), 160)
+        self.assertLessEqual(panel.winfo_reqheight(), 270)
+        self.assertEqual(panel.close_button.cget("style"), "Close.Caption.TButton")
+        panel.close_button.state(["active"])
+        self.assertEqual(ttk.Style(self.root).lookup("Close.Caption.TButton", "foreground", ("active",)),
+                         "#ffffff")
+        panel.move(7)
+        self.root.update()
         self.assertGreater(panel.canvas.yview()[0], 0)
         panel.destroy()
 
@@ -564,7 +584,7 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         """Keep buttons and text inside their rounded rows across app font sizes."""
         self.root.geometry("800x600")
         for size in ("small", "default", "large"):
-            for width in (360, 560):
+            for width in (360, 640):
                 with self.subTest(size=size, width=width):
                     self.desktop.theme.set_text_size(size)
                     panel = SkillPanel(self.root, self.catalog, MagicMock(), MagicMock())
