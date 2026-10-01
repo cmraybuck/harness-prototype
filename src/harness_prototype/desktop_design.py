@@ -50,6 +50,14 @@ class FluxTheme:
         self.style.configure(".", background=COLORS["canvas"], foreground=COLORS["text"],
                              font=(FONT_FAMILY, 11), borderwidth=0)
         self.style.configure("TFrame", background=COLORS["canvas"])
+        # Preserve the draggable divider without the inherited theme's dotted grip.
+        sash_size = max(4, round(6 * self.scale))
+        sash = ImageTk.PhotoImage(Image.new("RGB", (sash_size, sash_size), COLORS["canvas"]), master=root)
+        self.images.append(sash)
+        if "Flux.sash" not in self.style.element_names():
+            self.style.element_create("Flux.sash", "image", sash, sticky="nsew")
+        self.style.layout("Horizontal.Sash", [("Flux.sash", {"sticky": "nsew"})])
+
         self.style.configure("Sidebar.TFrame", background=COLORS["sidebar"])
         self.style.configure("Sidebar.TLabel", background=COLORS["sidebar"], foreground=COLORS["muted"])
         self.style.configure("TLabel", background=COLORS["canvas"])
@@ -62,6 +70,8 @@ class FluxTheme:
         self.style.configure("Surface.TFrame", background=COLORS["surface"])
         self.style.configure("Inset.TFrame", background=COLORS["surface"])
         self.style.configure("Surface.TLabel", background=COLORS["surface"], foreground=COLORS["muted"])
+        self.style.configure("Surface.Title.TLabel", background=COLORS["surface"], foreground=COLORS["text"],
+                             font=(FONT_FAMILY, 15, "bold"))
         self._rounded("Flux.button", COLORS["surface"], RADII["control"], interactive=True)
         self.style.layout("TButton", [("Flux.button", {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
@@ -77,6 +87,12 @@ class FluxTheme:
         self.style.layout("Selected.Dropdown.Inset.TButton", [("Flux.dropdownselected", {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
         self.style.configure("Selected.Dropdown.Inset.TButton", foreground=COLORS["accent"])
+        for role, color in (("Success", COLORS["success"]), ("Neutral", COLORS["text"]), ("Danger", COLORS["failure"])):
+            self.style.configure(role + ".Inset.TButton", foreground=color)
+            selected = "Selected." + role + ".Inset.TButton"
+            self.style.layout(selected, self.style.layout("Selected.Dropdown.Inset.TButton"))
+            self.style.configure(selected, foreground=color)
+
         for prefix, hover, pressed in (("Caption", COLORS["hover"], COLORS["selected"]),
                                         ("Close.Caption", "#c42b1c", "#a52317")):
             assets = []
@@ -188,13 +204,23 @@ class FluxTheme:
         self.style.configure(".", font=(FONT_FAMILY, points))
         self.style.configure("TButton", font=(FONT_FAMILY, points, "bold"))
         self.style.configure("Title.TLabel", font=(FONT_FAMILY, round((TEXT_SIZES.get(size, 11) + 4) * zoom), "bold"))
+        self.style.configure("Surface.Title.TLabel", font=(FONT_FAMILY, round((TEXT_SIZES.get(size, 11) + 4) * zoom), "bold"))
 
 
 def draw_mark(canvas: tk.Canvas, size: int = 32) -> None:
-    """Draw an interlocking geometric current using the portable SVG's paths."""
-    ratio = size / 32
+    """Render a supersampled FLUX mark and retain its image for crisp scaled edges."""
+    supersampling = 4
+    image = Image.new("RGBA", (size * supersampling, size * supersampling), canvas.cget("background"))
+    draw = ImageDraw.Draw(image)
+    ratio = size * supersampling / 32
     for points, color in MARK_PATHS:
-        canvas.create_polygon(*(point * ratio for point in points), fill=color, outline="")
+        vertices = [(points[index] * ratio, points[index + 1] * ratio) for index in range(0, len(points), 2)]
+        draw.polygon(vertices, fill=color)
+    asset = ImageTk.PhotoImage(image.resize((size, size), Image.Resampling.LANCZOS), master=canvas)
+    canvas.delete("all")
+    canvas.create_image(0, 0, image=asset, anchor="nw")
+    canvas._flux_mark_image = asset
+    canvas._flux_mark_size = size
 
 
 def set_application_icon(root: tk.Tk) -> None:
@@ -650,7 +676,7 @@ class DialogBody:
         outer.pack(fill=tk.BOTH, expand=True)
         self.canvas = tk.Canvas(outer, width=680, height=480, background=COLORS["canvas"], highlightthickness=0)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(outer, command=self.canvas.yview)
+        scrollbar = ttk.Scrollbar(outer, style="Chat.Vertical.TScrollbar", command=self.canvas.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.configure(yscrollcommand=scrollbar.set)
         self.frame = ttk.Frame(self.canvas, padding=20)

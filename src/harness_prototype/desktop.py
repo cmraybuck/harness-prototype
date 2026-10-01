@@ -409,7 +409,7 @@ class InlineDecision(ttk.Frame):
         super().__init__(root, style="Surface.TFrame", padding=8)
         self.previous_focus = root.focus_get()
         parent = getattr(root, "_flux_decision_parent", root)
-        self.place(in_=parent, relx=0.5, rely=0.5, anchor="center", relwidth=0.94, relheight=0.9)
+        self.place(in_=parent, relx=0.5, rely=0.5, anchor="center")
         self.lift()
 
     def activate(self) -> None:
@@ -428,6 +428,44 @@ class InlineDecision(ttk.Frame):
             self.previous_focus.focus_set()
 
 
+class DecisionOptions(ttk.Frame):
+    """Offer compact rounded actions with a shared keyboard selection state."""
+
+    def __init__(
+        self, parent: tk.Misc, labels: list[str], confirm: Callable[[], str],
+        roles: list[str] | None = None,
+    ) -> None:
+        """Build themed actions that mouse and keyboard users can both confirm."""
+        super().__init__(parent, style="Inset.TFrame", takefocus=True)
+        self.selected = 0
+        self.roles = roles if roles is not None else ["Success"] * len(labels)
+        self.buttons: list[ttk.Button] = []
+        for index, label in enumerate(labels):
+            button = ttk.Button(self, text=label, command=lambda index=index: self._confirm(index, confirm))
+            button.pack(fill=tk.X, pady=2)
+            self.buttons.append(button)
+        self.selection_set(0)
+
+    def _confirm(self, index: int, confirm: Callable[[], str]) -> str:
+        """Select the clicked action before delivering the shared confirmation."""
+        self.selection_set(index)
+        return confirm()
+
+    def curselection(self) -> tuple[int]:
+        """Expose the current selection to the decision's keyboard seam."""
+        return (self.selected,)
+
+    def selection_set(self, index: int) -> None:
+        """Highlight selection while preserving each action's semantic text color."""
+        self.selected = index
+        for position, button in enumerate(self.buttons):
+            role = self.roles[position]
+            if position != index and role == "Success":
+                role = "Neutral"
+            prefix = "Selected." if position == index else ""
+            button.configure(style=prefix + role + ".Inset.TButton")
+
+
 class PermissionView:
     """Present a temporary redacted decision without changing the transcript."""
 
@@ -444,13 +482,16 @@ class PermissionView:
         if "deny" not in self.choices:
             self.choices.append("deny")
         self.window = InlineDecision(root)
-        heading = ttk.Frame(self.window, padding=(20, 12))
+        heading = ttk.Frame(self.window, style="Inset.TFrame", padding=(12, 8))
         heading.pack(side=tk.TOP, fill=tk.X)
-        ttk.Button(heading, text="Deny and close", command=lambda: self.confirm("deny")).pack(side=tk.RIGHT, padx=(8, 0))
-        ttk.Label(heading, text="Session · " + str(event.get("session_title", "Current session")), style="Title.TLabel", wraplength=560).pack(anchor="w")
-        footer = ttk.Frame(self.window, padding=(16, 8))
+        ttk.Button(heading, text="Deny and close", style="Inset.TButton", command=lambda: self.confirm("deny")).pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Label(heading, text="Session · " + str(event.get("session_title", "Current session")), style="Surface.TLabel", wraplength=440).pack(anchor="w")
+        footer = ttk.Frame(self.window, style="Inset.TFrame", padding=(12, 8))
         footer.pack(side=tk.BOTTOM, fill=tk.X)
         self.body = DialogBody(self.window)
+        self.body.canvas.master.configure(style="Inset.TFrame")
+        self.body.canvas.configure(width=480, height=150, background=COLORS["surface"])
+        self.body.frame.configure(style="Inset.TFrame", padding=12)
         frame = self.body.frame
         summary = "\n".join(f"{label}: {str(event.get(key, fallback))[:DISPLAY_TEXT_LIMIT]}" for label, key, fallback in (
             ("Operation", "operation", event.get("tool_name", "Access directory")),
@@ -458,32 +499,26 @@ class PermissionView:
             ("Workspace", "workspace", "Current workspace"),
             ("Request", "summary", "Directory access includes its subtree."),
         ))
-        review = ttk.Frame(frame)
+        review = ttk.Frame(frame, style="Inset.TFrame")
         review.pack(fill=tk.BOTH, expand=True)
-        summary_text = tk.Text(review, width=70, height=5, wrap="word", background=COLORS["surface"], foreground=COLORS["accent"], font="TkDefaultFont", highlightthickness=0)
+        summary_text = tk.Text(review, width=46, height=6, wrap="word", background=COLORS["surface"], foreground=COLORS["accent"], font="TkDefaultFont", highlightthickness=0)
         summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         summary_text.insert("1.0", summary)
         summary_text.configure(state="disabled")
-        scrollbar = ttk.Scrollbar(review, command=summary_text.yview)
+        scrollbar = ttk.Scrollbar(review, style="Chat.Vertical.TScrollbar", command=summary_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         summary_text.configure(yscrollcommand=scrollbar.set)
         if oversized:
             ttk.Label(frame, text="Scope exceeds the review limit. Deny and request a smaller operation.").pack(anchor="w")
-        self.options = tk.Listbox(footer, width=70, height=len(self.choices), exportselection=False,
-                                  background=COLORS["surface"], foreground=COLORS["text"], font="TkDefaultFont",
-                                  selectforeground=COLORS["text"], selectbackground=COLORS["selected"])
-        self.options.pack(fill=tk.X, pady=12)
-        for choice in self.choices:
-            self.options.insert(tk.END, PERMISSION_CHOICES[choice])
+        self.options = DecisionOptions(footer, [PERMISSION_CHOICES[choice] for choice in self.choices], self.choose_option)
+        self.options.pack(fill=tk.X, pady=(0, 6))
         self.options.selection_set(0)
-        self.options.activate(0)
-        self.options.bind("<Up>", lambda _event: self.move(-1))
-        self.options.bind("<Down>", lambda _event: self.move(1))
+        self.window.bind("<Up>", lambda _event: self.move(-1))
+        self.window.bind("<Down>", lambda _event: self.move(1))
         self.window.bind("<Return>", lambda _event: self.choose_option())
         self.window.bind("<space>", lambda _event: self.choose_option())
         self.window.bind("<Escape>", lambda _event: self.confirm("deny"))
-        ttk.Label(footer, text="Up/Down to select · Space or Enter to confirm · Escape to deny", wraplength=600).pack()
-        ttk.Button(footer, text="Confirm selection", command=self.choose_option).pack(pady=8)
+        ttk.Label(footer, text="Up/Down to select · Space or Enter to confirm · Escape to deny", style="Surface.TLabel", wraplength=440).pack(anchor="w")
         self.window.activate()
         self.options.focus_set()
 
@@ -491,9 +526,7 @@ class PermissionView:
         """Move the focused selection without approving it."""
         current = self.options.curselection()
         index = max(0, min(len(self.choices) - 1, (current[0] if current else 0) + step))
-        self.options.selection_clear(0, tk.END)
         self.options.selection_set(index)
-        self.options.activate(index)
         return "break"
 
     def choose_option(self) -> str:
@@ -838,6 +871,9 @@ class FluxDesktop:
             return
         self._presentation_ready = True
         self._presentation.update(values)
+        self._presentation["sidebar_collapsed"] = False
+        self._sidebar_auto_collapsed = False
+        self._sidebar_layout_width = None
         if values.get("zoom_percent", 100) != self._zoom_percent:
             self._zoom_requested = values["zoom_percent"]
             self._apply_zoom()
@@ -942,7 +978,10 @@ class FluxDesktop:
                     getattr(widget, manager + "_configure")(**spacing)
             if isinstance(widget, tk.Canvas):
                 ratio = percent / saved["percent"]
-                widget.scale("all", 0, 0, ratio, ratio)
+                if hasattr(widget, "_flux_mark_size"):
+                    draw_mark(widget, max(1, round(widget._flux_mark_size * ratio)))
+                else:
+                    widget.scale("all", 0, 0, ratio, ratio)
             if isinstance(widget, (DropdownButton, SessionSearch)):
                 widget.refresh_icon()
             saved["percent"] = percent
@@ -952,7 +991,13 @@ class FluxDesktop:
     def _apply_sidebar(self, *, animate: bool = True) -> None:
         """Adapt constrained layouts without overwriting the user's sidebar preference."""
         threshold = 1160 if getattr(self, "_sidebar_auto_collapsed", False) else 1040
-        self._sidebar_auto_collapsed = self.root.winfo_width() < threshold * self.theme.scale
+        width = self.root.winfo_width()
+        previous_width = getattr(self, "_sidebar_layout_width", None)
+        self._sidebar_layout_width = width
+        if previous_width is not None and (width < previous_width or getattr(self, "_sidebar_auto_collapsed", False)):
+            self._sidebar_auto_collapsed = width < threshold * self.theme.scale
+        else:
+            self._sidebar_auto_collapsed = False
         collapse = self._presentation["sidebar_collapsed"] or self._sidebar_auto_collapsed
         self._set_sidebar_open(not collapse, animate=animate)
 
@@ -1232,11 +1277,11 @@ class FluxDesktop:
     def _rename_session(self, owner: str, title: str) -> None:
         """Edit a deterministic session title without changing retained conversation context."""
         window = InlineDecision(self.root)
-        frame = ttk.Frame(window, padding=24)
+        frame = ttk.Frame(window, style="Inset.TFrame", padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text="Rename session", style="Title.TLabel", wraplength=560).pack(anchor="w", pady=(0, 12))
+        ttk.Label(frame, text="Rename session", style="Surface.Title.TLabel", wraplength=360).pack(anchor="w", pady=(0, 12))
         value = tk.StringVar(value=title)
-        entry = ttk.Entry(frame, textvariable=value, width=50)
+        entry = ttk.Entry(frame, textvariable=value, width=36)
         entry.pack(fill=tk.X)
         def save(_event: object = None) -> str:
             """Submit the captured title after ordinary nonempty validation."""
@@ -1245,7 +1290,8 @@ class FluxDesktop:
                 window.destroy()
                 self._change_session(owner, "title", text)
             return "break"
-        ttk.Button(frame, text="Save title", command=save).pack(anchor="e", pady=12)
+        ttk.Button(frame, text="Save title", style="Success.Inset.TButton", command=save).pack(anchor="e", pady=12)
+        ttk.Button(frame, text="Cancel", style="Inset.TButton", command=window.destroy).pack(anchor="e")
         window.bind("<Return>", save)
         window.bind("<Escape>", lambda _event: window.destroy())
         window.activate()
@@ -2433,21 +2479,21 @@ class DecisionDialog:
         self.window._flux_decision = self
         self.decide = decide
         self.choices = choices
-        frame = ttk.Frame(self.window, padding=24)
+        frame = ttk.Frame(self.window, style="Inset.TFrame", padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frame, text=title, style="Title.TLabel", wraplength=560).pack(anchor="w", pady=(0, 12))
-        ttk.Label(frame, text=summary, wraplength=480).pack(anchor="w")
-        self.options = tk.Listbox(frame, width=58, height=len(choices), exportselection=False)
-        self.options.pack(fill=tk.X, pady=16)
-        for label, _value in choices:
-            self.options.insert(tk.END, label)
+        ttk.Label(frame, text=title, style="Surface.Title.TLabel", wraplength=360).pack(anchor="w", pady=(0, 12))
+        ttk.Label(frame, text=summary, style="Surface.TLabel", wraplength=360).pack(anchor="w")
+        roles = None
+        if any(value == "delete" for _label, value in choices):
+            roles = ["Danger" if value == "delete" else "Neutral" for _label, value in choices]
+        self.options = DecisionOptions(frame, [label for label, _value in choices], self.choose_option, roles)
+        self.options.pack(fill=tk.X, pady=(12, 0))
         self.options.selection_set(0)
-        self.options.bind("<Up>", lambda _event: self.move(-1))
-        self.options.bind("<Down>", lambda _event: self.move(1))
+        self.window.bind("<Up>", lambda _event: self.move(-1))
+        self.window.bind("<Down>", lambda _event: self.move(1))
         self.window.bind("<space>", lambda _event: self.choose_option())
         self.window.bind("<Return>", lambda _event: self.choose_option())
         self.window.bind("<Escape>", lambda _event: self.window.destroy())
-        ttk.Button(frame, text="Confirm selection", command=self.choose_option).pack(anchor="e")
         self.window.activate()
         self.options.focus_set()
 
@@ -2455,9 +2501,7 @@ class DecisionDialog:
         """Move the selection without committing an action."""
         selection = self.options.curselection()
         index = max(0, min(len(self.choices) - 1, (selection[0] if selection else 0) + step))
-        self.options.selection_clear(0, tk.END)
         self.options.selection_set(index)
-        self.options.activate(index)
         return "break"
 
     def choose_option(self) -> str:

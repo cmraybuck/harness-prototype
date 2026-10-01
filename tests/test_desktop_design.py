@@ -8,12 +8,64 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from harness_prototype.desktop import ConversationView, FluxDesktop
-from harness_prototype.desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, ContextHint, DropdownButton, DropdownMenu, FluxTheme, SessionSearch, contrast_ratio, markdown_blocks, set_application_icon
+from harness_prototype.desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, ContextHint, DropdownButton, DropdownMenu, FluxTheme, SessionSearch, contrast_ratio, draw_mark, markdown_blocks, set_application_icon
 from harness_prototype.desktop_platform import WindowFrame, open_link, restored_geometry
 
 
 class DesktopDesignTests(unittest.TestCase):
     """Exercise visual contracts without a model or personal filesystem fixtures."""
+
+    @patch("harness_prototype.desktop_design.font.nametofont")
+    @patch("harness_prototype.desktop_design.ttk.Style")
+    @patch("harness_prototype.desktop_design.ImageTk.PhotoImage", side_effect=lambda image, **kwargs: image)
+    def test_popup_button_assets_match_surface_in_every_state(
+        self, _images: MagicMock, style_factory: MagicMock, _fonts: MagicMock,
+    ) -> None:
+        """Keep rounded corners surface colored and delete text red in both selections."""
+        root = MagicMock()
+        root._flux_zoom = 100
+        root.tk.call.return_value = 96 / 72
+        style = style_factory.return_value
+        style.theme_names.return_value = ()
+        style.element_names.return_value = ()
+        FluxTheme(root)
+        style.layout.assert_any_call("Horizontal.Sash", [("Flux.sash", {"sticky": "nsew"})])
+        sash_call = next(call for call in style.element_create.call_args_list if call.args[0] == "Flux.sash")
+        self.assertEqual(sash_call.args[2].getcolors(), [(36, (32, 36, 39))])
+        for element in ("Flux.insetbutton", "Flux.dropdownselected"):
+            call = next(call for call in style.element_create.call_args_list if call.args[0] == element)
+            images = [call.args[2], *(state[1] for state in call.args[3:])]
+            for image in images:
+                self.assertEqual(image.getpixel((0, 0))[:3], (45, 51, 56))
+        for prefix in ("", "Selected."):
+            style.configure.assert_any_call(prefix + "Danger.Inset.TButton", foreground=COLORS["failure"])
+            style.configure.assert_any_call(prefix + "Neutral.Inset.TButton", foreground=COLORS["text"])
+
+    @patch("harness_prototype.desktop_design.ImageTk.PhotoImage", side_effect=lambda image, **kwargs: image)
+    def test_mark_has_antialiased_edges_and_retains_its_image(self, _images: MagicMock) -> None:
+        """Render intermediate edge colors at the requested logo size without stale items."""
+        canvas = MagicMock()
+        canvas.cget.return_value = COLORS["canvas"]
+        draw_mark(canvas, 96)
+        image = canvas._flux_mark_image
+        self.assertEqual(image.size, (96, 96))
+        self.assertGreater(len(image.getcolors(maxcolors=96 * 96)), 3)
+        canvas.delete.assert_called_once_with("all")
+        canvas.create_image.assert_called_once_with(0, 0, image=image, anchor="nw")
+        self.assertEqual(canvas._flux_mark_size, 96)
+
+    def test_startup_restores_sidebar_open_even_with_saved_collapse(self) -> None:
+        """Keep startup navigation visible while restoring other saved presentation settings."""
+        desktop = FluxDesktop.__new__(FluxDesktop)
+        desktop._presentation = {"sidebar_collapsed": False}
+        desktop._zoom_percent = 100
+        desktop._apply_typography = MagicMock()
+        desktop._apply_sidebar = MagicMock()
+        desktop._presentation_loaded({"sidebar_collapsed": True, "sidebar_width": 300})
+        self.assertFalse(desktop._presentation["sidebar_collapsed"])
+        self.assertFalse(desktop._sidebar_auto_collapsed)
+        self.assertEqual(desktop._presentation["sidebar_width"], 300)
+        desktop._apply_sidebar.assert_called_once_with(animate=False)
 
     def test_application_icon_replaces_default_and_is_retained(self) -> None:
         """Supply multiple FLUX sizes and inherit the icon in later application windows."""
@@ -210,7 +262,7 @@ class DesktopDesignTests(unittest.TestCase):
         for _ in range(5):
             desktop._apply_sidebar(animate=False)
         self.assertEqual([call.args[0] for call in desktop._set_sidebar_open.call_args_list],
-                         [False, False, False, False, True])
+                         [True, True, False, False, True])
         self.assertFalse(desktop._presentation["sidebar_collapsed"])
 
     def test_unrelated_widget_geometry_does_not_query_caption_children(self) -> None:

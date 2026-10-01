@@ -32,6 +32,11 @@ existing workspace directories. It reports backend and Ollama availability with
 retry guidance; users never need to open or configure a localhost page. Select a
 conversation, enter a message, and press the cyan arrow or Enter to stream a turn.
 Shift+Enter inserts a newline; Ctrl+Enter also sends.
+Session actions and permissions use compact, content-sized charcoal cards with
+rounded action controls. Up/Down selects an action; Space or Enter confirms it,
+and clicking an action confirms directly. Escape cancels session actions or denies
+permission requests. Permission details use the chat's rounded scrollbar for longer
+scopes. Delete confirmations keep the destructive action red and the keep action white.
 Temporary permission dialogs offer backend-advertised scoped decisions; unanswered,
 dismissed, expired, or interrupted requests deny access.
 
@@ -780,9 +785,12 @@ is rendered, and queued streaming events share one repaint per UI callback batch
 Resizing reflows embedded text in place rather than deleting and rebuilding it.
 Offscreen text reflows when it enters view; rounded paint assets avoid tiny image
 tiles, and Windows limits native hooks and redundant full-client repainting.
+The sidebar starts open on each launch, with a plain draggable divider. The new
+session logo uses supersampling for smooth edges, including when zoom changes.
 The sidebar opens/closes with a brief ease-out transition unless reduced motion is
 enabled. Its content stays at a fixed width while sliding.
-Automatic collapse/reopening uses separate width thresholds to prevent oscillation
+Automatic collapse starts when narrowing the window; collapse/reopening uses
+separate width thresholds to prevent oscillation
 during resizing; automatic adjustments skip animation.
 A distinct blue-charcoal titlebar and matching left rail separate window controls
 from chat, and the compact search field shows an inline magnifier/placeholder when

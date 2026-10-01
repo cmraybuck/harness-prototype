@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
 from harness_prototype.desktop import (
-    ConversationView, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
+    ConversationView, DecisionDialog, DecisionOptions, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
 )
 
 
@@ -534,6 +534,29 @@ class DesktopWidgetTests(unittest.TestCase):
         self.assertEqual(str(desktop.send_button["state"]), "normal")
         self.assertEqual(str(desktop.cancel_button["state"]), "disabled")
 
+    def test_session_decision_is_compact_and_uses_themed_actions(self) -> None:
+        """Keep decisions content sized and confirm the selected rounded action."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.geometry("1000x700")
+        self.addCleanup(destroy_fixture_root, root)
+        decide = MagicMock()
+        dialog = DecisionDialog(root, "Delete session?", "The saved draft will be deleted.",
+                                [("Keep session", "keep"), ("Delete permanently", "delete")], decide)
+        root.update()
+        self.assertIsInstance(dialog.options, DecisionOptions)
+        self.assertLess(dialog.window.winfo_width(), 600)
+        self.assertLess(dialog.window.winfo_height(), 350)
+        self.assertEqual(dialog.options.buttons[0].cget("style"), "Selected.Neutral.Inset.TButton")
+        dialog.move(1)
+        self.assertEqual(dialog.options.buttons[0].cget("style"), "Neutral.Inset.TButton")
+        self.assertEqual(dialog.options.buttons[1].cget("style"), "Selected.Danger.Inset.TButton")
+        dialog.options.buttons[1].invoke()
+        decide.assert_called_once_with("delete")
+        self.assertFalse(dialog.window.winfo_exists())
+
     def test_permission_keyboard_default_redaction_and_dismissal(self) -> None:
         """Select the least broad grant and deny window dismissal without payload leaks."""
         try:
@@ -547,15 +570,23 @@ class DesktopWidgetTests(unittest.TestCase):
                  "choices": ["deny", "allow_durable", "allow_session", "allow_once"],
                  "arguments": {"content": "private-secret"}, "revision": "private-secret"}
         dialog = PermissionView(root, event, decide)
+        self.assertIsInstance(dialog.options, DecisionOptions)
         self.assertEqual(dialog.choices[dialog.options.curselection()[0]], "allow_once")
         labels = [widget.cget("text") for widget in dialog.options.master.winfo_children()
                   if widget.winfo_class() == "TLabel"]
         review = next(widget for widget in dialog.body.frame.winfo_children() if isinstance(widget, ttk.Frame))
         labels.append(next(widget for widget in review.winfo_children() if isinstance(widget, tk.Text)).get("1.0", tk.END))
+        self.assertEqual(dialog.options.buttons[0].cget("style"), "Selected.Success.Inset.TButton")
+        self.assertEqual(next(widget for widget in review.winfo_children() if isinstance(widget, ttk.Scrollbar)).cget("style"),
+                         "Chat.Vertical.TScrollbar")
+        self.assertEqual(next(widget for widget in dialog.body.canvas.master.winfo_children()
+                              if isinstance(widget, ttk.Scrollbar)).cget("style"), "Chat.Vertical.TScrollbar")
         self.assertNotIn("private-secret", "".join(labels))
         self.assertIn("file: sample.txt", "".join(labels))
         root.deiconify()
         root.update()
+        self.assertLess(dialog.window.winfo_height(), 600)
+        self.assertLess(dialog.window.winfo_width(), 700)
         dialog.options.focus_force()
         root.update()
         dialog.options.event_generate("<Down>")
@@ -605,6 +636,9 @@ class DesktopWidgetTests(unittest.TestCase):
         self.assertFalse(any(isinstance(child, tk.Toplevel) for child in root.winfo_children()))
         panel = next(child for child in root.winfo_children() if isinstance(child, ttk.Frame)
                      and child.winfo_manager() == "place")
+        root.update_idletasks()
+        self.assertLess(panel.winfo_reqheight(), 300)
+        self.assertLess(panel.winfo_reqwidth(), 600)
         frame = panel.winfo_children()[0]
         entry = next(child for child in frame.winfo_children() if isinstance(child, ttk.Entry))
         entry.delete(0, tk.END)
