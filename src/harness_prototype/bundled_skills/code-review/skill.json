@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "code-review",
+  "name": "Code review",
+  "description": "Review code or proposed changes for concrete bugs, regressions, and missing coverage.",
+  "instructions": "instructions.md",
+  "resources": [],
+  "requires": {
+    "capabilities": [],
+    "tools": []
+  }
+}

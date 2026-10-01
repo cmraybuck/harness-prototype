@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "documentation",
+  "name": "Documentation",
+  "description": "Create or improve READMEs, usage guides, API explanations, and handoff notes grounded in the project.",
+  "instructions": "instructions.md",
+  "resources": [],
+  "requires": {
+    "capabilities": [],
+    "tools": []
+  }
+}

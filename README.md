@@ -296,16 +296,29 @@ prefix is submitted to the model normally. The initial commands are:
 ## Local skills
 
 FLUX discovers reusable local skills when a runtime is created. It checks skills
-bundled inside the installed FLUX package first, including the opt-in `pirate`
-example, then the platform application-data directory
+bundled inside the installed FLUX package first, then the platform application-data directory
 (`%LOCALAPPDATA%\FLUX\skills` on Windows,
 `~/Library/Application Support/FLUX/skills` on macOS, or
 `${XDG_DATA_HOME:-~/.local/share}/flux/skills` elsewhere), then
 `.flux/skills` inside the active workspace. Discovery does not change the process
 working directory. Each immediate child is a skill directory containing
 `skill.json`; results and activation order are sorted by skill identifier.
-Run `/skill pirate` to activate the bundled example for the current conversation;
-run `/skill` to return to the normal voice.
+FLUX ships five opt-in skills:
+
+| ID | Purpose |
+| --- | --- |
+| `code-review` | Find concrete bugs, regressions, and missing coverage in code or changes. |
+| `debugging` | Trace reported failures or slow paths and develop evidence-based fixes. |
+| `implementation-plan` | Define scope, ordered implementation steps, and acceptance checks. |
+| `documentation` | Write or update project guides, API explanations, and handoff notes. |
+| `pirate` | Answer in a playful pirate voice while preserving technical accuracy. |
+
+Run `/skill code-review` to activate a skill for the current conversation, or
+`/skill debugging,documentation` to combine skills. Run `/skill` to clear the
+active set. Bundled skills have no activation requirements, so they can also
+work with code or notes supplied in chat. Repository inspection and edits still
+require the corresponding capabilities and tool permissions; these skills do
+not add tools or grant access.
 
 The version-one manifest is UTF-8 JSON:
 

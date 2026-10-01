@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "implementation-plan",
+  "name": "Implementation planning",
+  "description": "Turn a feature or change request into a practical plan with scope, dependencies, and acceptance checks.",
+  "instructions": "instructions.md",
+  "resources": [],
+  "requires": {
+    "capabilities": [],
+    "tools": []
+  }
+}

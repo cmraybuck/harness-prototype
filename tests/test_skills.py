@@ -154,6 +154,31 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(catalog.skills["pirate"].source, "bundled")
         self.assertIn("playful pirate voice", state.context())
 
+    def test_bundled_defaults_load_and_activate_without_requirements(self) -> None:
+        """Load all shipped workflows and keep activation explicit and isolated."""
+        catalog = discover_skills(self.workspace, self.application)
+        identifiers = {
+            "code-review", "debugging", "documentation", "implementation-plan", "pirate"
+        }
+        self.assertEqual(set(catalog.skills), identifiers)
+        self.assertEqual(catalog.diagnostics, ())
+        state = SkillState(catalog)
+        other = SkillState(catalog)
+        self.assertEqual(state.context(), "")
+
+        result = state.activate(sorted(identifiers), set(), set())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(state.active_ids, tuple(sorted(identifiers)))
+        for identifier in sorted(identifiers):
+            with self.subTest(identifier=identifier):
+                skill = catalog.skills[identifier]
+                self.assertEqual(skill.source, "bundled")
+                self.assertIn(skill.instructions, state.context())
+        self.assertEqual(other.context(), "")
+        self.assertTrue(state.activate([], set(), set())["ok"])
+        self.assertEqual(state.context(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

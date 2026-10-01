@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "id": "debugging",
+  "name": "Debugging",
+  "description": "Investigate errors, incorrect behavior, or slow paths and propose evidence-based fixes.",
+  "instructions": "instructions.md",
+  "resources": [],
+  "requires": {
+    "capabilities": [],
+    "tools": []
+  }
+}
