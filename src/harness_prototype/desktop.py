@@ -1649,9 +1649,9 @@ class FluxDesktop:
             if view.error:
                 blocks.append(((layout, "error", view.error), "error", None))
             for index, (command, output) in enumerate(view.command_results):
-                position = view.command_positions[index]
+                command_position = view.command_positions[index]
                 following = [offset for offset, block in enumerate(blocks) if block[1] == "turn"]
-                offset = following[position] if position < len(following) else len(blocks)
+                offset = following[command_position] if command_position < len(following) else len(blocks)
                 blocks.insert(offset, ((layout, "command", index, command, output, tuple(sorted(view.expanded_content))), "command", str(index)))
         common = 0
         while common < min(len(blocks), len(self._rendered_blocks)) and blocks[common][0] == self._rendered_blocks[common][0]:

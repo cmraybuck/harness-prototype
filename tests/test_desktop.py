@@ -451,6 +451,29 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         self.client.select_skills.assert_called_with("one", [], False)
         self.client.stream_turn.assert_not_called()
 
+    def test_skills_menu_preserves_conversation_scroll_on_repeated_open(self) -> None:
+        """Keep the reading position when skill results are appended and the menu closes."""
+        self.root.geometry("800x600")
+        view = self.desktop.views["one"]
+        for index in range(12):
+            view.turns[str(index)] = {"user_prompt": "Earlier conversation text " * 80,
+                                      "status": "success", "events": []}
+        self.desktop._render_conversation()
+        self.root.update()
+        for fraction in (0.35, 1.0):
+            self.desktop.transcript.yview_moveto(fraction)
+            self.root.update_idletasks()
+            position = self.desktop._viewport_pixels()
+            self.assertGreater(position, 100)
+            for _ in range(2):
+                self.desktop.send_turn("/skills")
+                self.tasks.call_args.args[1](self.catalog)
+                self.root.update()
+                self.assertAlmostEqual(self.desktop._viewport_pixels(), position, delta=1)
+                self.desktop.close_skills()
+                self.root.update()
+                self.assertAlmostEqual(self.desktop._viewport_pixels(), position, delta=1)
+
     def test_inline_keyboard_toggle_and_close_restore_focus(self) -> None:
         """Browse compact rows and toggle with Space without opening a popup."""
         self.desktop.send_turn("/skills")
