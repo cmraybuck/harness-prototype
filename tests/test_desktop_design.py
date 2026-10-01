@@ -1,5 +1,7 @@
 """Verify design contrast, Markdown, platform geometry, and inert link policies."""
 
+import ctypes
+from ctypes import wintypes
 from pathlib import Path
 import tempfile
 import unittest
@@ -382,6 +384,22 @@ class DesktopDesignTests(unittest.TestCase):
                 packed = (y & 0xffff) << 16 | (x & 0xffff)
                 self.assertEqual(frame._window_proc(1, 0x84, 0, packed), expected)
         self.assertEqual(frame.root.mock_calls, [])
+
+    def test_maximized_frame_uses_center_to_select_secondary_monitor(self) -> None:
+        """Ignore maximized resize margins that extend into a neighboring monitor."""
+        frame = WindowFrame.__new__(WindowFrame)
+        frame.user = MagicMock()
+        frame.user.IsZoomed.return_value = True
+        rectangle = wintypes.RECT(1912, -8, 3848, 1088)
+
+        def bounds(x: int, y: int) -> tuple[int, int, int, int]:
+            """Distinguish the secondary work area from the adjacent primary display."""
+            return (1920, 0, 3840, 1040) if x >= 1920 else (0, 0, 1920, 1040)
+
+        with patch("harness_prototype.desktop_platform.display_bounds", side_effect=bounds):
+            frame._window_proc(1, 0x0083, 1, ctypes.addressof(rectangle))
+        self.assertEqual((rectangle.left, rectangle.top, rectangle.right, rectangle.bottom),
+                         (1920, 0, 3840, 1040))
 
     def test_native_maximize_click_uses_release_and_cancels_outside_target(self) -> None:
         """Keep custom caption clicks native, release-bound, and independent of Tcl callbacks."""

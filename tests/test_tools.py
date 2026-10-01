@@ -37,6 +37,7 @@ class ToolDispatchTests(unittest.TestCase):
                 "install_dependencies", "start_service", "stop_service",
                 "detect_project_technologies",
                 "fetch_documentation",
+                "create_directory",
             },
         )
 
@@ -44,6 +45,7 @@ class ToolDispatchTests(unittest.TestCase):
         """Assign every capability to its separately configurable risk policy."""
         self.assertEqual(set(TOOL_CATEGORIES), set(AVAILABLE_TOOLS))
         self.assertEqual(TOOL_CATEGORIES["apply_file_changes"], ToolCategory.WRITE)
+        self.assertEqual(TOOL_CATEGORIES["create_directory"], ToolCategory.WRITE)
         self.assertEqual(TOOL_CATEGORIES["run_tests"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["run_checks"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["run_command"], ToolCategory.EXECUTION)
@@ -54,7 +56,7 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(TOOL_CATEGORIES["stop_service"], ToolCategory.EXECUTION)
         self.assertEqual(TOOL_CATEGORIES["fetch_documentation"], ToolCategory.NETWORK)
         read_only_tools = set(AVAILABLE_TOOLS) - {
-            "apply_file_changes", "run_tests", "run_checks", "run_command",
+            "create_directory", "apply_file_changes", "run_tests", "run_checks", "run_command",
             "install_dependencies", "start_service", "stop_service",
             "fetch_documentation",
         }
@@ -64,7 +66,7 @@ class ToolDispatchTests(unittest.TestCase):
         )
         self.assertEqual(set(TOOL_SPECS), set(AVAILABLE_TOOLS))
         self.assertTrue(all(spec.activity_formatter for spec in TOOL_SPECS.values()))
-        self.assertEqual(set(TOOL_TARGET_RESOLVERS), {"apply_file_changes"})
+        self.assertEqual(set(TOOL_TARGET_RESOLVERS), {"apply_file_changes", "create_directory"})
         file_change_schema = next(
             tool for tool in MODEL_TOOLS
             if isinstance(tool, dict) and tool["function"]["name"] == "apply_file_changes"
@@ -238,6 +240,7 @@ class ToolDispatchTests(unittest.TestCase):
             try:
                 os.chdir(root)
                 successful_arguments = {
+                    "create_directory": {"path": "new-folder"},
                     "get_location": {"location": "working_directory"},
                     "list_files": {"path": temporary},
                     "find_files": {"pattern": "sample.txt", "root": temporary},

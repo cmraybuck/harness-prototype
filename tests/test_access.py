@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from harness_prototype.access import AccessChoice, WorkspaceAccess
-from harness_prototype.files import file_change_target_directories
+from harness_prototype.files import directory_creation_target, file_change_target_directories
 
 
 class WorkspaceAccessTests(unittest.TestCase):
@@ -21,6 +21,21 @@ class WorkspaceAccessTests(unittest.TestCase):
         self.workspace.mkdir()
         self.outside.mkdir()
         self.access = WorkspaceAccess(self.workspace)
+
+    def test_directory_creation_outside_workspace_requires_parent_access(self) -> None:
+        """Deny a folder creation outside the workspace before it touches the filesystem."""
+        prompted = []
+
+        def deny(path: Path) -> AccessChoice:
+            """Record the required parent access and deny it."""
+            prompted.append(path)
+            return AccessChoice.DENY
+
+        result = self.access.authorize_tool("create_directory", {"path": str(self.outside / "new")},
+                                            deny, directory_creation_target)
+        self.assertEqual(prompted, [self.outside])
+        self.assertEqual(result["status"], "access_denied")
+        self.assertFalse((self.outside / "new").exists())
 
     def test_workspace_and_descendants_need_no_prompt(self) -> None:
         """Allow the startup directory subtree automatically."""

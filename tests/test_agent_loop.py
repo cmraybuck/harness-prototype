@@ -1,6 +1,7 @@
 """Deterministic checks for context limits and model/tool exchanges."""
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -25,6 +26,7 @@ from harness_prototype.agent_loop import (
     remember_role_candidates,
     requested_answer_checklist,
     requested_evidence_targets,
+    requests_file_change,
     run_turn as _run_turn,
     supplementary_citation_reads,
     validate_grounded_answer,
@@ -45,6 +47,117 @@ def run_turn(*args: object, **kwargs: object) -> str:
 
 class AgentLoopTests(unittest.TestCase):
     """Cover successful, exhausted, interrupted, and empty model turns."""
+
+    def test_directory_creation_requires_approval_and_supports_folder_only_completion(self) -> None:
+        """Create a real temporary folder only when write approval permits it."""
+        for allowed in (True, False):
+            with self.subTest(allowed=allowed), tempfile.TemporaryDirectory() as temporary:
+                target = Path(temporary) / "TestProg"
+                client = Mock()
+                client.chat.side_effect = [
+                    [ChatResponse(message={"role": "assistant", "tool_calls": [{
+                        "function": {"name": "create_directory", "arguments": {"path": str(target)}},
+                    }]})],
+                    [ChatResponse(message={"role": "assistant", "content": "Folder created."})],
+                ]
+                approval = Mock(return_value=allowed)
+                runtime = AgentRuntime(client, "fixture", Path(temporary))
+                runtime.capability_state.activate(["file_modification"])
+                with patch("harness_prototype.agent_loop.APPROVAL_POLICIES", {
+                    ToolCategory.WRITE: ApprovalPolicy.ASK_FIRST,
+                }):
+                    result = runtime.continue_conversation("Create a folder TestProg", on_approval=approval)
+                approval.assert_called_once()
+                self.assertEqual(target.is_dir(), allowed)
+                self.assertEqual(result.outcome, "success" if allowed else "operation_not_completed")
+
+    def test_file_creation_request_does_not_trigger_repository_research(self) -> None:
+        """Route the reported Desktop creation request as an operation, not research."""
+        prompt = ('can you create a folder "Test" on my desktop and include a file '
+                  '"test.c" where it\'s a C script that prints "Hello there" to the terminal?')
+        self.assertFalse(requires_repository_inspection([{"role": "user", "content": prompt}]))
+
+    def test_unexecuted_file_change_cannot_stream_a_success_claim(self) -> None:
+        """Reject a fabricated completion before it reaches the GUI or retained history."""
+        client = Mock()
+        client.chat.return_value = [ChatResponse(message={"role": "assistant", "content": "The file was created successfully."})]
+        messages = new_conversation() + [{"role": "user", "content": "Create a file Confirm.txt in my desktop folder"}]
+        rendered = []
+        outcome = _run_turn(client, "test", messages, rendered.append, lambda name: None)
+        self.assertEqual(outcome, "operation_not_completed")
+        self.assertNotIn("created successfully", "".join(rendered))
+        self.assertIn("not completed", messages[-1]["content"])
+
+    def test_file_change_routing_preserves_explanation_and_negative_requests(self) -> None:
+        """Keep instructions about code and explicit no-write requests out of write routing."""
+        for prompt in ("Explain how to create a file in this repository",
+                       "Do not create files; describe the folder layout",
+                       "Show me a C script that prints Hello there"):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(requests_file_change(prompt))
+
+    def test_file_change_completion_requires_approved_successful_write(self) -> None:
+        """Only expose completion after an approved write, and reject denied-write claims."""
+        for allowed in (True, False):
+            with self.subTest(allowed=allowed):
+                client = Mock()
+                client.chat.side_effect = [
+                    [ChatResponse(message={"role": "assistant", "content": "Created successfully.",
+                        "tool_calls": [{"function": {"name": "apply_file_changes", "arguments": {
+                            "base_path": str(Path.cwd()), "changes": [{
+                                "path": "Confirm.txt", "action": "create", "content": "Hello there",
+                            }]}}}]})],
+                    [ChatResponse(message={"role": "assistant", "content": "Created successfully."})],
+                ]
+                messages = new_conversation() + [{"role": "user", "content": "Create Confirm.txt in the workspace"}]
+                rendered = []
+                approval = Mock(return_value=allowed)
+                with patch("harness_prototype.agent_loop.APPROVAL_POLICIES", {
+                    ToolCategory.WRITE: ApprovalPolicy.ASK_FIRST,
+                }), patch("harness_prototype.agent_loop.execute_tool", return_value={"ok": True}) as execute:
+                    outcome = _run_turn(client, "test", messages, rendered.append, lambda name: None,
+                                        on_approval=approval, capability_state=CapabilityState({"file_modification"}))
+                approval.assert_called_once()
+                self.assertEqual(outcome, "success" if allowed else "operation_not_completed")
+                self.assertEqual(execute.call_count, int(allowed))
+                if allowed:
+                    self.assertEqual(rendered, ["Created successfully."])
+                else:
+                    self.assertNotIn("Created successfully", "".join(rendered))
+
+    def test_navigation_exposes_image_inspection(self) -> None:
+        """Make image inspection discoverable alongside the tools that locate images."""
+        composition = compose_request(new_conversation(), CapabilityState({"filesystem_navigation"}))
+        self.assertIn("inspect_file", composition.tool_names)
+
+    def test_capability_name_call_returns_actionable_recovery_without_execution(self) -> None:
+        """Reject a group used as a tool and explain the required real write tool."""
+        client = Mock()
+        client.chat.side_effect = [
+            [ChatResponse(message={"role": "assistant", "tool_calls": [{
+                "function": {"name": "file_modification", "arguments": {"changes": []}},
+            }]})],
+            [ChatResponse(message={"role": "assistant", "content": "Please retry with the write tool."})],
+        ]
+        messages = new_conversation() + [{"role": "user", "content": "Create a note"}]
+        approval = Mock()
+        with patch("harness_prototype.agent_loop.execute_tool", return_value={"ok": False, "error": "Unknown tool"}) as execute:
+            _run_turn(client, "test", messages, lambda text: None, lambda name: None,
+                      on_approval=approval)
+        result = json.loads(next(message["content"] for message in messages if message["role"] == "tool"))
+        self.assertIn("activate_capabilities", result["error"])
+        self.assertIn("apply_file_changes", result["error"])
+        execute.assert_not_called()
+        approval.assert_not_called()
+
+    def test_small_turn_uses_context_tier_below_configured_limit(self) -> None:
+        """Treat a large configured context as a ceiling for a small ordinary turn."""
+        client = Mock()
+        client.chat.return_value = [ChatResponse(message={"role": "assistant", "content": "Hello"})]
+        with patch("harness_prototype.agent_loop.CONTEXT_LENGTH", 16384):
+            _run_turn(client, "test", new_conversation() + [{"role": "user", "content": "Hi"}],
+                      lambda text: None, lambda name: None)
+        self.assertEqual(client.chat.call_args.kwargs["options"]["num_ctx"], 4096)
 
     def test_runtime_drives_conversation_without_terminal_ui(self) -> None:
         """Let a non-terminal caller submit, retain, and clear a conversation."""
@@ -165,6 +278,28 @@ class AgentLoopTests(unittest.TestCase):
         tool_message = next(message for message in messages if message["role"] == "tool")
         self.assertEqual(outcome, "success")
         self.assertEqual(tool_message["images"], ["sample.png"])
+        request_messages = client.chat.call_args_list[1].kwargs["messages"]
+        image_messages = [message for message in request_messages if message.get("images")]
+        self.assertEqual([message["role"] for message in image_messages], ["user"])
+        self.assertEqual(image_messages[0]["images"], ["sample.png"])
+
+    def test_image_projection_preserves_tool_exchange_and_history(self) -> None:
+        """Place image attachments after all sibling results without mutating history."""
+        messages = new_conversation() + [
+            {"role": "user", "content": "Compare these images"},
+            {"role": "assistant", "content": "", "tool_calls": []},
+            {"role": "tool", "content": "first", "images": ["first.png"]},
+            {"role": "tool", "content": "second", "images": ["second.png"]},
+            {"role": "assistant", "content": "Comparison"},
+        ]
+        original = json.dumps(messages)
+        composition = compose_request(messages, CapabilityState())
+        self.assertEqual([message["role"] for message in composition.messages],
+                         ["system", "user", "assistant", "tool", "tool", "user", "assistant"])
+        self.assertEqual(composition.messages[5]["images"], ["first.png", "second.png"])
+        self.assertEqual(json.dumps(messages), original)
+        self.assertEqual(composition.character_counts["messages"],
+                         len(json.dumps(composition.messages[1:], ensure_ascii=False)))
 
     def test_implementation_question_still_requires_repository_evidence(self) -> None:
         """Retain the evidence gate for questions about a named tool's implementation."""

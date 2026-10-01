@@ -142,6 +142,45 @@ def _resolve_change_paths(
     return resolved, None
 
 
+def directory_creation_target(arguments: object) -> list[Path] | dict:
+    """Validate a folder target and authorize its resolved parent before creation."""
+    if not isinstance(arguments, dict) or set(arguments) != {"path"}:
+        return tool_error("Expected an object containing only path.")
+    path = arguments["path"]
+    if not isinstance(path, str) or not path.strip() or "\x00" in path:
+        return tool_error("path must be a nonempty directory path without null bytes.")
+    try:
+        target = resolve_path(path)
+    except (OSError, RuntimeError, ValueError) as error:
+        return tool_error(str(error))
+    return [target.parent]
+
+
+def create_directory(path: str) -> dict:
+    """Create one folder; relative paths use the active workspace, absolute paths directly.
+
+    The parent must already exist; create nested parents with separate calls.
+    Existing directories succeed without changes. Files are never replaced.
+    Returns resolved path, status, and created; creation requires write approval
+    and directory access through the tool dispatcher. This function does not change cwd.
+    """
+    validated = directory_creation_target({"path": path})
+    if isinstance(validated, dict):
+        return validated
+    try:
+        target = resolve_path(path)
+        if target.is_dir():
+            return tool_success(path=str(target), status="already_exists", created=False)
+        target.mkdir()
+    except FileExistsError:
+        return tool_error("The target already exists and is not a directory.", status="target_exists")
+    except FileNotFoundError:
+        return tool_error("Parent directory does not exist; create it first.", status="parent_missing")
+    except (OSError, RuntimeError, ValueError) as error:
+        return tool_error(str(error), status="creation_failed")
+    return tool_success(path=str(target), status="created", created=True)
+
+
 def file_change_target_directories(arguments: object) -> list[Path] | dict | None:
     """Resolve directories that must be authorized for apply_file_changes."""
     targets = file_change_target_paths(arguments)

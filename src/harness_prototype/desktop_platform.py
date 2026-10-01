@@ -147,7 +147,9 @@ class WindowFrame:
         if message == 0x0083 and wparam:  # WM_NCCALCSIZE: titlebar is client-rendered.
             if self.user.IsZoomed(handle):
                 rect = ctypes.cast(lparam, ctypes.POINTER(wintypes.RECT)).contents
-                bounds = display_bounds(rect.left, rect.top)
+                # Maximized resize borders can extend into an adjacent monitor.
+                bounds = display_bounds((rect.left + rect.right) // 2,
+                                        (rect.top + rect.bottom) // 2)
                 rect.left, rect.top, rect.right, rect.bottom = bounds
             return 0
         if message == 0x0084:  # WM_NCHITTEST: native edges and caption trigger OS snap.

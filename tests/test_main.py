@@ -25,6 +25,19 @@ from harness_prototype.main import (
 class MainTests(unittest.TestCase):
     """Cover terminal commands, failure reporting, and conversation recovery."""
 
+    def test_directory_creation_permission_shows_path_scope_and_denies_interruption(self) -> None:
+        """Review a folder target through the shared menu and deny interrupted approval."""
+        request = ApprovalRequest("create_directory", {"path": "TestProg"}, ToolCategory.WRITE)
+        with patch.object(TerminalUI, "_read_key", return_value="confirm"), patch("builtins.print") as output:
+            self.assertTrue(request_tool_approval(request))
+        rendered = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("TestProg", rendered)
+        self.assertIn("parent must already exist", rendered)
+        self.assertIn("This request only", rendered)
+        for error in (EOFError, KeyboardInterrupt):
+            with self.subTest(error=error), patch.object(TerminalUI, "_read_key", side_effect=error), patch("builtins.print"):
+                self.assertFalse(request_tool_approval(request))
+
     def test_application_identity_is_canonical(self) -> None:
         """Keep the product name and short description stable for later interfaces."""
         self.assertEqual(APP_DISPLAY_NAME, "FLUX")

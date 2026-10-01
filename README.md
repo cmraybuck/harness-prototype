@@ -506,6 +506,16 @@ catalog lets the model activate the smallest relevant group: `filesystem_navigat
 `workspace_inspection`, `file_modification`, `verification`, `command_execution`,
 `services`, or `documentation`. Navigation is separate from content and Git
 inspection so common list/find requests do not load the larger inspection schemas.
+Navigation also exposes `inspect_file` so located images and documents can be
+inspected directly. Group names are activation labels, not callable tools; calling
+one returns a corrective error naming the activator and the group's real tools,
+without executing or authorizing the attempted action.
+Direct file-change requests use the operational workflow rather than the repository
+research gate. Their response text is withheld until the tool outcomes are checked.
+File requests require a successful `apply_file_changes` result in that turn;
+folder-only requests require a successful `create_directory` result. Otherwise FLUX reports
+`operation_not_completed` instead of accepting a model's completion claim. This
+check confirms a write succeeded, not that every part of a multi-file task is correct.
 Activation is additive for that conversation, takes effect on the
 next model round, and resets on `/clear` or a model change. It changes schema and
 instruction visibility only; normal validation, workspace access, and approval
@@ -534,6 +544,7 @@ that leaves the 512-token response reserve inside the default 4,096-token contex
 | `run_tests(targets=null)` | Runs the configured full suite in the active workspace, or expands 1–50 selectors at the targeted command's `{targets}` argument. Targets are separate arguments, cannot be options, and path-like selectors cannot escape the workspace. Returns `status` (`passed`, `failed`, `timed_out`, `launch_error`, or `invalid_target`), stdout, stderr, exit code, duration, and per-stream truncation fields when execution starts. Test failures are completed tool operations with `ok=true` and `status=failed`; validation, launch, and timeout errors use `ok=false`. |
 | `run_checks(name, target=null)` | Runs the exact configured command for a named project check or one of its exact named targets in the active workspace. Unknown names cannot execute. Returns `status` (`passed`, `failed`, `timed_out`, `launch_error`, `unknown_check`, or `invalid_target`), stdout, stderr, exit code, duration, and per-stream truncation fields when execution starts. Completed nonzero checks use `ok=true` and `status=failed`; validation, launch, and timeout errors use `ok=false`. |
 | `run_command(command)` | Runs an approved shell-free argument array in the active workspace. The first item must be a bare executable name in `HARNESS_COMMAND_ALLOWED_EXECUTABLES`; shell executables and executable paths are denied. Accepts 1–100 printable arguments of at most 1,000 characters each. Returns `status` (`succeeded`, `failed`, `timed_out`, `launch_error`, `invalid_command`, or `disallowed_command`), stdout, stderr, exit code, duration, and explicit per-stream truncation fields. Completed nonzero commands use `ok=true` and `status=failed`; validation, launch, and timeout errors use `ok=false`. |
+| `create_directory(path)` | Creates one folder under an existing parent. Relative paths start at the active workspace; absolute paths are used directly. Requires write approval and access to the resolved parent. Returns resolved `path`, `created`, and `status` (`created` or `already_exists`). Existing directories are unchanged; existing files are never replaced. Create nested parents with separate calls before using `apply_file_changes`. |
 | `apply_file_changes(base_path, changes)` | Applies one preflighted batch of 1–100 structured `create`, `overwrite`, `append`, or `replace` actions to UTF-8 files of any extension. Relative paths start at `base_path`; absolute paths are used directly. Existing-file actions require the current `revision` from `read_file`; `replace` also requires `old_text` that occurs exactly once. Returns absolute `affected_paths` and per-file actions and new revisions. |
 
 Standard user-folder discovery uses Windows settings, including OneDrive redirection. Linux and other Unix-like systems consult XDG user-directory configuration and then existing conventional home folders; macOS uses existing conventional home folders. Missing or unavailable folders return errors, never guessed paths.
@@ -648,10 +659,10 @@ copied into composed requests instead of being rebuilt every round. The heuristi
 estimates that exact payload and reserves 512 tokens for a reply. Ordinary
 conversation uses `HARNESS_CONTEXT_LENGTH` (default `4096`). Evidence-gated
 repository research uses `HARNESS_RESEARCH_CONTEXT_LENGTH` (default `32768`) as
-the guard and maximum Ollama context. Each research request selects the smallest
+the guard and maximum Ollama context. Each request selects the smallest
 4K `num_ctx` tier that fits the current estimate, so early inspection rounds do
-not pay for the maximum window. Ordinary conversations continue to use their
-configured context length. The research value must be at least the ordinary value.
+not pay for the maximum window. Ordinary conversations also treat their configured
+context length as a ceiling. The research value must be at least the ordinary value.
 
 If the estimate exceeds the active context budget, the request stops with an
 explicit notice naming the setting to increase, and history is retained. Use
@@ -933,6 +944,12 @@ context accounting, capability and skill state, workspace access, and cancellati
 Public stream events are also retained in turn history's `public_events` array,
 including assistant chunks and terminal events, so a client can recover the same
 ordered display after a disconnect without replaying tool actions.
+Assistant text sends its first chunk immediately, then batches subsequent chunks
+until the next chunk arrives after 100 ms or the batch reaches 4,096 characters.
+Tools, permissions, and terminal events flush pending text first. This avoids a
+durable database transaction and GUI update for every token; an abrupt process
+termination can lose the pending text batch, while completed tool checkpoints
+remain durable.
 Different conversations may run concurrently, but a second turn in the same
 conversation returns `conversation_busy`. Cancellation requires both stable IDs,
 so a stale request cannot interrupt a later turn. Service shutdown interrupts and
@@ -961,11 +978,21 @@ With the configured Ollama server and model available, collect live transcripts:
 
 ```powershell
 uv run python evaluate.py --output work/evaluation.json
+uv run python evaluate.py --scenario image-write --model qwen3-vl:8b --output work/image-write.json
+uv run python evaluate.py --scenario folder-file --model qwen3:8b --output work/folder-file.json
 ```
 
 The evaluator creates a disposable sample project and saves settings, prompts,
 tool exchanges, answers, durations, and errors. It covers discovery and reading,
 evidence across files, missing files, and ambiguous or incomplete searches.
+The optional `image-write` scenario checks a generated red image and whether a
+file-creation request reaches approval; it denies all requested operations and
+checks that the requested file was not created. Its verdicts are automatic and
+its transcripts are retained for review. `--model` selects an installed model;
+otherwise the first configured model is used.
+The `folder-file` scenario permits only the temporary `Test` folder and its
+`test.c` fixture, then verifies the actual file contents. It does not compile or
+execute the C program. The temporary workspace is removed after the check.
 Existing result files are never overwritten. Successful requests start as
 `ungraded`: review each `expected` rubric and transcript, then set `verdict` to
 `pass` or `fail`. Check the tool evidence, not just fluent answers. Request failures

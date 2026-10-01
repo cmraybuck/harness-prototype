@@ -419,6 +419,47 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual([event["sequence"] for event in events], [1, 2, 3])
         self.assertEqual(events[-1]["type"], "completion")
 
+    def test_token_stream_batches_durable_writes_and_preserves_order(self) -> None:
+        """Avoid a durable database transaction per token without losing streamed text."""
+        handler, runtime = MagicMock(), MagicMock()
+        runtime.conversation_id = "one"
+        stream = TurnEventStream(handler, runtime, "turn")
+        with patch("harness_prototype.application_service.monotonic", return_value=1.0):
+            for _ in range(1000):
+                stream.emit("assistant_text", {"text": "x"})
+            stream.emit("completion", {"outcome": "success"})
+        events = [call.args[2]["public_event"] for call in
+                  handler.server.registry.store.save_turn_event.call_args_list]
+        self.assertLessEqual(len(events), 5)
+        self.assertEqual("".join(event.get("text", "") for event in events), "x" * 1000)
+        self.assertEqual(events[-1]["type"], "completion")
+        self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
+
+    def test_text_batch_flushes_on_time_size_and_disconnect(self) -> None:
+        """Bound batches and persist pending text before terminal disconnect recovery."""
+        handler, runtime = MagicMock(), MagicMock()
+        runtime.conversation_id = "one"
+        stream = TurnEventStream(handler, runtime, "turn")
+        with patch("harness_prototype.application_service.monotonic", return_value=1.0):
+            stream.emit("assistant_text", {"text": "first"})
+            self.assertEqual(stream.sequence, 1)
+            stream.emit("assistant_text", {"text": "pending"})
+            self.assertEqual(stream.sequence, 1)
+        with patch("harness_prototype.application_service.monotonic", return_value=1.2):
+            stream.emit("assistant_text", {"text": " timed"})
+            self.assertEqual(stream.sequence, 2)
+            stream.emit("assistant_text", {"text": "x" * 4096})
+            self.assertEqual(stream.sequence, 3)
+            stream.emit("assistant_text", {"text": "tail"})
+            handler.wfile.write.side_effect = BrokenPipeError
+            stream.emit("completion", {"outcome": "cancelled"})
+        events = [call.args[2]["public_event"] for call in
+                  handler.server.registry.store.save_turn_event.call_args_list]
+        self.assertEqual(events[1]["text"], "pending timed")
+        self.assertEqual(events[-2]["text"], "tail")
+        self.assertEqual(events[-1]["type"], "completion")
+        runtime.interrupt.assert_called_once_with()
+
     def test_invalid_requests_are_structured_and_recoverable(self) -> None:
         """Return bounded protocol errors without damaging later requests."""
         status, error = self.request("POST", "/v1/conversations", {"model": "missing"})

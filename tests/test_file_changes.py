@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harness_prototype.files import apply_file_changes, read_file
+from harness_prototype.files import apply_file_changes, create_directory, directory_creation_target, read_file
 
 
 class FileChangeTests(unittest.TestCase):
@@ -26,6 +26,34 @@ class FileChangeTests(unittest.TestCase):
         result = read_file(str(path))
         self.assertTrue(result["ok"])
         return result["revision"]
+
+    def test_create_directory_then_create_source_file(self) -> None:
+        """Create the requested parent before writing a C program into it."""
+        result = create_directory("TestProg")
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["created"])
+        self.assertEqual(result["path"], str(self.workspace / "TestProg"))
+        write = apply_file_changes(".", [{"path": "TestProg/main.c", "action": "create",
+                                          "content": 'int main(void) { return 0; }\n'}])
+        self.assertTrue(write["ok"])
+        self.assertEqual(Path.cwd(), self.workspace)
+        self.assertFalse(create_directory(str(self.workspace / "TestProg"))["created"])
+
+    def test_create_directory_rejects_invalid_targets_and_missing_parents(self) -> None:
+        """Reject invalid inputs, file conflicts, and implicit recursive creation."""
+        for path in (None, True, 42, "", "\x00"):
+            with self.subTest(path=path):
+                self.assertFalse(create_directory(path)["ok"])
+        (self.workspace / "existing.txt").write_text("keep", encoding="utf-8")
+        self.assertEqual(create_directory("existing.txt")["status"], "target_exists")
+        self.assertEqual(create_directory("missing/child")["status"], "parent_missing")
+        self.assertFalse((self.workspace / "missing").exists())
+        self.assertEqual((self.workspace / "existing.txt").read_text(encoding="utf-8"), "keep")
+
+    def test_directory_creation_access_targets_resolved_parent(self) -> None:
+        """Authorize the folder's parent before any mutation."""
+        self.assertEqual(directory_creation_target({"path": "TestProg"}), [self.workspace])
+        self.assertFalse(directory_creation_target({"path": "TestProg", "extra": True})["ok"])
 
     def test_creates_multiple_utf8_file_types_in_one_batch(self) -> None:
         """Create source and documentation files in one structured operation."""

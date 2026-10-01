@@ -99,6 +99,8 @@ def _permission_scope(identities: list[tuple[str, str, str]]) -> str:
 def _permission_action_summary(request: ApprovalRequest) -> str:
     """Summarize file actions and counts without content, revisions, or raw objects."""
     arguments = request.arguments if isinstance(request.arguments, dict) else {}
+    if request.tool_name == "create_directory":
+        return f"Create one folder: {str(arguments.get('path', 'Invalid path'))[:1000]}. Parent must already exist; existing folders are unchanged."
     changes = arguments.get("changes") if request.tool_name == "apply_file_changes" else None
     if isinstance(changes, list):
         counts = {action: sum(isinstance(change, dict) and change.get("action") == action for change in changes)
@@ -436,8 +438,36 @@ class TurnEventStream:
         self.sequence = 0
         self.disconnected = False
         self.tool_ids: dict[str, deque[str]] = defaultdict(deque)
+        self.pending_text: list[str] = []
+        self.pending_characters = 0
+        self.last_text_emit: float | None = None
 
     def emit(self, event_type: str, fields: dict[str, Any] | None = None) -> None:
+        """Batch token text briefly and flush it before every other public event."""
+        if event_type == "assistant_text":
+            text = (fields or {}).get("text", "")
+            if not text:
+                return
+            self.pending_text.append(text)
+            self.pending_characters += len(text)
+            now = monotonic()
+            if (self.last_text_emit is None or now - self.last_text_emit >= 0.1
+                    or self.pending_characters >= 4096):
+                self.flush_text()
+            return
+        self.flush_text()
+        self._emit(event_type, fields)
+
+    def flush_text(self) -> None:
+        """Persist pending text together before tools, permissions, or completion."""
+        if self.pending_text:
+            text = "".join(self.pending_text)
+            self.pending_text.clear()
+            self.pending_characters = 0
+            self.last_text_emit = monotonic()
+            self._emit("assistant_text", {"text": text})
+
+    def _emit(self, event_type: str, fields: dict[str, Any] | None = None) -> None:
         """Write and flush one ordered event, cancelling after disconnect."""
         self.sequence += 1
         event = {
@@ -837,6 +867,7 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
 
         def observe_event(event: dict[str, Any]) -> None:
             """Persist runtime evidence before exposing its public projection."""
+            stream.flush_text()
             if event.get("type") == "tool_result":
                 self.server.registry.store.checkpoint_turn(runtime, turn_id, event)
             else:

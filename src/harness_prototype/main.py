@@ -593,6 +593,11 @@ def _tool_approval_summary(request: ApprovalRequest) -> list[str]:
         f"Risk       {_terminal_text(request.category.value)}",
         f"Operation  {_terminal_text(request.tool_name)}",
     ]
+    if request.tool_name == "create_directory" and isinstance(request.arguments, dict):
+        lines.append(f"Folder     {_terminal_text(request.arguments.get('path', 'invalid path'))}")
+        lines.append("Scope      Create one folder; parent must already exist")
+        lines.append("Lifetime   This request only")
+        return lines
     if request.tool_name == "fetch_documentation" and isinstance(request.arguments, dict):
         raw_url = request.arguments.get("url")
         hostname = urlsplit(raw_url).hostname if isinstance(raw_url, str) else None

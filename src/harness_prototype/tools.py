@@ -28,6 +28,8 @@ from .execution import (
 from .files import (
     MAX_FILE_CHANGES,
     apply_file_changes,
+    create_directory,
+    directory_creation_target,
     file_change_target_directories,
     find_files,
     inspect_file,
@@ -60,11 +62,11 @@ class ToolSpec:
 
 
 CAPABILITY_GROUPS = {
-    "filesystem_navigation": "Locate folders and list or find local files.",
-    "workspace_inspection": "Inspect project content, metadata, and Git state.",
-    "file_modification": "Apply authorized structured UTF-8 file changes.",
+    "filesystem_navigation": "Locate folders and files; inspect documents and images with inspect_file.",
+    "workspace_inspection": "Read and search project content, inspect documents and images, and inspect Git state.",
+    "file_modification": "Create folders with create_directory; create or change UTF-8 files with apply_file_changes.",
     "verification": "Run configured tests and project checks.",
-    "command_execution": "Run constrained commands and install dependencies.",
+    "command_execution": "Run constrained commands with run_command and install project dependencies.",
     "services": "Start and stop configured development services.",
     "documentation": "Retrieve bounded authoritative HTTPS documentation.",
 }
@@ -74,6 +76,8 @@ MAX_CAPABILITY_GROUPS_PER_ACTIVATION = len(CAPABILITY_GROUPS)
 CAPABILITY_INSTRUCTIONS = {
     "filesystem_navigation": (
         "Use navigation tools for local paths and filenames; never guess results. "
+        "Use inspect_file to view supported images or inspect documents; images are "
+        "attached for vision-capable models. Do not infer image content from filenames. "
         "Follow continuation values and disclose incomplete searches."
     ),
     "workspace_inspection": (
@@ -83,6 +87,8 @@ CAPABILITY_INSTRUCTIONS = {
         "documentation, git status, and relevant diffs before concluding."
     ),
     "file_modification": (
+        "Use create_directory before writing into a missing folder; its parent must "
+        "already exist, so create nested folders one at a time. "
         "Write only when requested. Read existing files first and supply their revision. "
         "Use create, overwrite, append, or a uniquely matching replace as appropriate. "
         "Inspect state before retrying a revision failure or outcome_unknown result."
@@ -505,7 +511,7 @@ TOOL_SPECS = {
             "500 PDF pages", "40 million image pixels",
             "1-200 lines", "8,000 output characters",
         ),
-        capability_groups=("workspace_inspection",),
+        capability_groups=("filesystem_navigation", "workspace_inspection"),
     ),
     "fetch_documentation": ToolSpec(
         fetch_documentation,
@@ -606,6 +612,12 @@ TOOL_SPECS = {
         model_schema=STOP_SERVICE_SCHEMA,
         material_limits=("handles created by this FLUX session only", "bounded final logs"),
         capability_groups=("services",),
+    ),
+    "create_directory": ToolSpec(
+        create_directory, ToolCategory.WRITE, _path_activity("Creating folder"),
+        directory_creation_target,
+        material_limits=("one directory", "existing parent required", "existing folders unchanged"),
+        capability_groups=("file_modification",),
     ),
     "apply_file_changes": ToolSpec(
         apply_file_changes,
@@ -746,7 +758,8 @@ ACTIVATE_CAPABILITIES_SCHEMA = {
         "description": (
             "Activate the smallest capability groups needed for the request. Activation "
             "changes schema visibility on the next model round and grants no authority. "
-            "Available groups: "
+            "Group names are not callable functions. Call this function with a groups "
+            "array, then use the expanded tool schemas on the next round. Available groups: "
             + "; ".join(f"{name}: {purpose}" for name, purpose in CAPABILITY_GROUPS.items())
         ),
         "parameters": {
