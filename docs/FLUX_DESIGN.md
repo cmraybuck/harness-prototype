@@ -95,7 +95,9 @@ an inline magnifier and placeholder; the placeholder is never part of a query.
 The model selector shares Workspace/Skills' rounded button surface, padding, and
 hover/focus states. Its inline dropdown has rounded options and a teal selected row.
 Session actions use the same inline menu; rename entry and delete confirmation
-remain separate decision views. Escape and outside clicks dismiss the menu.
+appear as temporary panels inside the chat area. Permission and other decision
+views use the same in-app host, preserving the conversation and composer beneath
+it. Escape and outside clicks dismiss the menu.
 Body, headings, and controls share Segoe UI; weight and size establish hierarchy,
 with monospace reserved for code. Assistant replies carry a small geometric mark
 instead of a repeated brand heading. The composer shows an empty-state placeholder

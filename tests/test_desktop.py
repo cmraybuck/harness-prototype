@@ -570,7 +570,12 @@ class DesktopWidgetTests(unittest.TestCase):
         decide.assert_called_once()
         denied = MagicMock()
         second = PermissionView(root, event, denied)
-        root.tk.call(second.window.protocol("WM_DELETE_WINDOW"))
+        self.assertIsInstance(second.window, ttk.Frame)
+        self.assertFalse(any(isinstance(child, tk.Toplevel) for child in root.winfo_children()))
+        second.options.focus_force()
+        root.update()
+        second.options.event_generate("<Escape>")
+        root.update()
         denied.assert_called_once_with("deny")
         entered = MagicMock()
         third = PermissionView(root, event, entered)
@@ -583,6 +588,33 @@ class DesktopWidgetTests(unittest.TestCase):
         oversized = PermissionView(root, {**event, "scope": "x" * 12001}, MagicMock())
         self.assertEqual(oversized.choices, ["deny"])
         oversized.dismiss()
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_rename_panel_keeps_draft_and_captured_session(self, _history: MagicMock, tasks: MagicMock) -> None:
+        """Rename inside the app preserves the draft and submits the originating ID."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop.message_input.insert("1.0", "Unsent draft")
+        desktop._rename_session("original", "Old title")
+        self.assertFalse(any(isinstance(child, tk.Toplevel) for child in root.winfo_children()))
+        panel = next(child for child in root.winfo_children() if isinstance(child, ttk.Frame)
+                     and child.winfo_manager() == "place")
+        frame = panel.winfo_children()[0]
+        entry = next(child for child in frame.winfo_children() if isinstance(child, ttk.Entry))
+        entry.delete(0, tk.END)
+        entry.insert(0, "New title")
+        desktop.active_conversation_id = "another"
+        next(child for child in frame.winfo_children() if isinstance(child, ttk.Button)).invoke()
+        tasks.call_args.args[0]()
+        desktop.client.session_state.assert_called_once_with("original", "title", "New title")
+        self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "Unsent draft")
+        self.assertFalse(panel.winfo_exists())
 
     @patch.object(FluxDesktop, "_run_task")
     @patch.object(FluxDesktop, "_load_history")
@@ -698,11 +730,11 @@ class DesktopWidgetTests(unittest.TestCase):
             desktop.views[owner].recover([])
         desktop._confirm_selection("one", "model", "beta")
         tasks.reset_mock()
-        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision = next(child for child in root.winfo_children() if hasattr(child, "_flux_decision"))._flux_decision
         decision.choose_option()
         tasks.assert_not_called()
         desktop._confirm_selection("one", "model", "beta")
-        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision = next(child for child in root.winfo_children() if hasattr(child, "_flux_decision"))._flux_decision
         decision.move(1)
         decision.choose_option()
         desktop.client.update_conversation.return_value = {"conversation_id": "one", "model": "beta"}
@@ -734,13 +766,13 @@ class DesktopWidgetTests(unittest.TestCase):
         desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 2, "type": "permission_request",
                                    "permission_request_id": "permission", "choices": ["allow_once", "deny"]})
         desktop.close()
-        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision = next(child for child in root.winfo_children() if hasattr(child, "_flux_decision"))._flux_decision
         decision.choose_option()
         self.assertFalse(desktop._closing)
         desktop.client.resolve_permission.assert_not_called()
         self.assertIn("permission", desktop._permissions)
         desktop.close()
-        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision = next(child for child in root.winfo_children() if hasattr(child, "_flux_decision"))._flux_decision
         decision.move(1)
         decision.choose_option()
         tasks.call_args.args[0]()

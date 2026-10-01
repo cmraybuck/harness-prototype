@@ -80,7 +80,16 @@ def _standard_folder_path(name: str, home: Path) -> Path:
 
 
 def get_location(location: str) -> dict:
-    """Resolve one named location to an existing ordinary directory path."""
+    """Resolve one named location to its existing absolute directory, not a descendant.
+
+    Args:
+        location: working_directory, home, desktop, documents, downloads, pictures,
+            music, or videos (case-insensitive). Resolve the requested location
+            even when the active workspace is already nested beneath it.
+
+    Use the returned path as the exact base for the requested files or folders.
+    Discovery grants no access; failure is not permission to use the workspace.
+    """
     if not isinstance(location, str) or not location.strip():
         return tool_error(
             "location must be a nonempty string.",

@@ -76,6 +76,8 @@ MAX_CAPABILITY_GROUPS_PER_ACTIVATION = len(CAPABILITY_GROUPS)
 CAPABILITY_INSTRUCTIONS = {
     "filesystem_navigation": (
         "Use navigation tools for local paths and filenames; never guess results. "
+        "For named user folders, call get_location and "
+        "use its exact returned directory, not a workspace beneath that directory. "
         "Use inspect_file to view supported images or inspect documents; images are "
         "attached for vision-capable models. Do not infer image content from filenames. "
         "Follow continuation values and disclose incomplete searches."
@@ -89,6 +91,13 @@ CAPABILITY_INSTRUCTIONS = {
     "file_modification": (
         "Use create_directory before writing into a missing folder; its parent must "
         "already exist, so create nested folders one at a time. "
+        "For a named user folder, first call get_location with the requested "
+        "location. A workspace nested inside that directory is not the directory "
+        "itself. Join the requested folder name directly to the "
+        "returned absolute path and pass that absolute target to create_directory; "
+        "use the created folder path as apply_file_changes base_path. Never "
+        "substitute the workspace or a relative path for a named user folder. "
+        "If location discovery fails, report it rather than writing elsewhere. "
         "Write only when requested. Read existing files first and supply their revision. "
         "Use create, overwrite, append, or a uniquely matching replace as appropriate. "
         "Inspect state before retrying a revision failure or outcome_unknown result."
@@ -472,7 +481,7 @@ TOOL_SPECS = {
         get_location, ToolCategory.READ_ONLY,
         _location_activity,
         material_limits=("named standard locations only",),
-        capability_groups=("filesystem_navigation",),
+        capability_groups=("filesystem_navigation", "file_modification"),
     ),
     "list_files": ToolSpec(
         list_files, ToolCategory.READ_ONLY, _path_activity("Listing files in"),

@@ -159,6 +159,8 @@ def directory_creation_target(arguments: object) -> list[Path] | dict:
 def create_directory(path: str) -> dict:
     """Create one folder; relative paths use the active workspace, absolute paths directly.
 
+    For a named user folder, call get_location first and join the new folder name
+    to its returned absolute path; do not substitute a workspace nested beneath it.
     The parent must already exist; create nested parents with separate calls.
     Existing directories succeed without changes. Files are never replaced.
     Returns resolved path, status, and created; creation requires write approval
@@ -255,7 +257,8 @@ def apply_file_changes(base_path: str, changes: list[dict]) -> dict:
 
     Args:
         base_path: Directory for relative change paths. Pass a get_location path
-            for a named location, or ``.`` for the process working directory.
+            for a named location, or the absolute path of a folder created there.
+            Use ``.`` only when the requested destination is the active workspace.
         changes: One to 100 objects with ``path``, ``action``, and ``content``.
             Actions are ``create``, ``overwrite``, ``append``, or ``replace``.
             Existing-file actions require ``expected_revision`` from read_file.

@@ -401,6 +401,33 @@ class ConversationView:
         return formatted
 
 
+class InlineDecision(ttk.Frame):
+    """Host a temporary decision inside the chat area with shared theme styling."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        """Overlay the chat while preserving its widgets, draft, and prior focus."""
+        super().__init__(root, style="Surface.TFrame", padding=8)
+        self.previous_focus = root.focus_get()
+        parent = getattr(root, "_flux_decision_parent", root)
+        self.place(in_=parent, relx=0.5, rely=0.5, anchor="center", relwidth=0.94, relheight=0.9)
+        self.lift()
+
+    def activate(self) -> None:
+        """Route descendant keyboard events through the decision's own bindings."""
+        pending = list(self.winfo_children())
+        while pending:
+            widget = pending.pop()
+            tags = widget.bindtags()
+            widget.bindtags((tags[0], str(self), *tags[1:]))
+            pending.extend(widget.winfo_children())
+
+    def destroy(self) -> None:
+        """Restore focus after removing only the temporary decision widgets."""
+        super().destroy()
+        if self.previous_focus is not None and self.previous_focus.winfo_exists():
+            self.previous_focus.focus_set()
+
+
 class PermissionView:
     """Present a temporary redacted decision without changing the transcript."""
 
@@ -416,15 +443,10 @@ class PermissionView:
             self.choices = ["deny"]
         if "deny" not in self.choices:
             self.choices.append("deny")
-        self.window = tk.Toplevel(root)
-        self.window.title("FLUX · Permission")
-        self.window.transient(root)
-        prepare_dialog(self.window, root)
-        self.window.configure(background=COLORS["canvas"])
-        root.after_idle(lambda: center_dialog(self.window, root))
-        self.window.protocol("WM_DELETE_WINDOW", lambda: self.confirm("deny"))
+        self.window = InlineDecision(root)
         heading = ttk.Frame(self.window, padding=(20, 12))
         heading.pack(side=tk.TOP, fill=tk.X)
+        ttk.Button(heading, text="Deny and close", command=lambda: self.confirm("deny")).pack(side=tk.RIGHT, padx=(8, 0))
         ttk.Label(heading, text="Session · " + str(event.get("session_title", "Current session")), style="Title.TLabel", wraplength=560).pack(anchor="w")
         footer = ttk.Frame(self.window, padding=(16, 8))
         footer.pack(side=tk.BOTTOM, fill=tk.X)
@@ -438,7 +460,7 @@ class PermissionView:
         ))
         review = ttk.Frame(frame)
         review.pack(fill=tk.BOTH, expand=True)
-        summary_text = tk.Text(review, width=70, height=5, wrap="word", foreground=COLORS["accent"])
+        summary_text = tk.Text(review, width=70, height=5, wrap="word", background=COLORS["surface"], foreground=COLORS["accent"], font="TkDefaultFont", highlightthickness=0)
         summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         summary_text.insert("1.0", summary)
         summary_text.configure(state="disabled")
@@ -448,6 +470,7 @@ class PermissionView:
         if oversized:
             ttk.Label(frame, text="Scope exceeds the review limit. Deny and request a smaller operation.").pack(anchor="w")
         self.options = tk.Listbox(footer, width=70, height=len(self.choices), exportselection=False,
+                                  background=COLORS["surface"], foreground=COLORS["text"], font="TkDefaultFont",
                                   selectforeground=COLORS["text"], selectbackground=COLORS["selected"])
         self.options.pack(fill=tk.X, pady=12)
         for choice in self.choices:
@@ -461,6 +484,7 @@ class PermissionView:
         self.window.bind("<Escape>", lambda _event: self.confirm("deny"))
         ttk.Label(footer, text="Up/Down to select · Space or Enter to confirm · Escape to deny", wraplength=600).pack()
         ttk.Button(footer, text="Confirm selection", command=self.choose_option).pack(pady=8)
+        self.window.activate()
         self.options.focus_set()
 
     def move(self, step: int) -> str:
@@ -739,6 +763,7 @@ class FluxDesktop:
         ttk.Button(self.navigation_content, text="Settings", style="Sidebar.TButton", command=self.open_settings).grid(row=6, column=0, sticky="ew", pady=(12, 0))
         self.workspace_surface = ttk.Frame(self.panes, padding=(24, 16))
         workspace = self.workspace_surface
+        self.root._flux_decision_parent = workspace
         self.panes.add(workspace, weight=1)
         workspace.columnconfigure(0, weight=1)
         workspace.rowconfigure(2, weight=1)
@@ -1172,7 +1197,7 @@ class FluxDesktop:
         owner = owner or self.active_conversation_id
         if not owner:
             return
-        if any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()):
+        if any(isinstance(child, (tk.Toplevel, InlineDecision)) for child in self.root.winfo_children()):
             self.status_text.set("Close the current decision view before opening session actions.")
             return
         metadata = next((item for item in self.conversations if item["conversation_id"] == owner), self._skill_metadata.get(owner, {}))
@@ -1205,10 +1230,7 @@ class FluxDesktop:
 
     def _rename_session(self, owner: str, title: str) -> None:
         """Edit a deterministic session title without changing retained conversation context."""
-        window = tk.Toplevel(self.root)
-        window.title("FLUX · Rename session")
-        window.transient(self.root)
-        prepare_dialog(window, self.root)
+        window = InlineDecision(self.root)
         frame = ttk.Frame(window, padding=24)
         frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(frame, text="Rename session", style="Title.TLabel", wraplength=560).pack(anchor="w", pady=(0, 12))
@@ -1225,8 +1247,8 @@ class FluxDesktop:
         ttk.Button(frame, text="Save title", command=save).pack(anchor="e", pady=12)
         window.bind("<Return>", save)
         window.bind("<Escape>", lambda _event: window.destroy())
+        window.activate()
         entry.focus_set()
-        center_dialog(window, self.root)
 
     def _change_session(self, owner: str, field: str, value: Any) -> None:
         """Apply a backend-owned session change and refresh its visible metadata."""
@@ -1943,7 +1965,7 @@ class FluxDesktop:
                 self._permission_queue.pop(request_id, None)
                 self._decided_permissions.add(request_id)
                 continue
-            if any(isinstance(child, tk.Toplevel) and child.winfo_exists() for child in self.root.winfo_children()):
+            if any(isinstance(child, (tk.Toplevel, InlineDecision)) and child.winfo_exists() for child in self.root.winfo_children()):
                 self.root.after(250, self._present_next_permission)
                 return
             self._permission_queue.pop(request_id)
@@ -2017,7 +2039,7 @@ class FluxDesktop:
 
     def open_settings(self) -> None:
         """Load local preferences and durable scopes without blocking Tk."""
-        if any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()):
+        if any(isinstance(child, (tk.Toplevel, InlineDecision)) for child in self.root.winfo_children()):
             self.status_text.set("Close the current decision view before opening Settings.")
             return
         self._run_task(lambda: (self.client.settings(), self.client.list_grants()), self._settings_loaded)
@@ -2025,7 +2047,7 @@ class FluxDesktop:
     def _settings_loaded(self, result: tuple[dict[str, Any], list[dict[str, Any]]]) -> None:
         """Build a local settings view with exact, individually revocable grants."""
         settings, grants = result
-        if any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()):
+        if any(isinstance(child, (tk.Toplevel, InlineDecision)) for child in self.root.winfo_children()):
             return
         window = tk.Toplevel(self.root)
         window.title("FLUX · Local settings")
@@ -2252,7 +2274,7 @@ class FluxDesktop:
 
     def _confirm_selection(self, owner: str, field: str, value: str) -> None:
         """Explain context reset in a temporary keyboard decision bound to its original chat."""
-        if any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()):
+        if any(isinstance(child, (tk.Toplevel, InlineDecision)) for child in self.root.winfo_children()):
             self.status_text.set("Close the current decision view before changing selections.")
             return
         def decided(choice: str) -> None:
@@ -2286,7 +2308,7 @@ class FluxDesktop:
         """Confirm active-work interruption before preserving drafts and stopping the service."""
         if self._closing:
             return
-        if any(isinstance(child, tk.Toplevel) for child in self.root.winfo_children()) and not self._permissions:
+        if any(isinstance(child, (tk.Toplevel, InlineDecision)) for child in self.root.winfo_children()) and not self._permissions:
             self.status_text.set("Close the current decision view before exiting FLUX.")
             return
         if any(view.sending or view.transport_active or view.active_turn_id for view in self.views.values()):
@@ -2406,11 +2428,8 @@ class DecisionDialog:
 
     def __init__(self, root: tk.Tk, title: str, summary: str, choices: list[tuple[str, str]], decide: Callable[[str], None]) -> None:
         """Build a centered decision whose dismissal leaves the current state unchanged."""
-        self.window = tk.Toplevel(root)
-        self.window.title("FLUX · " + title)
+        self.window = InlineDecision(root)
         self.window._flux_decision = self
-        self.window.transient(root)
-        prepare_dialog(self.window, root)
         self.decide = decide
         self.choices = choices
         frame = ttk.Frame(self.window, padding=24)
@@ -2428,8 +2447,8 @@ class DecisionDialog:
         self.window.bind("<Return>", lambda _event: self.choose_option())
         self.window.bind("<Escape>", lambda _event: self.window.destroy())
         ttk.Button(frame, text="Confirm selection", command=self.choose_option).pack(anchor="e")
+        self.window.activate()
         self.options.focus_set()
-        center_dialog(self.window, root)
 
     def move(self, step: int) -> str:
         """Move the selection without committing an action."""

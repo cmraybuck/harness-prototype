@@ -453,7 +453,7 @@ Relative paths start at the process's working directory unless a tool exposes an
 explicit base path; tools never change the working directory.
 
 - For an explicit path, use that path. For only a filename, search the working directory first. A plain name without an extension prefers an exact filename, then falls back to files with the same name and any extension.
-- For Desktop, Documents, Downloads, Pictures, Music, Videos, or home, call `get_location` with the normalized folder name and pass its returned path to a file tool.
+- For Desktop, Documents, Downloads, Pictures, Music, Videos, or home, call `get_location` with the normalized folder name and use its exact returned directory. A workspace nested beneath the requested directory does not count as that destination. For creation, join the new folder name directly to that absolute path, then use the created folder as the file-change base. If lookup fails, report the failure rather than falling back to the workspace. Location lookup is available with both navigation and file-modification capabilities.
 - When asked to inspect a file, read a single match from a complete search. Ask which file to use if multiple files match.
 - Content search automatically leads with exact text while retaining case-insensitive and whitespace-flexible candidates. Check the reported match quality and counts. If a complete search has no matches, retry one of its suggested shorter anchors or another stable term from the request. If reasonable alternate queries still find nothing, explain the result and ask where to look next. Do not expand to the whole computer unprompted.
 - If a search is incomplete, narrow its path or filename pattern before drawing a conclusion.
@@ -857,10 +857,10 @@ second until completion or interruption; disconnects request cooperative backend
 cancellation and never automatically retry a prompt. Restarted backend turns show
 their persisted interruption status. Older histories without public display events
 show available assistant responses and outcome labels. Permission waits are visible
-through the point of approval. Each permission opens a temporary native decision
-view showing operation, risk, scope, workspace, and each choice's lifetime.
+through the point of approval. Each permission opens a temporary panel inside the
+chat area showing operation, risk, scope, workspace, and each choice's lifetime.
 Up/Down selects and Space or Enter confirms; the initial selection is Allow once.
-Escape, window dismissal, turn cancellation, application exit, lost connection,
+Escape, Deny and close, turn cancellation, application exit, lost connection,
 and the backend's five-minute timeout deny unanswered requests. Decisions remain
 bound to their original conversation and turn even when navigation changes.
 Raw arguments, contents, revisions, and credentials stay out of the view; after

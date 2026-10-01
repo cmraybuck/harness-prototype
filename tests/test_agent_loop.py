@@ -71,6 +71,48 @@ class AgentLoopTests(unittest.TestCase):
                 self.assertEqual(target.is_dir(), allowed)
                 self.assertEqual(result.outcome, "success" if allowed else "operation_not_completed")
 
+    def test_named_location_creation_from_nested_workspace_uses_location_lookup(self) -> None:
+        """Allow write-only capability activation to resolve and use the requested location."""
+        for location in ("desktop", "documents", "downloads", "pictures", "music", "videos"):
+            with self.subTest(location=location), tempfile.TemporaryDirectory() as temporary:
+                destination = Path(temporary) / "Redirected" / location
+                workspace = destination / "harness-prototype"
+                workspace.mkdir(parents=True)
+                folder = destination / "Test"
+                client = Mock()
+                client.chat.side_effect = [
+                    [ChatResponse(message={"role": "assistant", "tool_calls": [{
+                        "function": {"name": "get_location", "arguments": {"location": location}},
+                    }]})],
+                    [ChatResponse(message={"role": "assistant", "tool_calls": [{
+                        "function": {"name": "create_directory", "arguments": {"path": str(folder)}},
+                    }]})],
+                    [ChatResponse(message={"role": "assistant", "tool_calls": [{
+                        "function": {"name": "apply_file_changes", "arguments": {
+                            "base_path": str(folder), "changes": [{
+                                "path": "test.c", "action": "create", "content": "int main(void) { return 0; }\n",
+                            }],
+                        }},
+                    }]})],
+                    [ChatResponse(message={"role": "assistant", "content": f"Created Test/test.c in your {location} folder."})],
+                ]
+                runtime = AgentRuntime(client, "fixture", workspace)
+                runtime.capability_state.activate(["file_modification"])
+                with patch("harness_prototype.locations._standard_folder_path", return_value=destination), patch(
+                    "harness_prototype.agent_loop.APPROVAL_POLICIES", {ToolCategory.WRITE: ApprovalPolicy.ASK_FIRST},
+                ):
+                    result = runtime.continue_conversation(
+                        f"Create a folder Test with a file test.c in my {location} folder",
+                        on_permission=Mock(return_value=AccessChoice.GRANT_ONCE),
+                        on_approval=Mock(return_value=True),
+                    )
+                lookup = next(message for message in runtime.messages
+                              if message.get("role") == "tool" and message.get("tool_name") == "get_location")
+                self.assertEqual(json.loads(lookup["content"])["path"], str(destination))
+                self.assertEqual(result.outcome, "success")
+                self.assertTrue((folder / "test.c").is_file())
+                self.assertFalse((workspace / "Test").exists())
+
     def test_file_creation_request_does_not_trigger_repository_research(self) -> None:
         """Route the reported Desktop creation request as an operation, not research."""
         prompt = ('can you create a folder "Test" on my desktop and include a file '
