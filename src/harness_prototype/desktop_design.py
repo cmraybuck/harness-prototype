@@ -93,6 +93,17 @@ class FluxTheme:
             self.style.layout(selected, self.style.layout("Selected.Dropdown.Inset.TButton"))
             self.style.configure(selected, foreground=color)
 
+        # Canvas menu rows need button corners painted in the row's own color.
+        for prefix, corner in (("Skill", COLORS["raised"]), ("Selected.Skill", COLORS["selected"])):
+            element = "Flux." + prefix.lower() + "button"
+            self._rounded(element, COLORS["surface"], RADII["control"], interactive=True, corner=corner)
+            layout = [(element, {"sticky": "nsew", "children": [
+                ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})]
+            for role, color in (("Success", COLORS["success"]), ("Danger", COLORS["failure"])):
+                name = prefix + "." + role + ".TButton"
+                self.style.layout(name, layout)
+                self.style.configure(name, foreground=color, background=corner)
+
         for prefix, hover, pressed in (("Caption", COLORS["hover"], COLORS["selected"]),
                                         ("Close.Caption", "#c42b1c", "#a52317")):
             assets = []

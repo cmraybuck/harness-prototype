@@ -556,104 +556,154 @@ class PermissionView:
             self.window.destroy()
 
 
-class SkillPanel:
-    """Inspect and toggle conversation skills inline without a modal decision."""
+class SkillPanel(CommandPalette):
+    """Show compact skill rows using the slash-command menu's shared rendering."""
 
     def __init__(
         self, parent: ttk.Frame, catalog: dict[str, Any],
         activate: Callable[[list[str]], None], close: Callable[[], None],
     ) -> None:
-        """Build labelled metadata controls with direct keyboard activation."""
+        """Pair each skill's name and description with a colored status button."""
         self.activate = activate
         self.selected = set(catalog.get("active_skills", []))
         self.entries = list(catalog.get("skills", []))
         known = {item["id"] for item in self.entries}
         for identifier in sorted(self.selected - known):
             self.entries.append({"id": identifier, "name": identifier, "available": False,
-                                 "error": "Saved skill is missing or invalid. Disable it or restore its source."})
-        for diagnostic in catalog.get("diagnostics", []):
-            self.entries.append({"name": "Invalid skill", "available": False,
-                                 "manifest_path": diagnostic["path"], "error": diagnostic["error"]})
-        self.frame = ttk.Frame(parent, padding=8)
-        self.frame.columnconfigure(1, weight=1)
-        self.frame.rowconfigure(1, weight=1)
-        ttk.Label(self.frame, text="Skills · Up/Down to inspect · Space or Enter to toggle", wraplength=650).grid(
-            row=0, column=0, columnspan=2, sticky="w")
-        self.options = tk.Listbox(self.frame, width=25, height=5, exportselection=False, takefocus=True)
-        self.options.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
-        for item in self.entries:
-            status = "Active" if item.get("id") in self.selected else "Inactive"
-            if not item.get("available"):
-                status += " · Unavailable"
-            self.options.insert(tk.END, f"{status} · {item.get('id', item['name'])}")
-        self.options.bind("<<ListboxSelect>>", self.inspect)
-        self.options.bind("<Up>", lambda _event: self.move(-1))
-        self.options.bind("<Down>", lambda _event: self.move(1))
-        self.options.bind("<space>", lambda _event: self.choose_option())
-        self.options.bind("<Return>", lambda _event: self.choose_option())
-        review = ttk.Frame(self.frame)
-        review.grid(row=1, column=1, sticky="nsew")
-        self.details = tk.Text(review, width=45, height=5, wrap="word", takefocus=True)
-        self.details.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar = ttk.Scrollbar(review, command=self.details.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.details.configure(yscrollcommand=scrollbar.set)
+                                 "description": "This saved skill is unavailable. You can disable it."})
+        self.buttons: list[ttk.Button] = []
+        super().__init__(parent, self.choose_option)
+        self.frame = self
+        labels = [widget for widget in self.winfo_children() if isinstance(widget, ttk.Label)]
+        labels[0].configure(text="Skills", padding=(0, 4))
+        labels[0].pack_configure(pady=(4, 12))
+        self.footer_label = labels[1]
+        self.footer_label.configure(text="↑ ↓ Browse    Space / Enter Toggle    Esc Dismiss")
+        self.close_button = ttk.Button(self, text="×", width=3, style="Inset.TButton", command=close)
+        self.close_button.place(relx=1, x=-10, y=4, anchor="ne")
         self.notice = tk.StringVar(value=(catalog.get("skill_error") or {}).get("error", ""))
-        ttk.Label(self.frame, textvariable=self.notice, wraplength=650).grid(row=2, column=0, columnspan=2, sticky="w")
-        ttk.Button(self.frame, text="Close skills", command=close).grid(row=3, column=0, sticky="w")
-        self.limits = catalog.get("limits", {})
-        self.roots = catalog.get("roots", [])
-        self.provenance = catalog.get("skill_provenance", [])
-        if self.entries:
-            self.options.selection_set(0)
-        self.inspect()
+        self.notice_label = ttk.Label(self, textvariable=self.notice, style="Surface.TLabel", wraplength=480)
+        self.notice.trace_add("write", self._show_notice)
+        self._show_notice()
+        for index, item in enumerate(self.entries):
+            active = item["id"] in self.selected
+            button = ttk.Button(
+                self.canvas, text="ACTIVE" if active else "INACTIVE", width=9,
+                style="Skill.Success.TButton" if active else "Skill.Danger.TButton",
+                command=lambda index=index: self.toggle(index),
+            )
+            if not active and not item.get("available"):
+                button.state(["disabled"])
+            for sequence, step in (("<Up>", -1), ("<Down>", 1)):
+                button.bind(sequence, lambda _event, step=step: self.move(step))
+            button.bind("<Return>", lambda _event, index=index: self.toggle(index))
+            button.bind("<space>", lambda _event, index=index: self.toggle(index))
+            button.bind("<Escape>", lambda _event: close())
+            button.bind("<MouseWheel>", self._wheel)
+            self.buttons.append(button)
+        self.canvas.configure(takefocus=True, width=500)
+        self.canvas.bind("<Up>", lambda _event: self.move(-1))
+        self.canvas.bind("<Down>", lambda _event: self.move(1))
+        self.canvas.bind("<Return>", lambda _event: self.choose_option())
+        self.canvas.bind("<space>", lambda _event: self.choose_option())
+        self.canvas.bind("<Escape>", lambda _event: close())
+        self.set_choices([(item.get("name") or item["id"], item.get("description") or "This skill is unavailable.")
+                          for item in self.entries])
+
+    def _show_notice(self, *_args: str) -> None:
+        """Reserve space for feedback only when an activation error is present."""
+        if self.notice.get():
+            self.notice_label.pack(anchor="w", padx=8, pady=(4, 0))
+        else:
+            self.notice_label.pack_forget()
+
+    def redraw(self) -> None:
+        """Reuse rounded command rows and bound descriptions to two readable lines."""
+        super().redraw()
+        text_items = [item for item in self.canvas.find_all() if self.canvas.type(item) == "text"]
+        width = max(120, self.canvas.winfo_width())
+        self.footer_label.configure(wraplength=max(80, width - 16))
+        self.notice_label.configure(wraplength=max(80, width - 16))
+        shared_font = self.title_font.copy()
+        shared_font.configure(weight="normal")
+        for index, button in enumerate(self.buttons):
+            top = index * self.row_height
+            role = "Success" if self.entries[index]["id"] in self.selected else "Danger"
+            prefix = "Selected.Skill" if index == self.index else "Skill"
+            button.configure(style=prefix + "." + role + ".TButton")
+            button_width = button.winfo_reqwidth()
+            button_top = top + max(0, (self.row_height - 5 - button.winfo_reqheight()) // 2)
+            self.canvas.create_window(16, button_top, window=button, anchor="nw")
+            content_left = 28 + button_width
+            content_width = max(40, width - content_left - 16)
+            self.canvas.coords(text_items[index * 2], content_left, top + 9)
+            self.canvas.coords(text_items[index * 2 + 1], content_left, top + shared_font.metrics("linespace") + 13)
+            self.canvas.itemconfigure(text_items[index * 2 + 1], width=content_width)
+            name = " ".join(self.choices[index][0].split())
+            name_width = content_width
+            while name and self.title_font.measure(name) > name_width:
+                name = name[:-2].rstrip() + "…" if len(name) > 2 else ""
+            self.canvas.itemconfigure(text_items[index * 2], text=name)
+            words = self.choices[index][1].split()
+            lines: list[str] = []
+            line = ""
+            for word_index, word in enumerate(words):
+                candidate = (line + " " + word).strip()
+                if shared_font.measure(candidate) > content_width and line:
+                    lines.append(line)
+                    line = word
+                    if len(lines) == 2:
+                        lines[-1] = lines[-1].rstrip() + "…"
+                        break
+                else:
+                    line = candidate
+                if word_index == len(words) - 1:
+                    lines.append(line)
+            for line_index, description in enumerate(lines[:2]):
+                while description and shared_font.measure(description) > content_width:
+                    description = description[:-2].rstrip() + "…" if len(description) > 2 else ""
+                lines[line_index] = description
+            self.canvas.itemconfigure(text_items[index * 2 + 1], text="\n".join(lines[:2]))
+        if not self.entries:
+            self.canvas.configure(height=self.row_height)
+            self.canvas.create_text(16, 12, text="No installed skills.", anchor="nw",
+                                    font="TkDefaultFont", fill=COLORS["muted"])
 
     def move(self, step: int) -> str:
-        """Move the metadata selection without changing active skills."""
-        current = self.options.curselection()
-        index = max(0, min(len(self.entries) - 1, (current[0] if current else 0) + step))
-        self.options.selection_clear(0, tk.END)
-        if self.entries:
-            self.options.selection_set(index)
-            self.options.activate(index)
-            self.options.see(index)
-        self.inspect()
+        """Browse and reveal skills without changing their activation state."""
+        super().move(step)
+        self.canvas.focus_set()
         return "break"
 
-    def inspect(self, _event: object = None) -> None:
-        """Display bounded source metadata, requirements, diagnostics, and loading limits."""
-        selection = self.options.curselection()
-        item = self.entries[selection[0]] if selection else {}
-        text = "\n".join(f"{label}: {item.get(key, 'Not available')}" for label, key in (
-            ("Name", "name"), ("Description", "description"), ("Source", "source"),
-            ("Manifest location", "manifest_path"), ("Format version", "format_version"),
-            ("Required capabilities", "required_capabilities"), ("Required tools", "required_tools"),
-            ("Validation state", "validation_state"), ("Explanation", "error"),
-        )) if item else "No installed skills. Install a local skill and run /skills again."
-        text += "\nLoading limits: " + str(self.limits) + "\nDiscovery roots: " + "; ".join(self.roots)
-        for record in self.provenance:
-            if record["id"] == item.get("id"):
-                text += f"\nSaved active source: {record['manifest_path']}\nContent fingerprint: {record['sha256']}"
-        self.details.configure(state="normal")
-        self.details.delete("1.0", tk.END)
-        self.details.insert("1.0", text)
-        self.details.configure(state="disabled")
+    def _click(self, event: tk.Event) -> str:
+        """Select a row while reserving activation for its status button."""
+        index = int(self.canvas.canvasy(event.y) // self.row_height)
+        if 0 <= index < len(self.entries):
+            self.index = index
+            self.redraw()
+        self.canvas.focus_set()
+        return "break"
+
+    def toggle(self, index: int) -> str:
+        """Request an atomic status change for the clicked skill."""
+        self.index = index
+        return self.choose_option()
 
     def choose_option(self) -> str:
-        """Request an immediate atomic toggle without granting tools or permissions."""
-        selection = self.options.curselection()
-        if selection:
-            item = self.entries[selection[0]]
-            identifier = item.get("id")
-            identifiers = set(self.selected)
-            if identifier in identifiers:
-                identifiers.remove(identifier)
-            elif item.get("available"):
-                identifiers.add(identifier)
-            else:
-                self.notice.set(item.get("error", "This skill is unavailable."))
-                return "break"
-            self.activate(sorted(identifiers))
+        """Toggle the focused skill without granting tools or permissions."""
+        if not self.entries:
+            return "break"
+        item = self.entries[self.index]
+        identifier = item["id"]
+        identifiers = set(self.selected)
+        if identifier in identifiers:
+            identifiers.remove(identifier)
+        elif item.get("available"):
+            identifiers.add(identifier)
+        else:
+            self.notice.set(item.get("error", "This skill is unavailable."))
+            return "break"
+        self.activate(sorted(identifiers))
         return "break"
 
 
@@ -1116,10 +1166,24 @@ class FluxDesktop:
         self._layout_timer = None
         if self._closing:
             return
-        bottom = self.transcript.yview()[1] >= 0.97
+        position = self._viewport_pixels()
         self._reflow_embedded()
-        if bottom:
-            self.transcript.see(tk.END)
+        self._restore_viewport_pixels(position)
+
+    def _viewport_pixels(self) -> int:
+        """Capture the vertical offset, including partially clipped embedded bubbles."""
+        height = self.transcript.count("1.0", tk.END, "update", "ypixels")
+        total = height if isinstance(height, int) else height[0] if height else 0
+        return round(self.transcript.yview()[0] * total)
+
+    def _restore_viewport_pixels(self, position: int) -> None:
+        """Restore the offset after embedded widget geometry settles, without following output."""
+        self.transcript.update_idletasks()
+        height = self.transcript.count("1.0", tk.END, "update", "ypixels")
+        total = height if isinstance(height, int) else height[0] if height else 0
+        # Avoid another scrollbar/layout callback when geometry did not move the view.
+        if abs(round(self.transcript.yview()[0] * total) - position) > 1:
+            self.transcript.yview_moveto(position / total if total else 0)
 
     def _track_reflow(self, widget: tk.Text, kind: str, display: str, max_rows: int) -> None:
         """Track only live embedded text and release layout metadata on destruction."""
@@ -1356,7 +1420,7 @@ class FluxDesktop:
             self.jump_button.grid_remove()
 
     def jump_to_latest(self) -> None:
-        """Resume following streamed output at the bottom of the selected conversation."""
+        """Move to the current end only when the user requests it."""
         self.transcript.see(tk.END)
         self.jump_button.grid_remove()
 
@@ -1560,8 +1624,7 @@ class FluxDesktop:
             self._render_pending = True
             return
         view = self.views.get(self.active_conversation_id)
-        bottom = self.transcript.yview()[1] >= 0.97
-        top = self.transcript.index("@0,0")
+        position = self._viewport_pixels()
         layout = (self.active_conversation_id, self._presentation["text_size"])
         grouped: dict[str, list[dict[str, Any]]] = {}
         if view:
@@ -1637,10 +1700,7 @@ class FluxDesktop:
             self._rendered_blocks.append((signature, mark, self._transcript_widgets[first_widget:]))
         self.transcript.configure(state="disabled")
         self._reflow_embedded()
-        if bottom:
-            self.transcript.see(tk.END)
-        else:
-            self.transcript.yview(top)
+        self._restore_viewport_pixels(position)
         busy = self.active_conversation_id in self._skill_changing or bool(view and (not view.history_loaded or view.sending or view.transport_active or view.active_turn_id))
         active = bool(view and view.active_turn_id)
         self.send_button.configure(text="■" if active else "↑", command=self.cancel_turn if active else self.send_turn,
@@ -2375,8 +2435,7 @@ class FluxDesktop:
                 return
             focused_index = 0
             if self._skill_panel:
-                selection = self._skill_panel.options.curselection()
-                focused_index = selection[0] if selection else 0
+                focused_index = self._skill_panel.index
                 self._skill_panel.frame.destroy()
             self._skill_metadata[conversation_id] = catalog
             output = "\n".join(f"- **{item['id']}** — {item.get('description') or item.get('error') or item.get('name', '')}" for item in catalog.get("skills", [])) or "No installed skills."
@@ -2387,11 +2446,12 @@ class FluxDesktop:
                                           lambda identifiers: self.activate_skills(conversation_id, identifiers),
                                           self.close_skills)
             self._skill_panel.frame.grid(row=0, column=0, sticky="nsew")
-            self._skill_container.place(in_=self.transcript, relx=0, rely=0, relwidth=1, relheight=1)
+            self._skill_container.place(in_=self.transcript, relx=0.5, rely=1, anchor="s",
+                                        width=min(560, max(240, self.transcript.winfo_width() - 24)))
             self._skill_container.lift()
             self.jump_button.grid_remove()
             self._skill_panel.move(focused_index)
-            self._skill_panel.options.focus_set()
+            self._skill_panel.canvas.focus_set()
 
         self._run_task(lambda: self.client.skills(workspace, conversation_id), loaded)
 

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
-from harness_prototype.desktop_design import COLORS
+from harness_prototype.desktop_design import COLORS, CommandPalette
 from harness_prototype.desktop import (
     ConversationView, DecisionDialog, DecisionOptions, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
 )
@@ -451,32 +451,118 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         self.client.select_skills.assert_called_with("one", [], False)
         self.client.stream_turn.assert_not_called()
 
-    def test_inline_keyboard_selection_metadata_and_close_restore_focus(self) -> None:
-        """Inspect with arrows and toggle using Space without opening a selection popup."""
+    def test_inline_keyboard_toggle_and_close_restore_focus(self) -> None:
+        """Browse compact rows and toggle with Space without opening a popup."""
         self.desktop.send_turn("/skills")
         self.tasks.call_args.args[1](self.catalog)
         panel = self.desktop._skill_panel
         self.assertIsInstance(panel, SkillPanel)
+        self.assertIsInstance(panel, CommandPalette)
         self.assertFalse(any(isinstance(widget, tk.Toplevel) for widget in self.root.winfo_children()))
-        self.assertIn("Format version: 1", panel.details.get("1.0", tk.END))
         self.root.update()
-        panel.options.focus_force()
+        panel.canvas.focus_force()
         self.root.update()
-        panel.options.event_generate("<space>")
+        panel.canvas.event_generate("<space>")
         self.root.update()
         for request in self.tasks.call_args_list:
             request.args[0]()
         self.client.select_skills.assert_called_once_with("one", ["fixture.valid"], False)
-        panel.options.event_generate("<Down>")
+        panel.canvas.event_generate("<Down>")
         self.root.update()
-        self.assertIn("Unavailable capabilities", panel.details.get("1.0", tk.END))
-        panel.options.event_generate("<Return>")
+        panel.canvas.event_generate("<Return>")
         self.root.update()
         self.assertIn("Unavailable capabilities", panel.notice.get())
-        self.desktop.close_skills()
+        panel.close_button.invoke()
         self.root.update()
         self.assertIsNone(self.desktop._skill_panel)
         self.assertEqual(self.root.focus_get(), self.desktop.message_input)
+
+    def test_skill_status_buttons_and_compact_command_rows(self) -> None:
+        """Use palette colors and concise rows with safe click activation."""
+        activate = MagicMock()
+        panel = SkillPanel(self.root, self.catalog, activate, MagicMock())
+        self.root.geometry("800x600")
+        panel.place(x=0, y=0, width=560)
+        self.root.update()
+        self.assertEqual(panel.canvas.cget("background"), COLORS["surface"])
+        self.assertEqual(panel.buttons[0].cget("style"), "Selected.Skill.Danger.TButton")
+        self.assertEqual(panel.buttons[0].cget("text"), "INACTIVE")
+        self.assertEqual(panel.close_button.cget("text"), "×")
+        text = "\n".join(panel.canvas.itemcget(item, "text") for item in panel.canvas.find_all()
+                         if panel.canvas.type(item) == "text")
+        self.assertIn("Fixture", text)
+        self.assertIn("Harmless fixture", text)
+        self.assertNotIn("manifest", text.lower())
+        self.assertNotIn("Format version", text)
+        self.assertLessEqual(panel.canvas.winfo_reqheight(), panel.row_height * 4)
+        self.assertFalse(any(isinstance(widget, ttk.Scrollbar) for widget in panel.winfo_children()))
+        panel.buttons[0].invoke()
+        activate.assert_called_once_with(["fixture.valid"])
+        activate.reset_mock()
+        self.assertTrue(panel.buttons[1].instate(["disabled"]))
+        panel.buttons[1].invoke()
+        activate.assert_not_called()
+        panel.destroy()
+
+        panel = SkillPanel(self.root, {"skills": [], "active_skills": ["missing"]}, activate, MagicMock())
+        self.assertEqual(panel.buttons[0].cget("text"), "ACTIVE")
+        self.assertEqual(panel.buttons[0].cget("style"), "Selected.Skill.Success.TButton")
+        self.assertFalse(panel.buttons[0].instate(["disabled"]))
+        panel.buttons[0].invoke()
+        activate.assert_called_once_with([])
+        panel.destroy()
+
+        panel = SkillPanel(self.root, {"skills": []}, activate, MagicMock())
+        self.assertEqual(panel.buttons, [])
+        self.assertEqual(panel.choose_option(), "break")
+        panel.destroy()
+
+    def test_long_skill_descriptions_keep_menu_height_bounded(self) -> None:
+        """Keep large catalogs and descriptions within four compact visible rows."""
+        catalog = {"skills": [{"id": str(index), "name": "Skill", "available": True,
+                               "description": "A long readable description. " * 100}
+                              for index in range(8)]}
+        panel = SkillPanel(self.root, catalog, MagicMock(), MagicMock())
+        self.root.geometry("800x600")
+        panel.place(x=0, y=0, width=560)
+        self.root.update()
+        panel.redraw()
+        descriptions = [panel.canvas.itemcget(item, "text") for item in panel.canvas.find_all()
+                        if panel.canvas.type(item) == "text"][1::2]
+        self.assertTrue(all(len(text.splitlines()) <= 2 for text in descriptions))
+        self.assertTrue(all(text.endswith("…") for text in descriptions))
+        self.assertEqual(panel.canvas.winfo_reqheight(), panel.row_height * 4)
+        panel.move(7)
+        self.assertEqual(panel.index, 7)
+        self.assertGreater(panel.canvas.yview()[0], 0)
+        panel.destroy()
+
+    def test_skill_row_controls_and_text_do_not_overlap_at_text_sizes(self) -> None:
+        """Keep buttons and text inside their rounded rows across app font sizes."""
+        self.root.geometry("800x600")
+        for size in ("small", "default", "large"):
+            for width in (360, 560):
+                with self.subTest(size=size, width=width):
+                    self.desktop.theme.set_text_size(size)
+                    panel = SkillPanel(self.root, self.catalog, MagicMock(), MagicMock())
+                    panel.place(x=0, y=0, width=width)
+                    self.root.update()
+                    panel.redraw()
+                    self.root.update_idletasks()
+                    text_items = [item for item in panel.canvas.find_all()
+                                  if panel.canvas.type(item) == "text"]
+                    for index, button in enumerate(panel.buttons):
+                        title = panel.canvas.bbox(text_items[index * 2])
+                        description = panel.canvas.bbox(text_items[index * 2 + 1])
+                        self.assertGreater(title[0], button.winfo_x() + button.winfo_width())
+                        self.assertGreater(description[0], button.winfo_x() + button.winfo_width())
+                        self.assertGreaterEqual(description[1], title[3])
+                        self.assertLessEqual(description[3], (index + 1) * panel.row_height - 5)
+                        self.assertLessEqual(description[2], panel.canvas.winfo_width() - 4)
+                        self.assertGreaterEqual(button.winfo_y(), index * panel.row_height)
+                        self.assertLessEqual(button.winfo_y() + button.winfo_height(),
+                                             (index + 1) * panel.row_height - 5)
+                    panel.destroy()
 
     def test_activation_keeps_owner_and_failure_never_retries(self) -> None:
         """Keep activation bound to the originating chat after navigation or disconnect."""
@@ -511,6 +597,78 @@ class DynamicSkillWidgetTests(unittest.TestCase):
 
 
 class DesktopWidgetTests(unittest.TestCase):
+    def test_viewport_accepts_scalar_and_tuple_tk_pixel_counts(self) -> None:
+        """Handle Tkinter's scalar update counts as well as tuple and empty counts."""
+        desktop = FluxDesktop.__new__(FluxDesktop)
+        desktop.transcript = MagicMock()
+        desktop.transcript.yview.return_value = (0.25, 0.75)
+        for height in (1000, (1000,)):
+            with self.subTest(height=height):
+                desktop.transcript.count.return_value = height
+                self.assertEqual(desktop._viewport_pixels(), 250)
+                desktop._restore_viewport_pixels(100)
+                desktop.transcript.yview_moveto.assert_called_with(0.1)
+        for height in (0, None):
+            with self.subTest(height=height):
+                desktop.transcript.count.return_value = height
+                self.assertEqual(desktop._viewport_pixels(), 0)
+                desktop._restore_viewport_pixels(0)
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_activity_preserves_pixels_and_refocus_allows_scrolling(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Keep clipped bubbles stationary across activity and allow scrolling after refocus."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one"})
+        view = desktop.views["one"]
+        view.recover([])
+        for index in range(8):
+            view.turns[str(index)] = {"user_prompt": "Earlier prompt " * 80,
+                                      "status": "success", "events": []}
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "active",
+                                   "sequence": 1, "type": "turn_started"})
+        root.deiconify()
+        root.update()
+        sequence = 1
+        for fraction in (0.35, 1.0):
+            desktop.transcript.yview_moveto(fraction)
+            root.update_idletasks()
+            position = desktop._viewport_pixels()
+            for kind, extra in (("tool_call", {"name": "read_file", "tool_call_id": str(fraction)}),
+                                ("tool_result", {"name": "read_file", "tool_call_id": str(fraction),
+                                                 "result": {"ok": True, "content": "fixture"}}),
+                                ("assistant_text", {"text": "New output\n" * 30})):
+                sequence += 1
+                desktop._turn_event("one", {"conversation_id": "one", "turn_id": "active",
+                                           "sequence": sequence, "type": kind, **extra})
+                root.update_idletasks()
+                desktop._layout_changed()
+                self.assertAlmostEqual(desktop._viewport_pixels(), position, delta=1)
+        desktop.jump_to_latest()
+        root.update_idletasks()
+        self.assertAlmostEqual(desktop.transcript.yview()[1], 1.0, delta=0.001)
+        desktop.transcript.event_generate("<FocusOut>")
+        desktop.transcript.event_generate("<FocusIn>")
+        position = desktop._viewport_pixels()
+        desktop.transcript.yview_scroll(-1, "units")
+        root.update_idletasks()
+        scrolled = desktop._viewport_pixels()
+        self.assertLess(scrolled, position)
+        # Near-bottom layout must not snap back or repeatedly schedule itself.
+        for _ in range(3):
+            if desktop._layout_timer is not None:
+                root.after_cancel(desktop._layout_timer)
+            desktop._layout_changed()
+            root.update_idletasks()
+            self.assertAlmostEqual(desktop._viewport_pixels(), scrolled, delta=1)
+        self.assertIsNone(desktop._layout_timer)
+
     @patch.object(FluxDesktop, "_run_task")
     @patch.object(FluxDesktop, "_load_history")
     def test_stream_updates_keep_completed_bubbles_and_wheel_scrolls_chat(self, _history: MagicMock, _tasks: MagicMock) -> None:

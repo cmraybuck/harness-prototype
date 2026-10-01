@@ -366,10 +366,14 @@ Desktop conversations start normally with no active skills. Use the composer
 commands `/skills` to discover and inspect installed skills, `/skill id[,id]` to
 replace the active set, and `/skill` to clear it, matching the terminal commands.
 These commands are handled locally rather than sent to Ollama. **Skills…** also
-opens the inline inspector; it never opens a skill-selection popup. Up/Down
-inspects metadata, requirements, validation explanations, source provenance, and
-loading limits; Space or Enter directly toggles the focused skill. Closing the
-inspector restores composer focus. Active IDs remain visible beside the composer.
+opens a compact menu styled like the slash-command suggestions: rounded rows
+show only a skill's name, a description of up to two lines, and a clickable
+**INACTIVE** (palette red) or **ACTIVE** (palette green) status button. Up/Down
+browses rows; Space or Enter toggles the focused skill. Longer lists scroll with
+the mouse wheel without a scrollbar, and the menu shows at most four rows.
+Unavailable skills cannot be enabled; saved missing skills can still be disabled.
+The **×** control or Escape closes the menu and restores composer focus.
+Active IDs remain visible beside the composer.
 
 Activation is atomic and retains conversation history and active capability
 groups, just like the terminal. A failed activation preserves the previous set;
@@ -793,7 +797,9 @@ bubbles, Markdown responses, collapsible Working per turn, and a growing compose
 Enter sends, Shift+Enter inserts a newline, and the cyan arrow becomes a stop square
 during work. Hovering or focusing the control identifies its action.
 Drafting remains available during turns; no message is queued. Code offers Copy
-and bounded Show more; scrolling up preserves reading position with Jump to latest.
+and bounded Show more. Agent output, tool activity, and reflow preserve the chat’s
+vertical pixel position, including at the bottom; Jump to latest moves to the
+current end only when clicked and does not enable automatic following.
 Each selected chat has a slim rounded scrollbar; wheel input over bubbles scrolls
 the same conversation. Completed turn widgets remain stable while a changed tail
 is rendered, and queued streaming events share one repaint per UI callback batch.
