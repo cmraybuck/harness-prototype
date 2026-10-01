@@ -41,6 +41,7 @@ class WindowFrame:
         self.class_styles: list[tuple[int, int]] = []
         self.maximize_hovered = False
         self._maximize_hover_applied = False
+        self._maximize_icon_applied = False
         root.bind("<Configure>", self._cache_layout, add=True)
         root.bind("<Map>", self._mapped, add=True)
         root.bind("<Destroy>", self._destroyed, add=True)
@@ -240,6 +241,13 @@ class WindowFrame:
         if self.previous and self.maximize_hovered != self._maximize_hover_applied:
             self._maximize_hover_applied = self.maximize_hovered
             self.maximize_button.state(["active"] if self.maximize_hovered else ["!active"])
+
+    def sync_window_state(self) -> None:
+        """Show restore boxes when maximized, updating the icon only on state changes."""
+        maximized = self.root.state() == "zoomed"
+        if maximized != self._maximize_icon_applied:
+            self._maximize_icon_applied = maximized
+            self.maximize_button.configure(text="❐" if maximized else "□")
 
     def _destroyed(self, event: tk.Event) -> None:
         """Restore Tk's original procedure before releasing the callback reference."""

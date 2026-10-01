@@ -45,6 +45,25 @@ class DesktopDesignTests(unittest.TestCase):
         self.assertEqual(desktop._zoom_wheel(MagicMock(delta=120)), "break")
         self.assertEqual(desktop._zoom_requested, 110)
 
+    def test_maximize_icon_tracks_window_state_without_repeated_redraws(self) -> None:
+        """Reflect maximize and restore transitions, including external window actions."""
+        frame = WindowFrame.__new__(WindowFrame)
+        frame.root = MagicMock()
+        frame.maximize_button = MagicMock()
+        frame._maximize_icon_applied = False
+        frame.root.state.return_value = "normal"
+        frame.sync_window_state()
+        frame.maximize_button.configure.assert_not_called()
+        frame.root.state.return_value = "zoomed"
+        frame.sync_window_state()
+        frame.maximize_button.configure.assert_called_once_with(text="❐")
+        frame.sync_window_state()
+        self.assertEqual(frame.maximize_button.configure.call_count, 1)
+        frame.root.state.return_value = "normal"
+        frame.sync_window_state()
+        frame.maximize_button.configure.assert_called_with(text="□")
+        self.assertEqual(frame.maximize_button.configure.call_count, 2)
+
     def test_native_maximize_hover_is_applied_only_on_ui_thread(self) -> None:
         """Bridge non-client hover to shared ttk states without reentering Tcl in callbacks."""
         frame = WindowFrame.__new__(WindowFrame)

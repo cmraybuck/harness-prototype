@@ -1295,6 +1295,7 @@ class FluxDesktop:
     def _drain_ui_callbacks(self) -> None:
         """Run queued worker completions only from Tk's owning thread."""
         self.window_frame.sync_hover()
+        self.window_frame.sync_window_state()
         self._batching_events = True
         try:
             for _ in range(100):
