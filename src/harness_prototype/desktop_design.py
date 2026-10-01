@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import re
+import sys
 import tkinter as tk
 from tkinter import font, ttk
 from typing import Any
@@ -25,6 +26,12 @@ ICONS = {"sidebar": "☰", "new": "+", "pin": "◆", "working": "›", "close": 
 TEXT_SIZES = {"small": 10, "default": 11, "large": 13}
 FONT_FAMILY = "Segoe UI"
 CODE_FAMILY = "Consolas"
+CAPTION_GLYPHS = ({"minimize": "\ue921", "maximize": "\ue922", "restore": "\ue923", "close": "\ue8bb"}
+                  if sys.platform == "win32" else
+                  {"minimize": "−", "maximize": "□", "restore": "❐", "close": "×"})
+MARK_PATHS = (((16, 2, 30, 10, 24, 14, 16, 9, 8, 14, 2, 10), COLORS["accent"]),
+              ((2, 16, 8, 12, 8, 21, 16, 26, 16, 32, 2, 24), COLORS["accent"]),
+              ((30, 16, 24, 12, 24, 21, 16, 26, 16, 32, 30, 24), COLORS["success"]))
 
 
 class FluxTheme:
@@ -70,7 +77,23 @@ class FluxTheme:
         self.style.layout("Selected.Dropdown.Inset.TButton", [("Flux.dropdownselected", {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
         self.style.configure("Selected.Dropdown.Inset.TButton", foreground=COLORS["accent"])
-        self.style.configure("Danger.Titlebar.TButton", foreground=COLORS["failure"])
+        for prefix, hover, pressed in (("Caption", COLORS["hover"], COLORS["selected"]),
+                                        ("Close.Caption", "#c42b1c", "#a52317")):
+            assets = []
+            for state, color in (("", COLORS["titlebar"]), ("pressed", pressed), ("active", hover)):
+                asset = ImageTk.PhotoImage(Image.new("RGB", (round(46 * self.scale), round(32 * self.scale)), color), master=root)
+                self.images.append(asset)
+                assets.append((state, asset))
+            element = "Flux." + prefix.lower()
+            if element not in self.style.element_names():
+                self.style.element_create(element, "image", assets[0][1],
+                                          *((state, asset) for state, asset in assets[1:]), sticky="nsew")
+            self.style.layout(prefix + ".TButton", [(element, {"sticky": "nsew", "children": [
+                ("Button.label", {"sticky": "nsew"})]})])
+            self.style.configure(prefix + ".TButton", padding=0, anchor="center", foreground=COLORS["text"],
+                                 font=("Segoe MDL2 Assets" if sys.platform == "win32" else FONT_FAMILY,
+                                       -round(10 * self.scale)))
+        self.style.map("Close.Caption.TButton", foreground=[("active", "#ffffff"), ("pressed", "#ffffff")])
         self.style.configure("TButton", padding=(4, 2), foreground=COLORS["text"], anchor="center")
         self.style.map("TButton", foreground=[("disabled", COLORS["disabled"])])
         self.style.configure("Accent.TButton", foreground=COLORS["accent"])
@@ -170,10 +193,23 @@ class FluxTheme:
 def draw_mark(canvas: tk.Canvas, size: int = 32) -> None:
     """Draw an interlocking geometric current using the portable SVG's paths."""
     ratio = size / 32
-    for points, color in (((16, 2, 30, 10, 24, 14, 16, 9, 8, 14, 2, 10), COLORS["accent"]),
-                          ((2, 16, 8, 12, 8, 21, 16, 26, 16, 32, 2, 24), COLORS["accent"]),
-                          ((30, 16, 24, 12, 24, 21, 16, 26, 16, 32, 30, 24), COLORS["success"])):
+    for points, color in MARK_PATHS:
         canvas.create_polygon(*(point * ratio for point in points), fill=color, outline="")
+
+
+def set_application_icon(root: tk.Tk) -> None:
+    """Replace Tk's default icon with the shared FLUX mark at taskbar and window sizes."""
+    images = []
+    for size in (16, 32, 48, 64, 256):
+        image = Image.new("RGBA", (size * 4, size * 4))
+        draw = ImageDraw.Draw(image)
+        ratio = size * 4 / 36
+        for points, color in MARK_PATHS:
+            draw.polygon([((points[index] + 2) * ratio, (points[index + 1] + 2) * ratio)
+                          for index in range(0, len(points), 2)], fill=color)
+        images.append(ImageTk.PhotoImage(image.resize((size, size), Image.Resampling.LANCZOS), master=root))
+    root.iconphoto(True, *images)
+    root._flux_icons = images
 
 
 class DropdownMenu:

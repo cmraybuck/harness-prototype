@@ -8,12 +8,23 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from harness_prototype.desktop import ConversationView, FluxDesktop
-from harness_prototype.desktop_design import COLORS, FONT_FAMILY, ContextHint, DropdownButton, DropdownMenu, FluxTheme, SessionSearch, contrast_ratio, markdown_blocks
+from harness_prototype.desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, ContextHint, DropdownButton, DropdownMenu, FluxTheme, SessionSearch, contrast_ratio, markdown_blocks, set_application_icon
 from harness_prototype.desktop_platform import WindowFrame, open_link, restored_geometry
 
 
 class DesktopDesignTests(unittest.TestCase):
     """Exercise visual contracts without a model or personal filesystem fixtures."""
+
+    def test_application_icon_replaces_default_and_is_retained(self) -> None:
+        """Supply multiple FLUX sizes and inherit the icon in later application windows."""
+        root = MagicMock()
+        with patch("harness_prototype.desktop_design.ImageTk.PhotoImage", side_effect=lambda image, **kwargs: image):
+            set_application_icon(root)
+        root.iconphoto.assert_called_once_with(True, *root._flux_icons)
+        self.assertEqual([image.size for image in root._flux_icons], [(16, 16), (32, 32), (48, 48), (64, 64), (256, 256)])
+        image = root._flux_icons[-1]
+        self.assertEqual(image.getpixel((0, 0))[3], 0)
+        self.assertEqual(image.getpixel((128, 40))[:3], (145, 212, 213))
 
     def test_visible_context_hint_refreshes_without_reopening(self) -> None:
         """Update a displayed action hint immediately when its underlying state changes."""
@@ -58,12 +69,12 @@ class DesktopDesignTests(unittest.TestCase):
         frame.maximize_button.configure.assert_not_called()
         frame.root.state.return_value = "zoomed"
         frame.sync_window_state()
-        frame.maximize_button.configure.assert_called_once_with(text="❐")
+        frame.maximize_button.configure.assert_called_once_with(text=CAPTION_GLYPHS["restore"])
         frame.sync_window_state()
         self.assertEqual(frame.maximize_button.configure.call_count, 1)
         frame.root.state.return_value = "normal"
         frame.sync_window_state()
-        frame.maximize_button.configure.assert_called_with(text="□")
+        frame.maximize_button.configure.assert_called_with(text=CAPTION_GLYPHS["maximize"])
         self.assertEqual(frame.maximize_button.configure.call_count, 2)
 
     def test_native_maximize_hover_is_applied_only_on_ui_thread(self) -> None:

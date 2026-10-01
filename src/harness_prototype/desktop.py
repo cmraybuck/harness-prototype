@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 from .application_service import DesktopServiceHost
 from .application_state import StateStoreError
-from .desktop_design import COLORS, FONT_FAMILY, MOTION, TEXT_SIZES, ContextHint, DialogBody, DropdownButton, DropdownMenu, FluxTheme, SessionList, SessionSearch, draw_mark, markdown_blocks
+from .desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, MOTION, TEXT_SIZES, ContextHint, DialogBody, DropdownButton, DropdownMenu, FluxTheme, SessionList, SessionSearch, draw_mark, markdown_blocks, set_application_icon
 from .desktop_platform import WindowFrame, display_bounds, open_link, system_reduced_motion, dark_dialog_frame
 
 
@@ -628,6 +628,7 @@ class FluxDesktop:
     ) -> None:
         """Build application navigation and schedule initial backend loading."""
         self.root = root
+        set_application_icon(root)
         self.client = client
         self.stop_backend = stop_backend
         self.workspace = initial_workspace.resolve()
@@ -724,10 +725,10 @@ class FluxDesktop:
         mark.pack(side=tk.LEFT, padx=(0, 10))
         draw_mark(mark)
         ttk.Label(titlebar, text="FLUX", style="Titlebar.Title.TLabel").pack(side=tk.LEFT)
-        ttk.Button(titlebar, text="×", width=3, style="Danger.Titlebar.TButton", command=self.close).pack(side=tk.RIGHT)
-        maximize = ttk.Button(titlebar, text="□", width=3, style="Titlebar.TButton", command=lambda: self.window_frame.maximize())
-        maximize.pack(side=tk.RIGHT, padx=4)
-        ttk.Button(titlebar, text="−", width=3, style="Titlebar.TButton", command=self.root.iconify).pack(side=tk.RIGHT)
+        ttk.Button(titlebar, text=CAPTION_GLYPHS["close"], width=0, style="Close.Caption.TButton", command=self.close).pack(side=tk.RIGHT)
+        maximize = ttk.Button(titlebar, text=CAPTION_GLYPHS["maximize"], width=0, style="Caption.TButton", command=lambda: self.window_frame.maximize())
+        maximize.pack(side=tk.RIGHT)
+        ttk.Button(titlebar, text=CAPTION_GLYPHS["minimize"], width=0, style="Caption.TButton", command=self.root.iconify).pack(side=tk.RIGHT)
         self.connection_label = ttk.Label(titlebar, textvariable=self.status_text, style="Titlebar.Status.TLabel", wraplength=300)
         self.connection_label.pack(side=tk.RIGHT, padx=12)
         self.window_frame = WindowFrame(self.root, titlebar, maximize)

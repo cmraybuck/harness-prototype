@@ -796,8 +796,10 @@ Ctrl+scroll, Ctrl+plus (or Ctrl+equals), and Ctrl+minus zoom the entire interfac
 from 75% to 150%. Ctrl+0 restores 100%. Zoom scales fonts, controls, icons, and
 spacing without clearing the conversation or draft, and survives restart.
 The larger send arrow uses a tighter control, the search magnifier is a drawn
-icon, and the live hamburger hint names the Side Panel. Windows maximize hover
-uses the same control state as the neighboring window buttons.
+icon, and the live hamburger hint names the Side Panel. The window controls
+use flat Windows-style caption buttons with standard minimize, maximize/restore,
+and close glyphs, including a red close hover. The window and taskbar use the
+FLUX geometric mark instead of the default Tk icon.
 
 Sessions support deterministic first-prompt titles, rename, pin, archive, and confirmed
 permanent deletion. Pinned groups precede recent sessions, ordered by message activity.

@@ -10,6 +10,8 @@ import tkinter as tk
 from urllib.parse import unquote, urlsplit
 import webbrowser
 
+from .desktop_design import CAPTION_GLYPHS
+
 
 class _MouseTracking(ctypes.Structure):
     """Describe non-client pointer departure without querying Tk from native callbacks."""
@@ -249,7 +251,7 @@ class WindowFrame:
         maximized = self.root.state() == "zoomed"
         if maximized != self._maximize_icon_applied:
             self._maximize_icon_applied = maximized
-            self.maximize_button.configure(text="❐" if maximized else "□")
+            self.maximize_button.configure(text=CAPTION_GLYPHS["restore" if maximized else "maximize"])
 
     def _destroyed(self, event: tk.Event) -> None:
         """Restore Tk's original procedure before releasing the callback reference."""
