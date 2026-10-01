@@ -13,7 +13,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Condition, Event, Lock, Thread
-from time import monotonic
+from time import monotonic, time
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
@@ -113,7 +113,7 @@ class PermissionBroker:
     def __init__(self) -> None:
         """Create an empty thread-safe request registry."""
         self._lock = Lock()
-        self._pending: dict[str, tuple[Event, str | None, tuple[str, ...]]] = {}
+        self._pending: dict[str, tuple[Event, str | None, tuple[str, ...], float]] = {}
 
     def request(
         self,
@@ -124,10 +124,10 @@ class PermissionBroker:
         """Publish a request and wait boundedly for its matching decision."""
         request_id = str(uuid4())
         ready = Event()
-        with self._lock:
-            self._pending[request_id] = (ready, None, tuple(event["choices"]))
-        emit("permission_request", {"permission_request_id": request_id, **event})
         deadline = monotonic() + PERMISSION_TIMEOUT_SECONDS
+        with self._lock:
+            self._pending[request_id] = (ready, None, tuple(event["choices"]), deadline)
+        emit("permission_request", {"permission_request_id": request_id, "expires_at": time() + PERMISSION_TIMEOUT_SECONDS, **event})
         while not ready.wait(0.1):
             if cancelled() or monotonic() >= deadline:
                 break
@@ -142,9 +142,9 @@ class PermissionBroker:
         """Resolve one pending permission exactly once."""
         with self._lock:
             pending = self._pending.get(request_id)
-            if pending is None or pending[1] is not None or decision not in pending[2]:
+            if pending is None or pending[1] is not None or decision not in pending[2] or monotonic() >= pending[3]:
                 return False
-            self._pending[request_id] = (pending[0], decision, pending[2])
+            self._pending[request_id] = (pending[0], decision, pending[2], pending[3])
             pending[0].set()
             return True
 
@@ -303,28 +303,48 @@ class ConversationRegistry:
             self.skill_failures.pop(conversation_id, None)
         return runtime
 
-    def list(self, limit: int, after: str | None) -> tuple[list[dict[str, Any]], str | None]:
+    def list(self, limit: int, after: str | None, *, archived: bool | None = None, search: str = "") -> tuple[list[dict[str, Any]], str | None]:
         """Return one stable page of persisted conversation metadata."""
         try:
-            return self.store.list_conversations(limit, after)
+            return self.store.list_conversations(limit, after, archived=archived, search=search)
         except ValueError as error:
             raise ProtocolError("invalid_cursor", str(error), HTTPStatus.BAD_REQUEST) from error
 
     def rename(self, conversation_id: str, title: str) -> AgentRuntime:
-        """Rename an idle conversation without changing its retained context."""
-        runtime = self.get_idle(conversation_id)
-        self.store.update_metadata(conversation_id, title=title)
+        """Rename without changing context or message activity order."""
+        runtime = self.get(conversation_id)
+        with self._lock:
+            if self.store.load(conversation_id) is None:
+                raise ProtocolError("conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND)
+            self.store.update_metadata(conversation_id, title=title)
+        return runtime
+
+    def session_state(self, conversation_id: str, field: str, value: Any) -> AgentRuntime:
+        """Atomically enforce archive idleness alongside turn reservation."""
+        runtime = self.get(conversation_id)
+        with self._lock:
+            if self.store.load(conversation_id) is None:
+                raise ProtocolError("conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND)
+            if field == "archived" and conversation_id in self._active_turns:
+                raise ProtocolError("conversation_busy", "Stop active work before archiving this session.", HTTPStatus.CONFLICT)
+            try:
+                self.store.set_session_state(conversation_id, field, value)
+            except ValueError as error:
+                raise ProtocolError("invalid_request", str(error), HTTPStatus.BAD_REQUEST) from error
+            except (sqlite3.Error, StateStoreError, OSError):
+                raise ProtocolError("state_unavailable", "Session state could not be saved. Try again.", HTTPStatus.SERVICE_UNAVAILABLE) from None
         return runtime
 
     def delete(self, conversation_id: str) -> None:
-        """Delete an idle persisted conversation and evict its runtime."""
-        self.get_idle(conversation_id)
-        if not self.store.delete(conversation_id):
-            raise ProtocolError(
-                "conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND
-            )
+        """Delete idle session history and drafts, retaining workspace files and logs."""
+        self.get(conversation_id)
         with self._lock:
+            if conversation_id in self._active_turns:
+                raise ProtocolError("conversation_busy", "Stop active work before deleting this session.", HTTPStatus.CONFLICT)
+            if not self.store.delete(conversation_id):
+                raise ProtocolError("conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND)
             self._runtimes.pop(conversation_id, None)
+            self.skill_failures.pop(conversation_id, None)
 
     def begin_turn(self, conversation_id: str, turn_id: str) -> AgentRuntime:
         """Prepare and reserve one conversation for an identified turn."""
@@ -344,6 +364,11 @@ class ConversationRegistry:
                     "Conversation already has an active turn.",
                     HTTPStatus.CONFLICT,
                 )
+            persisted = self.store.load(conversation_id)
+            if persisted is None:
+                raise ProtocolError("conversation_not_found", "Conversation was not found.", HTTPStatus.NOT_FOUND)
+            if persisted.get("archived"):
+                raise ProtocolError("conversation_archived", "Unarchive this session before sending a message.", HTTPStatus.CONFLICT)
             runtime.prepare_turn()
             self._active_turns[conversation_id] = (turn_id, runtime)
         return runtime
@@ -479,6 +504,8 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                 )
             elif parts == [API_VERSION, "capabilities"]:
                 self._json(HTTPStatus.OK, self._capabilities())
+            elif parts == [API_VERSION, "presentation"]:
+                self._json(HTTPStatus.OK, self.server.registry.grants.state.get("desktop", "presentation", {}))
             elif parts == [API_VERSION, "settings"]:
                 self._json(HTTPStatus.OK, self._settings())
             elif parts == [API_VERSION, "skills"]:
@@ -493,7 +520,12 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                                            **self._conversation(runtime)})
             elif parts == [API_VERSION, "conversations"]:
                 limit, after = self._paging_query(text_cursor=True)
-                conversations, next_cursor = self.server.registry.list(limit, after)
+                query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                archived = query.get("archived", [None])[0]
+                if archived not in {None, "true", "false"}:
+                    raise ProtocolError("invalid_query", "archived must be true or false.", HTTPStatus.BAD_REQUEST)
+                search = query.get("search", [""])[0]
+                conversations, next_cursor = self.server.registry.list(limit, after, archived=None if archived is None else archived == "true", search=search)
                 self._json(HTTPStatus.OK, {"api_version": API_VERSION, "conversations": conversations, "next_cursor": next_cursor})
             elif parts == [API_VERSION, "grants"]:
                 self._json(HTTPStatus.OK, {
@@ -549,9 +581,23 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             self._protocol_error(error)
 
     def do_PATCH(self) -> None:
-        """Rename or select a configured model or workspace for a conversation."""
+        """Update validated session state, selections, and application preferences."""
         try:
             parts = self._path_parts()
+            if parts == [API_VERSION, "presentation"]:
+                body = self._read_json()
+                try:
+                    validated = validate_presentation(body)
+                    state = self.server.registry.grants.state
+                    with state.transaction() as transaction:
+                        previous = transaction.get("desktop", "presentation", {})
+                        transaction.set("desktop", "presentation", {**previous, **validated})
+                except ValueError as error:
+                    raise ProtocolError("invalid_presentation", str(error), HTTPStatus.BAD_REQUEST) from error
+                except (sqlite3.Error, StateStoreError, OSError):
+                    raise ProtocolError("state_unavailable", "Presentation preferences could not be saved. Try again.", HTTPStatus.SERVICE_UNAVAILABLE) from None
+                self._json(HTTPStatus.OK, {**previous, **validated})
+                return
             if parts == [API_VERSION, "skill-preferences"]:
                 body = self._read_json()
                 if set(body) != {"workspace", "active_skills"} or not isinstance(body["workspace"], str):
@@ -593,6 +639,11 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             if len(parts) != 3 or parts[:2] != [API_VERSION, "conversations"]:
                 raise ProtocolError("not_found", "Operation was not found.", HTTPStatus.NOT_FOUND)
             body = self._read_json()
+            if len(body) == 1 and next(iter(body)) in {"pinned", "archived", "draft"}:
+                field = next(iter(body))
+                runtime = self.server.registry.session_state(parts[2], field, body[field])
+                self._json(HTTPStatus.OK, self._conversation(runtime))
+                return
             if set(body) == {"title"} and isinstance(body["title"], str):
                 title = body["title"].strip()
                 if not title or len(title) > 200:
@@ -861,8 +912,9 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
     def _paging_query(self, *, text_cursor: bool) -> tuple[int, str | None]:
         """Validate bounded stable paging query parameters."""
         query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
-        if set(query) - {"limit", "after"} or any(len(values) != 1 for values in query.values()):
-            raise ProtocolError("invalid_query", "Only one limit and after value are supported.", HTTPStatus.BAD_REQUEST)
+        allowed = {"limit", "after", "search", "archived"} if text_cursor else {"limit", "after"}
+        if set(query) - allowed or any(len(values) != 1 for values in query.values()):
+            raise ProtocolError("invalid_query", "Only one value for each documented query parameter is supported.", HTTPStatus.BAD_REQUEST)
         try:
             limit = int(query.get("limit", ["50"])[0])
             if isinstance(limit, bool) or not 1 <= limit <= 100:
@@ -899,7 +951,7 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "api_version": API_VERSION,
             "models": list(self.server.registry.models),
             "tools": sorted(TOOL_SPECS),
-            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "settings", "model_selection", "workspace_selection", "skills", "skill_preferences", "skill_selection"],
+            "operations": ["health", "conversations", "conversation_history", "rename", "delete", "turns", "cancellation", "permissions", "durable_grants", "settings", "model_selection", "workspace_selection", "skills", "skill_preferences", "skill_selection", "session_search", "pin", "archive", "drafts", "presentation"],
             "event_types": ["turn_started", "assistant_text", "tool_call", "tool_result", "permission_request", "permission_receipt", "permission_grant", "failure", "interruption", "completion"],
             "limits": {"max_request_bytes": MAX_REQUEST_BYTES},
         }
@@ -929,6 +981,8 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
             "skill_error": self.server.registry.skill_failures.get(runtime.conversation_id),
             "created_at": persisted.get("created_at"),
             "updated_at": persisted.get("updated_at"),
+            "pinned": persisted.get("pinned", False), "archived": persisted.get("archived", False),
+            "draft": persisted.get("draft", ""), "activity_at": persisted.get("activity_at"),
         }
 
 
@@ -1088,6 +1142,31 @@ def service_main(arguments: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         return 0
     return 0
+
+
+def validate_presentation(body: dict[str, Any]) -> dict[str, Any]:
+    """Validate portable appearance and restore geometry without platform calls."""
+    allowed = {"text_size", "zoom_percent", "reduced_motion", "sidebar_width", "sidebar_collapsed", "window"}
+    if not body or set(body) - allowed:
+        raise ValueError("Expected documented presentation fields.")
+    for key, value in body.items():
+        if key == "text_size" and (not isinstance(value, str) or value not in {"small", "default", "large"}):
+            raise ValueError("text_size must be small, default, or large.")
+        if key == "zoom_percent" and (type(value) is not int or value not in {75, 90, 100, 110, 125, 150}):
+            raise ValueError("zoom_percent must be 75, 90, 100, 110, 125, or 150.")
+        if key in {"reduced_motion", "sidebar_collapsed"} and type(value) is not bool:
+            raise ValueError(f"{key} must be a boolean.")
+        if key == "sidebar_width" and (type(value) is not int or not 200 <= value <= 420):
+            raise ValueError("sidebar_width must be 200 to 420.")
+        if key == "window":
+            if not isinstance(value, dict) or set(value) != {"width", "height", "x", "y", "maximized"}:
+                raise ValueError("Expected window width, height, x, y, and maximized.")
+            if (any(type(value[field]) is not int for field in ("width", "height", "x", "y"))
+                    or not 900 <= value["width"] <= 16000 or not 600 <= value["height"] <= 16000
+                    or any(abs(value[field]) > 100000 for field in ("x", "y"))
+                    or type(value["maximized"]) is not bool):
+                raise ValueError("Invalid window geometry.")
+    return body
 
 
 if __name__ == "__main__":

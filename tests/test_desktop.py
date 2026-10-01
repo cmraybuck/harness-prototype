@@ -14,6 +14,14 @@ from harness_prototype.desktop import (
 )
 
 
+def destroy_fixture_root(root: tk.Tk) -> None:
+    """Drain theme geometry events and cancel timers before destroying a fixture interpreter."""
+    root.update_idletasks()
+    for callback in root.tk.call("after", "info"):
+        root.after_cancel(callback)
+    root.destroy()
+
+
 class ResponseFixture:
     """Provide the context-manager subset returned by urlopen."""
 
@@ -239,6 +247,9 @@ class ConversationViewTests(unittest.TestCase):
         second.accept(self.event(1, "turn_started", turn="second"))
         desktop.views = {"one": first, "two": second}
         desktop._permissions = {}
+        desktop._permission_queue = {}
+        desktop.root = MagicMock()
+        desktop._permission_notice = MagicMock()
         queued = []
         desktop._run_task = lambda work: queued.append(work)
         desktop.cancel_turn()
@@ -360,7 +371,8 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         self.root.update()
         panel.options.event_generate("<space>")
         self.root.update()
-        self.tasks.call_args.args[0]()
+        for request in self.tasks.call_args_list:
+            request.args[0]()
         self.client.select_skills.assert_called_once_with("one", ["fixture.valid"], False)
         panel.options.event_generate("<Down>")
         self.root.update()
@@ -406,6 +418,89 @@ class DynamicSkillWidgetTests(unittest.TestCase):
 
 
 class DesktopWidgetTests(unittest.TestCase):
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_stream_updates_keep_completed_bubbles_and_wheel_scrolls_chat(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Keep prior selectable widgets stable and route bubble-wheel input to the conversation."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one"})
+        view = desktop.views["one"]
+        view.recover([])
+        view.turns["completed"] = {"user_prompt": "Earlier prompt", "status": "success", "events": []}
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "active", "sequence": 1, "type": "turn_started"})
+        root.deiconify()
+        root.update()
+        desktop._render_conversation()
+        completed = desktop._transcript_widgets[0]
+        bubble = next(child for child in completed.winfo_children() if isinstance(child, tk.Text))
+        with patch.object(desktop.transcript, "yview_scroll") as scroll:
+            bubble.event_generate("<MouseWheel>", delta=-120)
+            root.update()
+            scroll.assert_called_once_with(3, "units")
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "active", "sequence": 2, "type": "assistant_text", "text": "Streamed reply"})
+        self.assertTrue(completed.winfo_exists())
+        self.assertIs(desktop._transcript_widgets[0], completed)
+        self.assertIn("Streamed reply", desktop.transcript.get("1.0", tk.END))
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_session_cards_keep_pin_and_menu_bound_to_their_owner(self, _history: MagicMock, tasks: MagicMock) -> None:
+        """Operate another row without redirecting pin or archive actions to the active session."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one", "title": "First"})
+        desktop._replace_conversations([{"conversation_id": "one", "title": "First", "pinned": True},
+                                        {"conversation_id": "two", "title": "Second", "archived": False}], select=False)
+        card, title, detail, pin, menu = desktop.conversation_list.rows["two"]
+        self.assertEqual(title.cget("text"), "Second")
+        self.assertEqual(card.cget("style"), "Session.TFrame")
+        self.assertEqual(desktop.conversation_list.rows["one"][0].cget("style"), "SelectedSession.TFrame")
+        pin.invoke()
+        tasks.call_args.args[0]()
+        desktop.client.session_state.assert_called_once_with("two", "pinned", True)
+        menu.invoke()
+        dropdown = desktop._session_dropdown
+        self.assertFalse(any(isinstance(child, tk.Toplevel) for child in root.winfo_children()))
+        self.assertEqual([choice[1] for choice in dropdown.choices], ["rename", "archive", "delete"])
+        dropdown.move(1)
+        dropdown.confirm(dropdown.index)
+        tasks.call_args.args[0]()
+        self.assertEqual(desktop.client.session_state.call_args.args, ("two", "archived", True))
+        self.assertEqual(desktop.active_conversation_id, "one")
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_queued_stream_events_render_once_without_losing_text(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Apply all queued token events in order with one presentation update."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one"})
+        desktop.views["one"].recover([])
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 1, "type": "turn_started"})
+        for sequence, text in enumerate(("First ", "second ", "third."), start=2):
+            event = {"conversation_id": "one", "turn_id": "turn", "sequence": sequence, "type": "assistant_text", "text": text}
+            desktop._ui_callbacks.put(lambda event=event: desktop._turn_event("one", event))
+        with patch.object(desktop, "_render_turn", wraps=desktop._render_turn) as render:
+            desktop._drain_ui_callbacks()
+            render.assert_called_once()
+        self.assertIn("First second third.", desktop.transcript.get("1.0", tk.END))
+
     """Check native widgets and selected-view routing when Tk is available."""
 
     @patch.object(FluxDesktop, "_run_task")
@@ -419,7 +514,7 @@ class DesktopWidgetTests(unittest.TestCase):
         except tk.TclError:
             self.skipTest("Native Tk display is unavailable.")
         root.withdraw()
-        self.addCleanup(root.destroy)
+        self.addCleanup(destroy_fixture_root, root)
         desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
         for conversation_id in ("one", "two"):
             desktop._select_conversation({"conversation_id": conversation_id, "title": conversation_id})
@@ -432,7 +527,8 @@ class DesktopWidgetTests(unittest.TestCase):
         desktop._select_conversation({"conversation_id": "one", "title": "one"})
         self.assertIn("Background reply", desktop.transcript.get("1.0", tk.END))
         self.assertEqual(str(desktop.cancel_button["state"]), "normal")
-        self.assertEqual(str(desktop.send_button["state"]), "disabled")
+        self.assertEqual(desktop.send_button.cget("text"), "■")
+        self.assertEqual(str(desktop.send_button["state"]), "normal")
         desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn",
                                    "sequence": 3, "type": "completion", "outcome": "cancelled"})
         self.assertEqual(str(desktop.send_button["state"]), "normal")
@@ -445,7 +541,7 @@ class DesktopWidgetTests(unittest.TestCase):
         except tk.TclError:
             self.skipTest("Native Tk display is unavailable.")
         root.withdraw()
-        self.addCleanup(root.destroy)
+        self.addCleanup(destroy_fixture_root, root)
         decide = MagicMock()
         event = {"operation": "apply_file_changes", "category": "write", "scope": "file: sample.txt",
                  "choices": ["deny", "allow_durable", "allow_session", "allow_once"],
@@ -454,7 +550,7 @@ class DesktopWidgetTests(unittest.TestCase):
         self.assertEqual(dialog.choices[dialog.options.curselection()[0]], "allow_once")
         labels = [widget.cget("text") for widget in dialog.options.master.winfo_children()
                   if widget.winfo_class() == "TLabel"]
-        review = next(widget for widget in dialog.options.master.winfo_children() if isinstance(widget, ttk.Frame))
+        review = next(widget for widget in dialog.body.frame.winfo_children() if isinstance(widget, ttk.Frame))
         labels.append(next(widget for widget in review.winfo_children() if isinstance(widget, tk.Text)).get("1.0", tk.END))
         self.assertNotIn("private-secret", "".join(labels))
         self.assertIn("file: sample.txt", "".join(labels))
@@ -499,7 +595,7 @@ class DesktopWidgetTests(unittest.TestCase):
         except tk.TclError:
             self.skipTest("Native Tk display is unavailable.")
         root.withdraw()
-        self.addCleanup(root.destroy)
+        self.addCleanup(destroy_fixture_root, root)
         client = MagicMock()
         desktop = FluxDesktop(root, client, lambda: None, Path.cwd())
         for owner in ("one", "two"):
@@ -528,6 +624,133 @@ class DesktopWidgetTests(unittest.TestCase):
         self.assertNotIn("private-secret", "".join(text for _, text in rows))
 
     @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_serialized_permissions_expire_and_keep_owner(self, _history: MagicMock, tasks: MagicMock) -> None:
+        """Queue cross-session decisions and remove resolved entries before showing the next."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        for owner in ("one", "two"):
+            desktop._select_conversation({"conversation_id": owner, "title": owner})
+            desktop.views[owner].recover([])
+            desktop._turn_event(owner, {"conversation_id": owner, "turn_id": owner, "sequence": 1, "type": "turn_started"})
+            desktop._turn_event(owner, {"conversation_id": owner, "turn_id": owner, "sequence": 2, "type": "permission_request",
+                                        "permission_request_id": owner, "choices": ["allow_once", "deny"]})
+        self.assertEqual(len(desktop._permissions), 1)
+        self.assertEqual(len(desktop._permission_queue), 1)
+        self.assertEqual(desktop.active_conversation_id, "two")
+        desktop._turn_event("two", {"conversation_id": "two", "turn_id": "two", "sequence": 3, "type": "permission_receipt", "permission_request_id": "two", "decision": "deny"})
+        self.assertFalse(desktop._permission_queue)
+        desktop._permissions["one"][2].choose_option()
+        tasks.call_args.args[0]()
+        desktop.client.resolve_permission.assert_called_once_with("one", "allow_once")
+        desktop._present_next_permission()
+        self.assertFalse(desktop._permissions)
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_drafts_navigation_enter_and_working_expansion(self, _history: MagicMock, _tasks: MagicMock) -> None:
+        """Preserve drafts independently and retain Working expansion as text streams."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one", "draft": "Restored draft"})
+        desktop.views["one"].recover([])
+        self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "Restored draft")
+        desktop.message_input.delete("1.0", tk.END)
+        desktop.message_input.insert("1.0", "New unsent draft")
+        desktop._select_conversation({"conversation_id": "two", "draft": "Second draft"})
+        desktop.views["two"].recover([])
+        desktop._select_conversation({"conversation_id": "one"})
+        self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "New unsent draft")
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 1, "type": "turn_started"})
+        desktop.views["one"].expanded_working.add("turn")
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 2, "type": "tool_result", "name": "read_file",
+                                   "result": {"ok": True, "complete": False, "next_line": 10, "content": "hidden-private"}})
+        self.assertIn("turn", desktop.views["one"].expanded_working)
+        self.assertNotIn("hidden-private", desktop.transcript.get("1.0", tk.END))
+        desktop._send_key(None)
+        self.assertEqual(desktop.message_input.get("1.0", "end-1c"), "New unsent draft")
+        desktop._newline_key(None)
+        self.assertIn("\n", desktop.message_input.get("1.0", "end-1c"))
+
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_selection_reset_confirmation_keeps_original_session(self, _history: MagicMock, tasks: MagicMock) -> None:
+        """Cancel keeps selections, and confirmed changes cannot follow later navigation."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        self.addCleanup(destroy_fixture_root, root)
+        desktop = FluxDesktop(root, MagicMock(), lambda: None, Path.cwd())
+        for owner in ("one", "two"):
+            desktop._select_conversation({"conversation_id": owner, "model": "alpha"})
+            desktop.views[owner].recover([])
+        desktop._confirm_selection("one", "model", "beta")
+        tasks.reset_mock()
+        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision.choose_option()
+        tasks.assert_not_called()
+        desktop._confirm_selection("one", "model", "beta")
+        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision.move(1)
+        decision.choose_option()
+        desktop.client.update_conversation.return_value = {"conversation_id": "one", "model": "beta"}
+        work, complete = tasks.call_args.args
+        complete(work())
+        desktop.client.update_conversation.assert_called_once_with("one", "model", "beta")
+        self.assertEqual(desktop.active_conversation_id, "two")
+        self.assertEqual(desktop.model_text.get(), "alpha")
+
+    @patch("harness_prototype.desktop.Thread")
+    @patch.object(FluxDesktop, "_run_task")
+    @patch.object(FluxDesktop, "_load_history")
+    def test_exit_keep_working_and_stop_bind_original_permission(self, _history: MagicMock, tasks: MagicMock, thread: MagicMock) -> None:
+        """Keep work leaves permission unanswered; explicit exit denies and cancels the original turn."""
+        try:
+            root = tk.Tk()
+        except tk.TclError:
+            self.skipTest("Native Tk display is unavailable.")
+        root.withdraw()
+        callbacks = MagicMock()
+        root.report_callback_exception = callbacks
+        self.addCleanup(callbacks.assert_not_called)
+        self.addCleanup(destroy_fixture_root, root)
+        stop = MagicMock()
+        desktop = FluxDesktop(root, MagicMock(), stop, Path.cwd())
+        desktop._select_conversation({"conversation_id": "one"})
+        desktop.views["one"].recover([])
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 1, "type": "turn_started"})
+        desktop._turn_event("one", {"conversation_id": "one", "turn_id": "turn", "sequence": 2, "type": "permission_request",
+                                   "permission_request_id": "permission", "choices": ["allow_once", "deny"]})
+        desktop.close()
+        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision.choose_option()
+        self.assertFalse(desktop._closing)
+        desktop.client.resolve_permission.assert_not_called()
+        self.assertIn("permission", desktop._permissions)
+        desktop.close()
+        decision = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))._flux_decision
+        decision.move(1)
+        decision.choose_option()
+        tasks.call_args.args[0]()
+        desktop.client.resolve_permission.assert_called_once_with("permission", "deny")
+        thread.call_args.kwargs["target"]()
+        desktop.client.cancel_turn.assert_called_once_with("one", "turn")
+        stop.assert_called_once_with()
+        self.assertTrue(desktop._backend_stopped.is_set())
+
+    @patch.object(FluxDesktop, "_run_task")
     def test_settings_save_and_revoke_use_captured_backend_values(self, tasks: MagicMock) -> None:
         """Persist preferences and revoke only the selected durable grant through the API."""
         try:
@@ -535,14 +758,14 @@ class DesktopWidgetTests(unittest.TestCase):
         except tk.TclError:
             self.skipTest("Native Tk display is unavailable.")
         root.withdraw()
-        self.addCleanup(root.destroy)
+        self.addCleanup(destroy_fixture_root, root)
         client = MagicMock()
         desktop = FluxDesktop(root, client, lambda: None, Path.cwd())
         desktop.models = ["test-model"]
         desktop._settings_loaded(({"default_model": "test-model", "backend_host": "http://localhost:11434"},
                                   [{"grant_id": "grant", "kind": "file", "target": "sample.txt", "workspace": "."}]))
         window = next(child for child in root.winfo_children() if isinstance(child, tk.Toplevel))
-        widgets = window.winfo_children()[0].winfo_children()
+        widgets = window._flux_body.frame.winfo_children()
         next(widget for widget in widgets if isinstance(widget, ttk.Button)
              and widget.cget("text") == "Save preferences").invoke()
         tasks.call_args.args[0]()

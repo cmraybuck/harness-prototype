@@ -70,6 +70,10 @@ class ApplicationStateTests(unittest.TestCase):
                                  [{"role": "system", "content": "Retained context"}],
                                  active_skills=["pirate"])
             with closing(sqlite3.connect(path)) as connection:
+                connection.execute("DROP INDEX conversations_activity")
+                for column in ("pinned", "archived", "title_manual", "activity_at_utc", "draft"):
+                    connection.execute(f"ALTER TABLE conversations DROP COLUMN {column}")
+                connection.execute("ALTER TABLE conversation_turns DROP COLUMN search_text")
                 connection.execute("ALTER TABLE conversations DROP COLUMN skill_provenance_json")
                 connection.execute("PRAGMA user_version = 4")
                 connection.commit()
@@ -77,6 +81,73 @@ class ApplicationStateTests(unittest.TestCase):
             self.assertEqual(migrated["active_skills"], ["pirate"])
             self.assertEqual(migrated["skill_provenance"], [])
             self.assertEqual(migrated["messages"][0]["content"], "Retained context")
+
+    def test_session_lifecycle_search_drafts_and_deletion(self) -> None:
+        """Keep searchable messages separate from drafts and tool payloads through restart."""
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            state = StateStore(workspace / "state.sqlite3")
+            store = ConversationStore(state)
+            for identifier in ("one", "two", "three"):
+                store.create(identifier, "New conversation", "model", workspace, [])
+            store.set_session_state("one", "draft", "  Explain\n database migrations  ")
+            store.start_turn("one", "turn", "  Explain\n database migrations  ")
+            self.assertEqual(store.load("one")["title"], "Explain database migrations")
+            self.assertEqual(store.load("one")["draft"], "")
+            store.save_turn_event("one", "turn", {"public_event": {"type": "assistant_text", "text": "A special-response-needle."}})
+            store.save_turn_event("one", "turn", {"public_event": {"type": "assistant_text", "text": " Straße and CAFÉ."}})
+            store.save_turn_event("one", "turn", {"type": "tool_result", "result": {"content": "tool-private-needle"}})
+            store.finish_turn("one", "turn", "success", None)
+            store.set_session_state("one", "draft", "unsent-private-needle")
+            store.set_session_state("one", "archived", True)
+            store.set_session_state("two", "pinned", True)
+            store.update_metadata("one", title="Manual title")
+            store.set_session_state("one", "draft", "New draft typed while submission starts")
+            store.start_turn("one", "later", "Another prompt")
+            self.assertEqual(store.load("one")["draft"], "New draft typed while submission starts")
+            store.finish_turn("one", "later", "success", None)
+            self.assertEqual(store.load("one")["title"], "Manual title")
+            store.set_session_state("one", "draft", "restored-draft")
+            reopened = ConversationStore(StateStore(state.path))
+            self.assertTrue(reopened.load("one")["archived"])
+            self.assertEqual(reopened.load("one")["draft"], "restored-draft")
+            active, _ = reopened.list_conversations(100, archived=False)
+            self.assertEqual([item["conversation_id"] for item in active], ["two", "three"])
+            results, _ = reopened.list_conversations(1, archived=False, search="special-response")
+            self.assertEqual(results[0]["conversation_id"], "one")
+            self.assertTrue(results[0]["archived"])
+            self.assertIn("special-response", results[0]["snippet"])
+            self.assertEqual(reopened.list_conversations(100, search="STRASSE")[0][0]["conversation_id"], "one")
+            self.assertEqual(reopened.list_conversations(100, search="café")[0][0]["conversation_id"], "one")
+            for secret in ("unsent-private", "tool-private"):
+                self.assertEqual(reopened.list_conversations(100, search=secret)[0], [])
+            self.assertTrue(reopened.delete("one"))
+            self.assertIsNone(reopened.load("one"))
+            self.assertEqual(reopened.history("one", 10)[0], [])
+            self.assertIsNotNone(reopened.load("two"))
+            self.assertTrue(state.path.exists())
+
+    def test_session_activity_order_and_paging_ignore_rename(self) -> None:
+        """Sort pinned groups by messages, with metadata edits retaining the activity order."""
+        with tempfile.TemporaryDirectory() as temporary:
+            state = StateStore(Path(temporary) / "state.sqlite3")
+            store = ConversationStore(state)
+            for identifier in ("a", "b", "c"):
+                store.create(identifier, "New conversation", "model", Path(temporary), [])
+            store.start_turn("a", "turn", "Newest activity")
+            store.finish_turn("a", "turn", "success", None)
+            store.update_metadata("b", title="Renaming is not activity")
+            self.assertEqual([item["conversation_id"] for item in store.list_conversations(100)[0]], ["a", "c", "b"])
+            store.set_session_state("b", "pinned", True)
+            first, cursor = store.list_conversations(1)
+            self.assertEqual(first[0]["conversation_id"], "b")
+            following, _ = store.list_conversations(100, cursor)
+            self.assertEqual([item["conversation_id"] for item in following], ["a", "c"])
+            for field, value in (("pinned", 1), ("archived", "true"), ("draft", "a" * 16001)):
+                with self.assertRaises(ValueError):
+                    store.set_session_state("a", field, value)
+            with self.assertRaises(ValueError):
+                store.list_conversations(True)
 
     def test_failed_transaction_rolls_back_every_mutation(self) -> None:
         """Leave no partial records when a caller fails during a transaction."""

@@ -318,6 +318,44 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(runtime.messages, previous_messages)
         self.assertNotIn("fixture.review", runtime.skill_catalog.skills)
 
+    def test_session_state_search_preferences_and_active_guards(self) -> None:
+        """Persist scoped session state and reject active lifecycle changes and invalid preferences."""
+        _, first = self.request("POST", "/v1/conversations", {})
+        owner = first["conversation_id"]
+        path = f"/v1/conversations/{owner}"
+        for field, value in (("draft", "Unsubmitted text"), ("pinned", True), ("archived", True)):
+            status, metadata = self.request("PATCH", path, {field: value})
+            self.assertEqual(status, 200)
+            self.assertEqual(metadata[field], value)
+        status, _ = self.request("POST", path + "/turns", {"message": "Cannot send archived"})
+        self.assertEqual(status, 409)
+        self.request("PATCH", path, {"archived": False})
+        registry = self.host.server.registry
+        registry.begin_turn(owner, "reserved")
+        for method, body in (("PATCH", {"archived": True}), ("DELETE", None)):
+            status, error = self.request(method, path, body)
+            self.assertEqual((status, error["error"]["code"]), (409, "conversation_busy"))
+        self.assertEqual(self.request("PATCH", path, {"draft": "Typing during work"})[0], 200)
+        registry.finish_turn(owner)
+        self.request("POST", path + "/turns", {"message": "Session search prompt"})
+        self.request("PATCH", path, {"archived": True})
+        status, results = self.request("GET", "/v1/conversations?archived=false&search=search+prompt")
+        self.assertEqual(status, 200)
+        self.assertEqual(results["conversations"][0]["conversation_id"], owner)
+        self.assertTrue(results["conversations"][0]["archived"])
+        self.assertEqual(self.request("GET", "/v1/conversations?archived=false")[1]["conversations"], [])
+        for body in ({"pinned": 1}, {"archived": "true"}, {"draft": "x" * 16001}):
+            self.assertEqual(self.request("PATCH", path, body)[0], 400)
+        preferences = {"text_size": "large", "zoom_percent": 125, "reduced_motion": True, "sidebar_collapsed": True, "sidebar_width": 290,
+                       "window": {"width": 1000, "height": 700, "x": -800, "y": 20, "maximized": False}}
+        self.assertEqual(self.request("PATCH", "/v1/presentation", preferences), (200, preferences))
+        for invalid in ({"text_size": []}, {"zoom_percent": True}, {"zoom_percent": 125.0}, {"zoom_percent": 101},
+                        {"sidebar_width": True}, {"reduced_motion": 1}, {"unknown": True}):
+            self.assertEqual(self.request("PATCH", "/v1/presentation", invalid)[0], 400)
+        self.restart_host()
+        self.assertEqual(self.request("GET", "/v1/presentation"), (200, preferences))
+        self.assertTrue(self.request("GET", path)[1]["archived"])
+
     def test_health_capabilities_and_loopback_policy(self) -> None:
         """Expose readiness and reject accidental non-loopback listeners."""
         status, health = self.request("GET", "/v1/health")
@@ -842,6 +880,19 @@ class PermissionBrokerTests(unittest.TestCase):
 
         self.assertEqual(broker.request({"choices": ["allow_once", "deny"]}, emit, lambda: False), "deny")
         self.assertEqual(events[-1][0], "permission_receipt")
+
+    def test_expired_request_cannot_be_approved_before_waiter_cleanup(self) -> None:
+        """Reject late decisions even before the permission waiter removes its registry entry."""
+        broker = PermissionBroker()
+        with patch("harness_prototype.application_service.monotonic", return_value=0) as clock:
+            def emit(kind: str, fields: dict) -> None:
+                """Advance beyond the original deadline during deterministic publication."""
+                if kind == "permission_request":
+                    clock.return_value = 301
+                    self.assertFalse(broker.resolve(fields["permission_request_id"], "allow_once"))
+                else:
+                    self.assertEqual(fields["decision"], "deny")
+            self.assertIsNone(broker.request({"choices": ["allow_once", "deny"]}, emit, lambda: True))
 
     def test_disconnect_wins_over_concurrent_allow(self) -> None:
         """Never return an allow when the owning stream has been disconnected."""

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 MAX_VALUE_BYTES = 64 * 1024
 MAX_SCOPE_LENGTH = 100
 MAX_KEY_LENGTH = 200
@@ -332,6 +332,25 @@ def _apply_migration(connection: sqlite3.Connection, version: int) -> None:
             "ALTER TABLE conversations ADD COLUMN skill_provenance_json TEXT NOT NULL "
             "DEFAULT '[]' CHECK(json_valid(skill_provenance_json))"
         )
+    elif version == 6:
+        for statement in (
+            "ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1))",
+            "ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))",
+            "ALTER TABLE conversations ADD COLUMN title_manual INTEGER NOT NULL DEFAULT 0 CHECK(title_manual IN (0, 1))",
+            "ALTER TABLE conversations ADD COLUMN activity_at_utc TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE conversations ADD COLUMN draft TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE conversation_turns ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+            "UPDATE conversations SET activity_at_utc = updated_at_utc, title_manual = (title != 'New conversation')",
+            """UPDATE conversation_turns SET search_text = user_prompt || char(10) || COALESCE(
+                (SELECT group_concat(CASE
+                    WHEN json_extract(value, '$.public_event.type') = 'assistant_text'
+                    THEN json_extract(value, '$.public_event.text')
+                    WHEN json_extract(value, '$.type') = 'model_response'
+                    THEN json_extract(value, '$.content') END, '')
+                 FROM json_each(conversation_turns.events_json)), '')""",
+            "CREATE INDEX conversations_activity ON conversations(archived, pinned DESC, activity_at_utc DESC, conversation_id DESC)",
+        ):
+            connection.execute(statement)
     else:
         raise StateStoreError(f"No migration is defined for schema {version}.")
 
@@ -596,11 +615,11 @@ class ConversationStore:
                     """
                     INSERT INTO conversations(
                         conversation_id, title, model, workspace, created_at_utc, updated_at_utc,
-                        active_skills_json, skill_provenance_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        active_skills_json, skill_provenance_json, activity_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (conversation_id, title, model, str(workspace), timestamp, timestamp,
-                     _encode_value(active_skills or []), _encode_value(skill_provenance or [])),
+                     _encode_value(active_skills or []), _encode_value(skill_provenance or []), timestamp),
                 )
                 self._replace_messages(connection, conversation_id, messages)
                 connection.commit()
@@ -615,7 +634,7 @@ class ConversationStore:
                 """
                 SELECT conversation_id, title, model, workspace,
                        capability_groups_json, active_skills_json,
-                       created_at_utc, updated_at_utc, skill_provenance_json
+                       created_at_utc, updated_at_utc, skill_provenance_json, pinned, archived, draft, activity_at_utc
                 FROM conversations WHERE conversation_id = ?
                 """,
                 (conversation_id,),
@@ -638,45 +657,80 @@ class ConversationStore:
             "active_skills": json.loads(row[5]), "created_at": row[6],
             "updated_at": row[7], "messages": messages,
             "skill_provenance": json.loads(row[8]),
+            "pinned": bool(row[9]), "archived": bool(row[10]), "draft": row[11], "activity_at": row[12],
         }
 
     def list_conversations(
-        self, limit: int, after: str | None = None,
+        self, limit: int, after: str | None = None, *, archived: bool | None = None,
+        search: str = "",
     ) -> tuple[list[dict[str, Any]], str | None]:
-        """List conversations by immutable creation order using an ID cursor."""
+        """Page pinned groups by message activity; search only submitted display text."""
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("limit must be 1 to 100")
+        if archived is not None and type(archived) is not bool:
+            raise ValueError("archived must be a boolean")
+        if not isinstance(search, str) or len(search) > 200:
+            raise ValueError("search must be at most 200 characters")
+        search = search.strip()
         with closing(self.state._connect()) as connection:
-            cursor = None
+            connection.create_function("casefold", 1, str.casefold, deterministic=True)
+            clauses = []
+            arguments: list[Any] = []
+            if archived is not None and not search:
+                clauses.append("c.archived = ?")
+                arguments.append(int(archived))
+            if search:
+                clauses.append("(instr(casefold(c.title), casefold(?)) > 0 OR EXISTS (SELECT 1 FROM conversation_turns t WHERE t.conversation_id = c.conversation_id AND instr(casefold(t.search_text), casefold(?)) > 0))")
+                arguments.extend((search, search))
             if after is not None:
                 cursor = connection.execute(
-                    "SELECT created_at_utc, conversation_id FROM conversations WHERE conversation_id = ?",
+                    "SELECT pinned, activity_at_utc, conversation_id FROM conversations WHERE conversation_id = ?",
                     (after,),
                 ).fetchone()
                 if cursor is None:
                     raise ValueError("Conversation cursor was not found.")
-            where = ""
-            arguments: list[Any] = []
-            if cursor:
-                where = "WHERE (created_at_utc, conversation_id) < (?, ?)"
+                clauses.append("(c.pinned, c.activity_at_utc, c.conversation_id) < (?, ?, ?)")
                 arguments.extend(cursor)
-            arguments.append(limit + 1)
+            where = "WHERE " + " AND ".join(clauses) if clauses else ""
             rows = connection.execute(
-                f"""
-                SELECT conversation_id, title, model, workspace, created_at_utc, updated_at_utc,
-                       active_skills_json, skill_provenance_json
-                FROM conversations {where}
-                ORDER BY created_at_utc DESC, conversation_id DESC LIMIT ?
-                """,
-                arguments,
+                f"""SELECT conversation_id, title, model, workspace, created_at_utc, updated_at_utc,
+                           active_skills_json, skill_provenance_json, pinned, archived, activity_at_utc
+                    FROM conversations c {where}
+                    ORDER BY pinned DESC, activity_at_utc DESC, conversation_id DESC LIMIT ?""",
+                [*arguments, limit + 1],
             ).fetchall()
-        has_more = len(rows) > limit
-        rows = rows[:limit]
-        items = [
-            {"conversation_id": row[0], "title": row[1], "model": row[2],
-             "workspace": row[3], "created_at": row[4], "updated_at": row[5],
-             "active_skills": json.loads(row[6]), "skill_provenance": json.loads(row[7])}
-            for row in rows
-        ]
-        return items, items[-1]["conversation_id"] if has_more else None
+            items = []
+            for row in rows[:limit]:
+                snippet = ""
+                if search:
+                    match = connection.execute(
+                        "SELECT search_text FROM conversation_turns WHERE conversation_id = ? AND instr(casefold(search_text), casefold(?)) > 0 ORDER BY sequence DESC LIMIT 1",
+                        (row[0], search),
+                    ).fetchone()
+                    text = match[0] if match else row[1]
+                    offset = max(0, text.casefold().find(search.casefold()) - 40)
+                    snippet = ("…" if offset else "") + " ".join(text[offset:offset + 160].split())
+                    if len(text) > offset + 160:
+                        snippet += "…"
+                items.append({"conversation_id": row[0], "title": row[1], "model": row[2],
+                              "workspace": row[3], "created_at": row[4], "updated_at": row[5],
+                              "active_skills": json.loads(row[6]), "skill_provenance": json.loads(row[7]),
+                              "pinned": bool(row[8]), "archived": bool(row[9]),
+                              "activity_at": row[10], "snippet": snippet})
+        return items, items[-1]["conversation_id"] if len(rows) > limit else None
+
+    def set_session_state(self, conversation_id: str, field: str, value: Any) -> None:
+        """Persist a bounded draft or an explicitly boolean session flag."""
+        if field not in {"pinned", "archived", "draft"}:
+            raise ValueError("Unknown session field.")
+        if field == "draft":
+            if not isinstance(value, str) or len(value) > 16000:
+                raise ValueError("Draft must be at most 16000 characters.")
+        elif type(value) is not bool:
+            raise ValueError("Session flags must be booleans.")
+        with closing(self.state._connect()) as connection:
+            connection.execute(f"UPDATE conversations SET {field} = ? WHERE conversation_id = ?",
+                               (value, conversation_id))
 
     def update_metadata(
         self,
@@ -692,6 +746,8 @@ class ConversationStore:
         for column, value in (("title", title), ("model", model), ("workspace", workspace)):
             if value is not None:
                 fields.append(f"{column} = ?")
+                if column == "title":
+                    fields.append("title_manual = 1")
                 values.append(str(value))
         values.append(conversation_id)
         with closing(self.state._connect()) as connection:
@@ -727,6 +783,7 @@ class ConversationStore:
     def start_turn(self, conversation_id: str, turn_id: str, user_prompt: str) -> None:
         """Record an active turn before model work begins."""
         with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
             next_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM conversation_turns WHERE conversation_id = ?",
                 (conversation_id,),
@@ -734,25 +791,43 @@ class ConversationStore:
             connection.execute(
                 """
                 INSERT INTO conversation_turns(
-                    conversation_id, turn_id, sequence, status, user_prompt, started_at_utc
-                ) VALUES (?, ?, ?, 'running', ?, ?)
+                    conversation_id, turn_id, sequence, status, user_prompt, started_at_utc, search_text
+                ) VALUES (?, ?, ?, 'running', ?, ?, ?)
                 """,
-                (conversation_id, turn_id, next_sequence, user_prompt, _utc_timestamp()),
+                (conversation_id, turn_id, next_sequence, user_prompt, _utc_timestamp(), user_prompt),
             )
+            title = " ".join(user_prompt.split())[:70]
+            connection.execute(
+                """UPDATE conversations SET activity_at_utc = ?, draft = CASE WHEN draft = ? THEN '' ELSE draft END,
+                    title = CASE WHEN title_manual = 0 AND ? = 1 THEN ? ELSE title END
+                    WHERE conversation_id = ?""",
+                (_utc_timestamp(), user_prompt, next_sequence, title, conversation_id),
+            )
+            connection.commit()
 
     def save_turn_event(self, conversation_id: str, turn_id: str, event: dict[str, Any]) -> None:
         """Append one ordered runtime event to an active persisted turn."""
         with closing(self.state._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT events_json FROM conversation_turns WHERE conversation_id = ? AND turn_id = ?",
                 (conversation_id, turn_id),
             ).fetchone()
             events = json.loads(row[0]) if row else []
             events.append(event)
+            public = event.get("public_event", {})
+            if public.get("type") == "assistant_text":
+                connection.execute(
+                    "UPDATE conversation_turns SET search_text = search_text || ? WHERE conversation_id = ? AND turn_id = ?",
+                    (str(public.get("text", "")), conversation_id, turn_id),
+                )
+                connection.execute("UPDATE conversations SET activity_at_utc = ? WHERE conversation_id = ?",
+                                   (_utc_timestamp(), conversation_id))
             connection.execute(
                 "UPDATE conversation_turns SET events_json = ? WHERE conversation_id = ? AND turn_id = ?",
                 (json.dumps(events, ensure_ascii=False, separators=(",", ":")), conversation_id, turn_id),
             )
+            connection.commit()
 
     def checkpoint_turn(
         self, runtime: Any, turn_id: str, event: dict[str, Any],
