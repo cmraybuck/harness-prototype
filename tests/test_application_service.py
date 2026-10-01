@@ -123,6 +123,35 @@ class ApplicationServiceTests(unittest.TestCase):
                                        state_database_path=self.workspace / "state.sqlite3")
         self.host.start()
 
+    def test_runtime_status_reports_effective_tools_without_model_request(self) -> None:
+        """Expose idle context facts and reject busy or missing conversations."""
+        _, created = self.request("POST", "/v1/conversations", {})
+        identifier = created["conversation_id"]
+        runtime = self.host.server.registry.get(identifier)
+        before = list(runtime.messages)
+        status, result = self.request("GET", f"/v1/conversations/{identifier}/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["model"], runtime.model)
+        self.assertEqual(result["message_count"], 0)
+        self.assertGreater(result["context_used"], 0)
+        self.assertTrue(all(item["description"] for item in result["tools"]))
+        self.assertEqual(runtime.messages, before)
+        self.assertEqual([item["name"] for item in result["tools"]], ["activate_capabilities"])
+        self.assertIn("capabilit", result["tools"][0]["description"].lower())
+        health_status, _ = self.request("GET", "/v1/health")
+        self.assertEqual(health_status, 200)
+        runtime.capability_state.active_groups.add("workspace_inspection")
+        status, active = self.request("GET", f"/v1/conversations/{identifier}/status")
+        self.assertEqual(status, 200)
+        self.assertIn("read_file", [item["name"] for item in active["tools"]])
+        self.assertTrue(all(item["description"] for item in active["tools"]))
+        self.host.server.registry.begin_turn(identifier, "busy")
+        status, _ = self.request("GET", f"/v1/conversations/{identifier}/status")
+        self.assertEqual(status, 409)
+        self.host.server.registry.abandon_turn(identifier)
+        status, _ = self.request("GET", "/v1/conversations/missing/status")
+        self.assertEqual(status, 404)
+
     def test_skill_discovery_defaults_activation_and_restart(self) -> None:
         """Discover metadata, persist only selections, and isolate durable chat activation."""
         path = self.write_skill()

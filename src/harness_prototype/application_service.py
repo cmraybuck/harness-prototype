@@ -21,10 +21,10 @@ from uuid import uuid4
 from ollama import Client, RequestError, ResponseError
 
 from .access import AccessChoice
-from .agent_loop import AgentRuntime
+from .agent_loop import AgentRuntime, compose_request
 from .approval import ApprovalPromptResult, ApprovalRequest
 from .application_state import ConversationStore, DurableGrantStore, StateStore, StateStoreError
-from .config import COMMAND_ALLOWED_EXECUTABLES, HOST, MODELS, SERVICES, STATE_DATABASE_PATH
+from .config import COMMAND_ALLOWED_EXECUTABLES, CONTEXT_LENGTH, HOST, MODELS, SERVICES, STATE_DATABASE_PATH
 from .files import file_change_target_paths
 from .services import stop_all_services
 from .tools import TOOL_SPECS
@@ -571,6 +571,21 @@ class ApplicationServiceHandler(BaseHTTPRequestHandler):
                                              if "public_event" in event]
                     turn["events"] = [event for event in turn["events"] if "public_event" not in event]
                 self._json(HTTPStatus.OK, {"api_version": API_VERSION, "conversation_id": parts[2], "turns": turns, "next_cursor": next_cursor})
+            elif len(parts) == 4 and parts[:2] == [API_VERSION, "conversations"] and parts[3] == "status":
+                runtime = self.server.registry.get_idle(parts[2])
+                composition = compose_request(runtime.messages, runtime.capability_state, runtime.skill_state)
+                self._json(HTTPStatus.OK, {
+                    "model": runtime.model, "workspace": str(runtime.workspace),
+                    "server": self.server.backend_label,
+                    "message_count": max(0, len(runtime.messages) - 1),
+                    "context_used": composition.estimated_tokens,
+                    "context_limit": CONTEXT_LENGTH,
+                    "active_groups": composition.active_groups, "active_skills": composition.active_skills,
+                    "character_counts": composition.character_counts,
+                    "tools": [{"name": tool["function"]["name"],
+                               "description": tool["function"].get("description", "").split("\n")[0]}
+                              for tool in composition.tools],
+                })
             elif len(parts) == 3 and parts[:2] == [API_VERSION, "conversations"]:
                 runtime = self.server.registry.get(parts[2])
                 self._json(HTTPStatus.OK, self._conversation(runtime))

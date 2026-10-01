@@ -347,6 +347,21 @@ code during activation, or bypass system instructions, capability activation,
 tool approval, filesystem access, context limits, or execution policy. FLUX does
 not download skills or synchronize them between devices.
 
+The desktop composer also supports all commands in the table above. Type `/`
+to open a dropdown with rounded, separated command rows and descriptions; typing
+filters the list. The menu follows app typography and text-size preferences,
+highlights hovered rows, and scrolls longer lists. Up/Down
+moves the selection, Enter or Tab inserts it, and a subsequent Enter runs it.
+Esc dismisses suggestions; Shift+Enter inserts a newline. Unknown slash prefixes,
+absolute paths, and slashes inside messages remain ordinary model input.
+Command results use formatted chat output and stay outside model context. These
+local results and the per-chat tool activity mode last until the app exits.
+`/clear` creates a new chat with the current model and workspace; `/model` uses
+the existing context-reset confirmation. `/tools` lists effective model tools,
+and `/status` reads backend runtime facts, including the heuristic context estimate.
+`/tool-activity` selects full, compact, or hidden routine activity; permission
+receipts and errors remain visible. `/exit` uses the normal safe closing flow.
+
 Desktop conversations start normally with no active skills. Use the composer
 commands `/skills` to discover and inspect installed skills, `/skill id[,id]` to
 replace the active set, and `/skill` to clear it, matching the terminal commands.
@@ -920,6 +935,7 @@ The version-one HTTP operations are:
 | `GET /v1/conversations?limit=50&after={id}&archived=false&search={text}` | List pinned groups by message activity with a 1–100 item bound. Search includes archives regardless of that filter; omitted archive filter includes both views. |
 | `GET /v1/conversations/{id}` | Read the selected model and workspace. |
 | `GET /v1/conversations/{id}/history?limit=50&after={sequence}` | Read persisted turn outcomes and ordered tool events with stable append-only paging. |
+| `GET /v1/conversations/{id}/status` | Read idle runtime settings, context estimate, active capabilities/skills, and effective tool descriptions without requesting the model. |
 | `PATCH /v1/conversations/{id}` | Change one `title`, boolean `pinned`/`archived`, bounded `draft`, configured `model`, or existing `workspace`. Archive requires idleness; model/workspace changes reset context after GUI confirmation. |
 | `DELETE /v1/conversations/{id}` | Delete conversation records only; workspace files and interaction logs are retained. |
 | `POST /v1/conversations/{id}/turns` | Submit one nonempty `message` and receive an NDJSON event stream. Concurrent turns return `conversation_busy`. |

@@ -238,6 +238,95 @@ def set_application_icon(root: tk.Tk) -> None:
     root._flux_icons = images
 
 
+class CommandPalette(ttk.Frame):
+    """Show spacious rounded command rows while the composer retains keyboard focus."""
+
+    def __init__(self, parent: tk.Widget, choose: Callable[[], object]) -> None:
+        """Build a bounded inline menu using the application's shared named fonts."""
+        super().__init__(parent, style="Surface.TFrame", padding=10)
+        self.choices: list[tuple[str, str]] = []
+        self.index = 0
+        self.choose = choose
+        self.title_font = font.Font(root=self, font="TkDefaultFont")
+        ttk.Label(self, text="Commands", style="Surface.TLabel").pack(anchor="w", padx=8, pady=(0, 6))
+        self.canvas = tk.Canvas(self, background=COLORS["surface"], highlightthickness=0, borderwidth=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(self, text="↑ ↓ Browse    Enter Select    Esc Dismiss", style="Surface.TLabel").pack(anchor="w", padx=8, pady=(8, 0))
+        self.canvas.bind("<Configure>", lambda _event: self.redraw())
+        self.canvas.bind("<Motion>", self._hover)
+        self.canvas.bind("<ButtonRelease-1>", self._click)
+        self.canvas.bind("<MouseWheel>", self._wheel)
+        self.row_height = 60
+
+    def set_choices(self, choices: list[tuple[str, str]]) -> None:
+        """Replace filtered rows and reset the selection and scroll position."""
+        self.choices = choices
+        self.index = 0
+        self.canvas.yview_moveto(0)
+        self.redraw()
+
+    def redraw(self) -> None:
+        """Paint separate rounded rows with command titles and muted descriptions."""
+        shared_font = font.nametofont("TkDefaultFont", root=self)
+        self.title_font.configure(**shared_font.actual())
+        self.title_font.configure(weight="bold")
+        line = shared_font.metrics("linespace")
+        self.row_height = line * 3 + 20
+        width = max(120, self.canvas.winfo_width())
+        self.canvas.delete("all")
+        for index, (name, description) in enumerate(self.choices):
+            top = index * self.row_height
+            bottom = top + self.row_height - 5
+            radius = 10
+            self.canvas.create_polygon(4 + radius, top, width - 4 - radius, top,
+                                       width - 4, top, width - 4, top + radius,
+                                       width - 4, bottom - radius, width - 4, bottom,
+                                       width - 4 - radius, bottom, 4 + radius, bottom,
+                                       4, bottom, 4, bottom - radius, 4, top + radius, 4, top,
+                                       smooth=True, splinesteps=24, outline="",
+                                       fill=COLORS["selected"] if index == self.index else COLORS["raised"])
+            self.canvas.create_text(16, top + 9, text=name, anchor="nw", font=self.title_font,
+                                    fill=COLORS["accent"] if index == self.index else COLORS["text"])
+            self.canvas.create_text(16, top + line + 13, text=description, anchor="nw",
+                                    font="TkDefaultFont", fill=COLORS["muted"], width=max(80, width - 48))
+        total = len(self.choices) * self.row_height
+        self.canvas.configure(height=min(total, self.row_height * 4), scrollregion=(0, 0, width, total))
+
+    def move(self, step: int) -> None:
+        """Select and reveal a row without moving focus away from editable input."""
+        if not self.choices:
+            return
+        self.index = (self.index + step) % len(self.choices)
+        self.redraw()
+        top = self.index * self.row_height
+        visible = self.canvas.canvasy(0)
+        height = self.canvas.winfo_height()
+        if top < visible:
+            self.canvas.yview_moveto(top / (len(self.choices) * self.row_height))
+        elif top + self.row_height > visible + height:
+            self.canvas.yview_moveto((top + self.row_height - height) / (len(self.choices) * self.row_height))
+
+    def _hover(self, event: tk.Event) -> None:
+        """Highlight the row under the pointer using the same keyboard selection."""
+        index = int(self.canvas.canvasy(event.y) // self.row_height)
+        if 0 <= index < len(self.choices) and index != self.index:
+            self.index = index
+            self.redraw()
+
+    def _click(self, event: tk.Event) -> str:
+        """Complete only a valid clicked command row."""
+        index = int(self.canvas.canvasy(event.y) // self.row_height)
+        if 0 <= index < len(self.choices):
+            self.index = index
+            self.choose()
+        return "break"
+
+    def _wheel(self, event: tk.Event) -> str:
+        """Scroll command rows without scrolling the conversation underneath."""
+        self.canvas.yview_scroll(-round(event.delta / 120 * 3), "units")
+        return "break"
+
+
 class DropdownMenu:
     """Present rounded menu choices inline, without a native popup or decision window."""
 

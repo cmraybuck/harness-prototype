@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
+from harness_prototype.desktop_design import COLORS
 from harness_prototype.desktop import (
     ConversationView, DecisionDialog, DecisionOptions, DesktopApiClient, DesktopApiError, FluxDesktop, PermissionView, SkillPanel, desktop_main,
 )
@@ -333,6 +334,98 @@ class DynamicSkillWidgetTests(unittest.TestCase):
         for callback in self.root.tk.call("after", "info"):
             self.root.after_cancel(callback)
         self.root.destroy()
+
+    def test_command_palette_filters_navigates_completes_and_dismisses(self) -> None:
+        """Browse descriptions without submitting and preserve ordinary slash input."""
+        self.desktop.message_input.insert("1.0", "/")
+        self.desktop._update_commands()
+        self.assertEqual(len(self.desktop._command_matches), 9)
+        self.assertIn("Start a fresh conversation", self.desktop.command_menu.choices[0][1])
+        self.desktop._move_command(1)
+        self.desktop._send_key(None)
+        self.assertEqual(self.desktop.message_input.get("1.0", "end-1c"), "/model")
+        self.assertFalse(self.desktop._command_matches)
+        self.client.stream_turn.assert_not_called()
+        self.desktop.message_input.delete("1.0", tk.END)
+        self.desktop.message_input.insert("1.0", "/sta")
+        self.desktop._update_commands()
+        self.assertEqual(self.desktop._command_matches, ["/status"])
+        self.desktop._hide_commands()
+        self.desktop._update_commands()
+        self.assertFalse(self.desktop._command_matches)
+        for text in ("/unknown", "/tmp/file", "explain /help", "/skill pirate"):
+            self.desktop.message_input.delete("1.0", tk.END)
+            self.desktop.message_input.insert("1.0", text)
+            self.desktop._update_commands()
+            self.assertFalse(self.desktop._command_matches)
+
+    def test_command_rows_share_app_typography_and_pointer_selection(self) -> None:
+        """Keep rounded rows separated and follow text preferences without losing navigation."""
+        self.desktop.message_input.insert("1.0", "/")
+        self.desktop._update_commands()
+        palette = self.desktop.command_menu
+        shapes = [item for item in palette.canvas.find_all() if palette.canvas.type(item) == "polygon"]
+        self.assertEqual(len(shapes), 9)
+        self.assertEqual(palette.canvas.itemcget(shapes[0], "fill"), COLORS["selected"])
+        self.desktop._presentation["text_size"] = "large"
+        self.desktop._apply_typography()
+        self.assertEqual(palette.title_font.actual("size"),
+                         int(self.root.tk.call("font", "actual", "TkDefaultFont", "-size")))
+        self.assertEqual(palette.title_font.actual("family"),
+                         self.root.tk.call("font", "actual", "TkDefaultFont", "-family"))
+        event = MagicMock()
+        event.y = palette.row_height + 1
+        palette._hover(event)
+        self.assertEqual(palette.index, 1)
+        palette._click(event)
+        self.assertEqual(self.desktop.message_input.get("1.0", "end-1c"), "/model")
+        self.client.stream_turn.assert_not_called()
+
+    def test_help_and_status_format_local_results_without_model_calls(self) -> None:
+        """Render command results using chat formatting and backend runtime facts."""
+        self.desktop.send_turn("/help")
+        self.assertIn("/help", self.desktop.transcript.get("1.0", tk.END))
+        self.assertIn("/tool-activity", self.desktop.views["one"].command_results[-1][1])
+        self.desktop.send_turn("/status")
+        work, loaded, _failed = self.tasks.call_args.args
+        self.client.conversation_status.return_value = {
+            "model": "test-model", "server": "local", "workspace": "fixture",
+            "message_count": 2, "context_used": 100, "context_limit": 1000,
+            "active_groups": [], "active_skills": [], "character_counts": {"messages": 20},
+            "tools": [{"name": "read_file", "description": "Read text"}]}
+        loaded(work())
+        self.client.conversation_status.assert_called_once_with("one")
+        output = self.desktop.views["one"].command_results[-1][1]
+        self.assertIn("**Retained messages:** 2", output)
+        self.assertIn("read_file", output)
+        self.client.stream_turn.assert_not_called()
+        self.assertFalse(self.desktop.views["one"].turns)
+
+    def test_status_failure_stays_in_chat_without_disconnect_ui(self) -> None:
+        """Keep status-request errors local and preserve the existing connection indicator."""
+        self.desktop.status_text.set("Backend connected · Ollama available")
+        self.desktop.send_turn("/status")
+        failed = self.tasks.call_args.args[2]
+        with patch.object(self.desktop, "_show_error") as show_error:
+            failed(DesktopApiError("Local request failed."))
+        show_error.assert_not_called()
+        self.assertEqual(self.desktop.status_text.get(), "Backend connected · Ollama available")
+        self.assertIn("Command failed: Local request failed.",
+                      self.desktop.views["one"].command_results[-1][1])
+        self.client.stream_turn.assert_not_called()
+
+    def test_clear_keeps_current_model_and_workspace(self) -> None:
+        """Create a fresh conversation using current selections rather than defaults."""
+        self.desktop.model_text.set("test-model")
+        self.desktop.send_turn("/clear")
+        self.tasks.call_args.args[0]()
+        self.client.create_conversation.assert_called_once_with("test-model", Path.cwd(), [])
+        self.client.stream_turn.assert_not_called()
+
+    def test_unknown_slash_input_is_not_intercepted(self) -> None:
+        """Leave paths and unknown commands eligible for normal model submission."""
+        self.assertFalse(self.desktop._dispatch_command("one", "/unknown"))
+        self.assertFalse(self.desktop._dispatch_command("one", "/tmp/file"))
 
     def test_new_conversation_skips_picker_and_ignores_skill_defaults(self) -> None:
         """Create normally with an explicit empty skill list and no popup window."""

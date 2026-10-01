@@ -19,8 +19,9 @@ from urllib.request import Request, urlopen
 
 from .application_service import DesktopServiceHost
 from .application_state import StateStoreError
-from .desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, MOTION, TEXT_SIZES, ContextHint, DialogBody, DropdownButton, DropdownMenu, FluxTheme, SessionList, SessionSearch, draw_mark, markdown_blocks, set_application_icon
+from .desktop_design import CAPTION_GLYPHS, COLORS, FONT_FAMILY, MOTION, TEXT_SIZES, CommandPalette, ContextHint, DialogBody, DropdownButton, DropdownMenu, FluxTheme, SessionList, SessionSearch, draw_mark, markdown_blocks, set_application_icon
 from .desktop_platform import WindowFrame, display_bounds, open_link, system_reduced_motion, dark_dialog_frame
+from .main import COMMAND_DESCRIPTIONS
 
 
 REQUEST_TIMEOUT_SECONDS = 5
@@ -120,6 +121,10 @@ class DesktopApiClient:
     def get_conversation(self, conversation_id: str) -> dict[str, Any]:
         """Return current metadata for one conversation."""
         return self._request("GET", f"/conversations/{quote(conversation_id, safe='')}")
+
+    def conversation_status(self, conversation_id: str) -> dict[str, Any]:
+        """Read runtime settings and effective tool descriptions without a model request."""
+        return self._request("GET", f"/conversations/{quote(conversation_id, safe='')}/status")
 
     def skills(self, workspace: Path, conversation_id: str | None = None) -> dict[str, Any]:
         """Discover metadata or inspect the exact active conversation selection."""
@@ -264,6 +269,9 @@ class ConversationView:
         self.expanded_operations: set[tuple[str, int]] = set()
         self.expanded_content: set[str] = set()
         self.scroll_index = "1.0"
+        self.command_results: list[tuple[str, str]] = []
+        self.command_positions: list[int] = []
+        self.tool_activity_mode = "compact"
 
     def accept(self, event: dict[str, Any]) -> bool:
         """Apply one identified event once, including terminal recovery state."""
@@ -827,6 +835,13 @@ class FluxDesktop:
         self.message_input = tk.Text(composer, height=2, wrap="word", background=COLORS["surface"],
                                     highlightthickness=0, padx=8, pady=8, undo=True)
         self.message_input.grid(row=0, column=0, columnspan=4, sticky="ew")
+        self.command_menu = CommandPalette(workspace, self._complete_command)
+        self._command_matches: list[str] = []
+        self._command_suppressed: str | None = None
+        self.message_input.bind("<Up>", lambda _event: self._move_command(-1))
+        self.message_input.bind("<Down>", lambda _event: self._move_command(1))
+        self.message_input.bind("<Escape>", self._hide_commands)
+        self.message_input.bind("<Tab>", self._complete_command)
         self.message_input.bind("<Return>", self._send_key)
         self.message_input.bind("<Shift-Return>", self._newline_key)
         self.message_input.bind("<Control-Return>", self._send_key)
@@ -890,6 +905,7 @@ class FluxDesktop:
         """Apply consistent text-size preferences to shared fonts and Markdown tags."""
         size = self._presentation["text_size"]
         self.theme.set_text_size(size)
+        self.command_menu.redraw()
         points = round(TEXT_SIZES[size] * getattr(self, "_zoom_percent", 100) / 100)
         for tag, weight in (("bold", "bold"), ("italic", "italic")):
             self.transcript.tag_configure(tag, font=(FONT_FAMILY, points, weight))
@@ -1162,6 +1178,7 @@ class FluxDesktop:
             return
         self.message_input.edit_modified(False)
         self._update_composer_placeholder()
+        self._update_commands()
         if self._restoring_draft:
             return
         text = self.message_input.get("1.0", "end-1c")
@@ -1551,7 +1568,7 @@ class FluxDesktop:
             for event in view.events.values():
                 grouped.setdefault(event["turn_id"], []).append(event)
         blocks: list[tuple[tuple, str, str | None]] = []
-        if not view or not view.turns and not view.pending_message:
+        if not view or not view.turns and not view.pending_message and not view.command_results:
             blocks.append(((layout, "welcome"), "welcome", None))
         if view:
             for turn_id, turn in view.turns.items():
@@ -1560,7 +1577,7 @@ class FluxDesktop:
                 signature = (layout, turn_id, turn.get("user_prompt", ""), turn.get("status"),
                              tuple((event["sequence"], id(event)) for event in events),
                              tuple(str(stored.get("content", "")) for stored in turn.get("events", []) if stored.get("type") == "model_response") if not events else (),
-                             view.active_turn_id == turn_id, turn_id in view.expanded_working,
+                             view.tool_activity_mode, view.active_turn_id == turn_id, turn_id in view.expanded_working,
                              tuple(sorted(item for item in view.expanded_operations if item[0] == turn_id)),
                              tuple(sorted(item for item in view.expanded_content if item.startswith(("user:" + turn_id, turn_id + ":")))))
                 blocks.append((signature, "turn", turn_id))
@@ -1568,6 +1585,11 @@ class FluxDesktop:
                 blocks.append(((layout, "pending", view.pending_message, "pending" in view.expanded_content), "pending", None))
             if view.error:
                 blocks.append(((layout, "error", view.error), "error", None))
+            for index, (command, output) in enumerate(view.command_results):
+                position = view.command_positions[index]
+                following = [offset for offset, block in enumerate(blocks) if block[1] == "turn"]
+                offset = following[position] if position < len(following) else len(blocks)
+                blocks.insert(offset, ((layout, "command", index, command, output, tuple(sorted(view.expanded_content))), "command", str(index)))
         common = 0
         while common < min(len(blocks), len(self._rendered_blocks)) and blocks[common][0] == self._rendered_blocks[common][0]:
             common += 1
@@ -1604,6 +1626,10 @@ class FluxDesktop:
                 self.transcript.insert(tk.END, "What are we doing today?\n", "welcome")
             elif kind == "turn":
                 self._render_turn(view, turn_id, view.turns[turn_id], grouped[turn_id])
+            elif kind == "command":
+                command, output = view.command_results[int(turn_id)]
+                self.transcript.insert(tk.END, "\n" + command + "\n", "bold")
+                self._markdown(output, "command:" + turn_id, view)
             elif kind == "pending":
                 self._user_bubble(view.pending_message, "pending", view)
             else:
@@ -1631,6 +1657,7 @@ class FluxDesktop:
         self.model_selector.configure(state="disabled" if busy else "normal")
         self.workspace_button.configure(state="disabled" if busy else "normal")
         self._update_composer_placeholder()
+        self._update_commands()
 
     def _update_composer_placeholder(self, _event: object = None) -> None:
         """Show a visual prompt hint without inserting it into drafts or submitted messages."""
@@ -1649,6 +1676,8 @@ class FluxDesktop:
         subset.events = {(turn_id, event["sequence"]): event for event in events}
         activity = [(tag, text) for tag, text in subset.render()
                     if (tag == "status" and "Working" in text) or (tag == "code" and text.startswith("Result ·"))]
+        if view.tool_activity_mode == "hidden":
+            activity = [(tag, text) for tag, text in activity if tag == "code" and '"error"' in text]
         if activity:
             self._working_section(view, turn_id, activity)
         # Preserve interleaved assistant, permission receipt, and terminal event order.
@@ -1746,7 +1775,7 @@ class FluxDesktop:
 
     def _working_section(self, view: ConversationView, turn_id: str, rows: list[tuple[str, str]]) -> None:
         """Render one collapsed Working section with independently expandable safe details."""
-        expanded = turn_id in view.expanded_working
+        expanded = view.tool_activity_mode == "full" or turn_id in view.expanded_working
         count = sum(text.startswith("Result ·") for _, text in rows)
         frame = ttk.Frame(self.transcript, style="Surface.TFrame", padding=8)
         def toggle() -> None:
@@ -1872,9 +1901,120 @@ class FluxDesktop:
             view.expanded_content.add(key)
         self._render_conversation()
 
+    def _update_commands(self) -> None:
+        """Filter a composer-attached command menu without taking input focus."""
+        text = self.message_input.get("1.0", "end-1c")
+        matches = [name for name in COMMAND_DESCRIPTIONS if name.startswith(text.casefold())] if text.startswith("/") and not any(c.isspace() for c in text) else []
+        if text == self._command_suppressed:
+            matches = []
+        if matches != self._command_matches:
+            self._command_matches = matches
+            self.command_menu.set_choices([(name, COMMAND_DESCRIPTIONS[name]) for name in matches])
+        if matches:
+            self.command_menu.place(in_=self.message_input, relx=0, rely=0, relwidth=1, anchor="sw")
+            self.command_menu.lift()
+        else:
+            self.command_menu.place_forget()
+
+    def _hide_commands(self, _event: object = None) -> str:
+        """Dismiss suggestions until the input changes."""
+        self._command_suppressed = self.message_input.get("1.0", "end-1c")
+        self._command_matches = []
+        self.command_menu.place_forget()
+        return "break"
+
+    def _move_command(self, step: int) -> str | None:
+        """Navigate suggestions while preserving ordinary text cursor movement."""
+        if not self._command_matches:
+            return None
+        self.command_menu.move(step)
+        return "break"
+
+    def _complete_command(self, _event: object = None) -> str | None:
+        """Insert the selected command; a subsequent Enter submits it."""
+        if not self._command_matches:
+            return None
+        command = self._command_matches[self.command_menu.index]
+        self.message_input.delete("1.0", tk.END)
+        self.message_input.insert("1.0", command + (" " if command == "/skill" else ""))
+        self._hide_commands()
+        self.message_input.focus_set()
+        return "break"
+
+    def _command_output(self, owner: str, command: str, output: str) -> None:
+        """Keep local command results out of model context and scoped to their chat."""
+        view = self.views.setdefault(owner, ConversationView())
+        view.command_positions.append(len(view.turns))
+        if len(output) > DISPLAY_TEXT_LIMIT:
+            output = output[:DISPLAY_TEXT_LIMIT] + "\n\nDisplay truncated."
+        view.command_results.append((command, output))
+        if owner == self.active_conversation_id:
+            self._render_conversation()
+
+    def _dispatch_command(self, owner: str, command: str) -> bool:
+        """Execute exact terminal commands through existing desktop actions."""
+        normalized = command.casefold()
+        if normalized not in COMMAND_DESCRIPTIONS and not normalized.startswith("/skill "):
+            return False
+        self.message_input.delete("1.0", tk.END)
+        self._hide_commands()
+        self._drafts[owner] = ""
+        self._draft_dirty.add(owner)
+        view = self.views[owner]
+        if normalized == "/help":
+            self._command_output(owner, command, "\n".join(f"- **{name}** — {description}" for name, description in COMMAND_DESCRIPTIONS.items()) + "\n\n↑/↓ browse · Enter or Tab selects · Enter submits · Esc dismisses")
+        elif normalized == "/skills":
+            self.open_skills()
+        elif normalized == "/skill" or normalized.startswith("/skill "):
+            identifiers = [item.strip() for item in command[6:].strip().split(",") if item.strip()]
+            self.activate_skills(owner, identifiers)
+        elif normalized == "/clear":
+            model, workspace = self.model_text.get(), Path(self.workspace_text.get())
+            def created(metadata: dict[str, Any]) -> None:
+                """Select a fresh chat using the current model and workspace."""
+                if self.active_conversation_id == owner:
+                    self._select_conversation(metadata)
+                self._command_output(metadata["conversation_id"], command, "Fresh conversation started. Active skills cleared.")
+                self._reload_sessions()
+            self._run_task(lambda: self.client.create_conversation(model, workspace, []), created)
+        elif normalized == "/model":
+            previous_model = self.model_text.get()
+            def chosen(model: str) -> None:
+                """Keep model selection bound to the requesting chat."""
+                if model != previous_model:
+                    self._confirm_selection(owner, "model", model)
+            DropdownMenu(self.message_input, [(model, model) for model in self.models], chosen, self.model_text.get())
+        elif normalized == "/tool-activity":
+            def chosen(mode: str) -> None:
+                """Change routine activity visibility without hiding errors or permissions."""
+                view.tool_activity_mode = mode
+                self._command_output(owner, command, "Tool activity: **" + mode + "**")
+            DropdownMenu(self.message_input, [(mode.title(), mode) for mode in ("full", "compact", "hidden")], chosen, view.tool_activity_mode)
+        elif normalized in {"/status", "/tools"}:
+            def loaded(status: dict[str, Any]) -> None:
+                """Format backend-owned runtime facts without exposing raw payloads."""
+                if normalized == "/tools":
+                    output = "\n".join(f"- **{item['name']}** — {item['description']}" for item in status["tools"])
+                else:
+                    output = "\n".join(f"- **{label}:** {status[key]}" for label, key in (("Model", "model"), ("Server", "server"), ("Workspace", "workspace"), ("Retained messages", "message_count"), ("Context estimate", "context_used"), ("Context limit", "context_limit")))
+                    output += "\n- **Capabilities:** " + (", ".join(status["active_groups"]) or "none active")
+                    output += "\n- **Skills:** " + (", ".join(status["active_skills"]) or "none active")
+                    output += "\n- **Model tools:** " + ", ".join(item["name"] for item in status["tools"])
+                    output += "\n- **Context characters:** " + ", ".join(f"{key}={value}" for key, value in status["character_counts"].items())
+                    output += "\n- **Tool activity:** " + view.tool_activity_mode
+                self._command_output(owner, command, output)
+            def failed(error: Exception) -> None:
+                """Report a local command failure in its chat without changing Ollama status."""
+                self._command_output(owner, command, "Command failed: " + str(error))
+            self._run_task(lambda: self.client.conversation_status(owner), loaded, failed)
+        elif normalized == "/exit":
+            self.close()
+        return True
+
     def _send_key(self, _event: object) -> str:
         """Submit keyboard input without inserting an extra newline."""
-        self.send_turn()
+        if self._complete_command() is None:
+            self.send_turn()
         return "break"
 
     def send_turn(self, message: str | None = None) -> None:
@@ -1890,15 +2030,7 @@ class FluxDesktop:
         if not message.strip():
             return
         command = message.strip()
-        normalized = command.lower()
-        if normalized == "/skills":
-            self.message_input.delete("1.0", tk.END)
-            self.open_skills()
-            return
-        if normalized == "/skill" or normalized.startswith("/skill "):
-            identifiers = [item.strip() for item in command[6:].strip().split(",") if item.strip()]
-            self.message_input.delete("1.0", tk.END)
-            self.activate_skills(conversation_id, identifiers)
+        if self._dispatch_command(conversation_id, command):
             return
         if view.error:
             return
@@ -2247,6 +2379,9 @@ class FluxDesktop:
                 focused_index = selection[0] if selection else 0
                 self._skill_panel.frame.destroy()
             self._skill_metadata[conversation_id] = catalog
+            output = "\n".join(f"- **{item['id']}** — {item.get('description') or item.get('error') or item.get('name', '')}" for item in catalog.get("skills", [])) or "No installed skills."
+            output += "\n\nActive skills: " + (", ".join(catalog.get("active_skills", [])) or "none")
+            self._command_output(conversation_id, "/skills", output)
             self._render_skills()
             self._skill_panel = SkillPanel(self._skill_container, catalog,
                                           lambda identifiers: self.activate_skills(conversation_id, identifiers),
@@ -2276,6 +2411,7 @@ class FluxDesktop:
             self._skill_changing.discard(conversation_id)
             self._skill_requests[conversation_id] = object()
             self._skill_metadata[conversation_id] = metadata
+            self._command_output(conversation_id, "/skill", "Active skills: **" + (", ".join(metadata.get("active_skills", [])) or "none") + "** · Conversation context retained")
             if view.error:
                 self._load_history(conversation_id)
             if self.active_conversation_id == conversation_id:
@@ -2288,6 +2424,7 @@ class FluxDesktop:
         def failed(error: Exception) -> None:
             """Keep the prior set and show failures without automatically retrying changes."""
             self._skill_changing.discard(conversation_id)
+            self._command_output(conversation_id, "/skill", "Skill selection failed: " + str(error))
             if self.active_conversation_id == conversation_id:
                 self._render_conversation()
                 self._show_error(error)
